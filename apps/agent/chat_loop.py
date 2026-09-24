@@ -524,6 +524,8 @@ class ChatLoop:
             # S-2：正文走 `delta` 事件（页面边生成边显示）。**故意绕开 reporter**——
             # 它有 1.5s 节流与 40 条上限，压掉一条增量就是丢正文；增量自己有节奏（见 opencode_server）。
             emit_delta=lambda payload: emit("delta", payload),
+            # S-4：思考单独走 `thinking` 事件（页面折叠展示）；同样绕开 reporter（压掉就是丢内容）
+            emit_thinking=lambda payload: emit("thinking", payload),
             approvals=approvals,
             approval_timeout_seconds=float(self.config.chat_approval_timeout_seconds),
             cancel_check=lambda: self._turn_cancelled(token, agent_id, turn_id),

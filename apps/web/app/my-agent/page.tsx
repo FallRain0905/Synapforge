@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowUp, Bot, Cpu, FileText, MessageSquare, Paperclip, Play, Plus, RefreshCcw, Send, ShieldAlert, Sparkles, Square, Trash2, Wrench, X } from "lucide-react";
+import { Activity, ArrowUp, Bot, Brain, Cpu, FileText, MessageSquare, Paperclip, Play, Plus, RefreshCcw, Send, ShieldAlert, Sparkles, Square, Trash2, Wrench, X } from "lucide-react";
 import Link from "next/link";
 import { AgentResponse } from "../../components/agent-response";
 import { Markdown } from "../../components/markdown";
@@ -565,8 +565,21 @@ export default function MyAgentPage() {
       .join("");
     return streamed ? [...whole, streamed] : whole;
   }, [events]);
-  /** 抽屉里的"过程事件"：增量不算过程事件（几百条会把抽屉刷屏），它们显示在气泡里。 */
-  const processEvents = useMemo(() => events.filter((event) => event.event_type !== "delta"), [events]);
+  /** 抽屉里的"过程事件"：增量与思考都不算过程事件（几百条会把抽屉刷屏），它们在别处显示。 */
+  const processEvents = useMemo(
+    () => events.filter((event) => event.event_type !== "delta" && event.event_type !== "thinking"),
+    [events],
+  );
+  /** S-4：思考过程（reasoning 增量拼起来）——默认收起，点开看；与正文严格分开。 */
+  const thinkingText = useMemo(
+    () =>
+      events
+        .filter((event) => event.event_type === "thinking")
+        .map((event) => String(event.payload.text ?? ""))
+        .join(""),
+    [events],
+  );
+  const [thinkingOpen, setThinkingOpen] = useState(false);
   /** 这一轮有没有走增量通道——决定状态文案（**不假装**：CLI 通道就说"分段"）。 */
   const hasDeltas = useMemo(() => events.some((event) => event.event_type === "delta"), [events]);
   const liveTurnId = detailTurn?.id ?? "";
@@ -749,7 +762,9 @@ export default function MyAgentPage() {
                                 ? "等你批准（执行体已停下等你的决定）"
                                 : hasDeltas
                                   ? "生成中（增量显示）"
-                                  : "生成中（分段显示，不是逐字流）"}
+                                  : thinkingText
+                                    ? "思考中（还没开始写正文）"
+                                    : "生成中（分段显示，不是逐字流）"}
                             </div>
                           </div>
                         ) : (
@@ -1138,6 +1153,27 @@ export default function MyAgentPage() {
                     </dd>
                   </dl>
                   <div className="my-agent-events" data-testid="my-agent-events">
+                    {thinkingText ? (
+                      <div className="my-agent-thinking" data-testid="my-agent-thinking">
+                        <button
+                          type="button"
+                          className="my-agent-thinking-head"
+                          aria-expanded={thinkingOpen}
+                          data-testid="my-agent-thinking-toggle"
+                          onClick={() => setThinkingOpen((open) => !open)}
+                        >
+                          <Brain size={13} /> 思考过程
+                          <span className="my-agent-thinking-hint">
+                            {thinkingOpen ? "点一下收起" : `${thinkingText.length} 字，点一下展开`}
+                          </span>
+                        </button>
+                        {thinkingOpen ? (
+                          <div className="my-agent-thinking-body" data-testid="my-agent-thinking-body">
+                            {thinkingText}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
                     {processEvents.length ? <div className="my-agent-events-label">过程事件</div> : null}
                     {processEvents.map((event) => {
                       const Icon = EVENT_ICON[event.event_type] ?? Activity;

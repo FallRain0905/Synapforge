@@ -367,6 +367,7 @@ class ServeTurnTests(unittest.TestCase):
         self.client = ServerClient(self.fake.base_url, PASSWORD, log=lambda _m: None)
         self.reporter = CannedReporter()
         self.deltas: list[dict] = []
+        self.thinking: list[dict] = []
 
     def tearDown(self) -> None:
         self.fake.stop()
@@ -393,6 +394,7 @@ class ServeTurnTests(unittest.TestCase):
         ]
         if deltas:
             kwargs.setdefault("emit_delta", self.deltas.append)
+            kwargs.setdefault("emit_thinking", self.thinking.append)
         return run_serve_turn(
             self.client,
             prompt="你好",
@@ -511,6 +513,44 @@ class ServeTurnTests(unittest.TestCase):
         self.assertTrue(self.fake.state.aborts)
         self.assertTrue(self.fake.state.aborts[0].endswith("/abort"))
 
+
+    def test_thinking_is_emitted_separately_from_the_answer(self) -> None:
+        """S-4：思考与正文**分开走两条事件**——思考进 `thinking`，正文里一个字都不能混。"""
+
+        outcome = self.run_turn()
+        self.assertTrue(outcome.ok, outcome.error)
+        streamed = "".join(item["text"] for item in self.deltas)
+        thought = "".join(item["text"] for item in self.thinking)
+        self.assertEqual(streamed, "第一段正文")
+        self.assertEqual(thought, "The user wants a")
+        self.assertNotIn("The user wants", streamed)
+        self.assertEqual(self.reporter.events[-1][1]["thinking_events"], len(self.thinking))
+
+    def test_thinking_throttle_never_loses_text(self) -> None:
+        """思考与正文同一套"节流 + 封顶 + 收尾补发"：封顶之后剩下的必须在最后一条里补齐。"""
+
+        self.fake.state.pending_events = [
+            {"type": "message.part.updated", "properties": {"part": {"id": "prt_think", "type": "reasoning", "text": ""}}},
+            *[
+                {"type": "message.part.delta", "properties": {"partID": "prt_think", "field": "text", "delta": f"{index:02d}"}}
+                for index in range(9)
+            ],
+            {"type": "session.idle", "properties": {"sessionID": "ses_fake_created"}},
+        ]
+        outcome = run_serve_turn(
+            self.client,
+            prompt="你好",
+            reporter=self.reporter,
+            log=lambda _m: None,
+            emit_thinking=self.thinking.append,
+            thinking_interval_seconds=0.0,
+            max_thinking_events=3,
+            session_key="ses_fake_created",
+            timeout=15.0,
+        )
+        self.assertTrue(outcome.ok, outcome.error)
+        self.assertLessEqual(len(self.thinking), 4)
+        self.assertEqual("".join(item["text"] for item in self.thinking), "".join(f"{index:02d}" for index in range(9)))
 
     def test_permission_card_is_reported_and_member_decision_wins(self) -> None:
             """S-3：权限请求变成平台卡片，回复按人的决定走（真机实测 `reject` 之后确实没执行）。"""

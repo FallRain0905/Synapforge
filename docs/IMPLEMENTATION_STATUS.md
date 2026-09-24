@@ -891,3 +891,11 @@ JSON parse: domain schemas, agent gateway/session schemas    -> passed
 - **机关**：执行体单元的 `PrivateTmp=yes` 让它看到的 `/tmp` 是私有的（真实路径 `/tmp/systemd-private-…-map-agent@cloud.service-…/tmp`）——在宿主 `/tmp` 查文件永远"没有"，拿它当证据会得出错误结论（这一期就差点误判）。
 - 测试：Agent **413** 项（+4）、API **554** 项（+10）；前端 tsc + 构建通过；`server_verify` 22/22。交接 `docs/handoffs/MY_AGENT_M5C_S3_APPROVAL_CARDS_HANDOFF.md`。边界：CLI 回退通道没有权限事件（仍是 `--auto`）；默认保守（没人批不执行），要无人值守放行把 `chat_approvals=false`。
 - **本期自己引入又修掉的回归**：新表 `agent_turn_approvals` 的外键没进删除路径，导致**带权限请求的会话删不掉**（界面点确认没反应）——`delete_conversation` 现在先删审批行再删轮次，并加了契约测试。**规律**：往"挂在轮次上"的表里加东西时必须同步改删除路径（历史上 events 也是这么补的）。
+
+## MY-AGENT M-5c S-4（2026-09-24：思考块已上线；强度按证据暂缓）
+
+- **思考块（已交付）**：内核把 `reasoning` 段增量按新事件 `thinking` 发出去（绕开 reporter、节奏 1.2s、**封顶后收尾补发不丢字**；`process.exited` 带 `thinking_events` 对账）；页面抽屉里「思考过程」折叠块（默认收起）+ 状态文案「思考中（还没开始写正文）」；`thinking`/`delta` 都不进过程事件列表。
+  **真跑实测**：224 字推理原文可见；气泡只有答案；事件表 `thinking×5 / delta×4`；**全库回答混入思考的轮次 = 0**。测试：`test_opencode_server.py` 25 项（+2），Agent 415 项。
+- **强度（`--variant`）没上，附证据**：CLI 通道接受该参数（`high/minimal/max/default` exit=0，同题 token 画像不同），但**常驻通道把 `message.model.variant` 收下却不生效**——发完消息回读会话仍是 `model.variant = "default"`（v1/v2 两条读接口一致）。上它就是"设了没生效"的静默坑；两条可选路（①只做 CLI 通道并在页面标注；②继续探 serve 侧配置声明 `variants` 的正确形状）见交接 §3。
+- **顺手修的两个真问题**：① **中间列横向溢出**（`.my-agent-main`/`.panel` 缺 `min-width: 0`，宽内容把列撑到 1353px / 容器 708px，输入框与发送键跑到视口外→"点不着打不进字"）——已修并注入验证；② **设备授权 24h 过期导致对话通道中断**（执行体每 5s `401 device_project_token_expired`、新建会话报裸错误码）——已用 30 天新授权恢复；**设计缺口**：到期无提醒、无续期提示，建议"授权可选有效期 + 列表显示到期 + 一键续期"（细交接 §4）。
+- 交接 `docs/handoffs/MY_AGENT_M5C_S4_THINKING_HANDOFF.md`。

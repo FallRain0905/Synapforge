@@ -1289,8 +1289,12 @@ button.profile-avatar { border: 0; cursor: pointer; }
   min-height: 0;
   align-items: stretch;
 }
-.my-agent-main { display: flex; min-height: 0; }
-.my-agent-main > .panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+/* `min-width: 0` 是必须的（flex/grid 子项默认 `min-width: auto` = 内容最小宽度）：
+   对话里出现宽内容（长代码块、宽表格、选择卡）时，中间列会被撑到比容器还宽——
+   实测一次：容器 708px、列被撑到 1353px，页面横向溢出、输入框与发送键跑到视口外
+   （表现为"点不着、打不进字"）。这个坑在这个仓库里踩过不止一次。 */
+.my-agent-main { display: flex; min-height: 0; min-width: 0; }
+.my-agent-main > .panel { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
 .my-agent-main .ask-messages { padding: 6px 4px; gap: 14px; }
 
 /* 顶部工具条：标题 + 设备/模型选择，选择器做成"小控件"而不是裸下拉 */
@@ -1669,6 +1673,34 @@ button.profile-avatar { border: 0; cursor: pointer; }
 }
 .my-agent-attach-chip button:hover { color: var(--text); }
 .my-agent-attach-button { flex: 0 0 auto; height: 44px; width: 44px; padding: 0; justify-content: center; }
+
+/* S-4：思考过程（默认收起；与正文严格分开，不混进气泡） */
+.my-agent-thinking { margin-bottom: 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-muted); }
+.my-agent-thinking-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.my-agent-thinking-head > svg { flex: 0 0 auto; color: var(--muted); }
+.my-agent-thinking-hint { margin-left: auto; color: var(--muted); font-size: 11.5px; }
+.my-agent-thinking-body {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 0 9px 9px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 
 /* S-3：权限请求卡片（执行体停下来等人批；三档决定与 opencode 的回复一一对应） */
 .my-agent-approvals { margin-top: 10px; display: grid; gap: 6px; }

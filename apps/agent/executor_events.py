@@ -215,7 +215,12 @@ class ExecutorEventReporter:
         if event_type == "text":
             message = str(part.get("text") or "").strip()
             if message:
-                self._send("agent.message", {"text": message[:500]})
+                # S-4：opencode 的思考块也是 `text` 事件，靠 `part.type == "reasoning"` 区分
+                # （常驻通道那边踩过：两者的 `field` 都是 `text`，只有段类型能分开）。
+                if str(part.get("type") or "") == "reasoning":
+                    self._send("thinking", {"text": message[:800]})
+                else:
+                    self._send("agent.message", {"text": message[:500]})
             return
         if event_type == "tool_use":
             self._handle_opencode_tool(part)

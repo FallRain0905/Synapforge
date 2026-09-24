@@ -500,8 +500,11 @@ def run_serve_turn(
     agent: str | None = None,
     session_key: str | None = None,
     emit_delta: Callable[[dict[str, Any]], None] | None = None,
+    emit_thinking: Callable[[dict[str, Any]], None] | None = None,
     delta_interval_seconds: float = 0.8,
+    thinking_interval_seconds: float = 1.2,
     max_delta_events: int = 240,
+    max_thinking_events: int = 160,
     approvals: Any | None = None,
     approval_timeout_seconds: float = 300.0,
     cancel: threading.Event | None = None,
@@ -514,17 +517,13 @@ def run_serve_turn(
 ) -> ServeTurnOutcome:
     """跑完一轮：订阅事件 → 发消息（阻塞）→ 汇总结果。
 
-    **正文怎么出去（S-2）**：给了 `emit_delta` 就把逐字增量按 `delta` 事件发出去（页面边生成边显示）；
-    没给就退回"每段一条 `agent.message`"的老口径。delta **不走 reporter**——reporter 有 1.5s 节流与
-    40 条上限，用来压"过程事件"是对的，但**压掉一条增量就是丢正文**，所以增量有自己的节奏：
-    攒够 `delta_interval_seconds` 或攒够一小段文本才发一条，且**最后一定把剩下的补发**（不丢字）。
+    **正文（S-2）**：给了 `emit_delta` 就把逐字增量按 `delta` 事件发出去（页面边生成边显示）；没给就退回
+    "每段一条 `agent.message`"。delta **不走 reporter**（它有 1.5s 节流与 40 条上限，压掉一条增量就是丢正文）。
 
-    **权限（S-3）**：给了 `approvals` 通道就走真卡片——上报请求 → 等人批（有界等待）→ 按决定回复 opencode；
-    **等不到人批就 `reject` 并标 EXPIRED**（没人批 = 不执行，不假装有人同意）。没给通道（独立使用/测试）时
-    沿用 `auto_approve_permissions` 的 `--auto` 等价语义。
-    实测的回复取值：`once` / `always` 会执行，`reject` **确实不执行**。
+    **思考（S-4）**：`emit_thinking` 给了就把 `reasoning` 段的增量按 `thinking` 事件发出去（页面折叠展示）。
+    思考与正文**严格分开**：类型从 `message.part.updated` 的 `part.type` 学（S-2 踩过——两者的 `field` 都是 `text`）。
 
-    过程事件（`tool.completed` / `file.changed`）照旧走 reporter。
+    **权限（S-3）**：给了 `approvals` 通道就走真卡片；等不到人批按"不执行"处理（详见 `_decide_permission`）。
     """
 
     cancel_event = cancel or threading.Event()
@@ -542,6 +541,10 @@ def run_serve_turn(
         "part_types": {},
         "unknown": {},
         "unknown_deltas": 0,
+        # 思考（S-4）：与正文字段严格分开攒、分开发；`thinking_events` 进 process.exited 便于对账
+        "thinking_pending": "",
+        "thinking_events": 0,
+        "last_thinking_at": float("-inf"),
         # 工具名按 callID 记一份：权限请求里只给 callID，卡片上要显示"是哪个工具在要权限"
         "tool_calls": {},
         "permission_replies": [],
@@ -552,10 +555,12 @@ def run_serve_turn(
     }
 
     def accept_delta(part_id: str, chunk: str) -> None:
-        """把一段增量并入正文缓冲（只认已知的 text 段；思考段丢弃；类型未知先攒着不猜）。"""
+        """把一段增量按**段的类型**分流：`text` 进正文、`reasoning` 进思考、类型未知先攒着不猜。"""
 
         kind = state["part_types"].get(part_id)
         if kind == "reasoning":
+            state["thinking_pending"] += chunk
+            maybe_emit_thinking()
             return
         if kind is None:
             state["unknown"][part_id] = state["unknown"].get(part_id, "") + chunk
@@ -564,6 +569,23 @@ def run_serve_turn(
         state["part_text"] += chunk
         state["pending"] += chunk
         maybe_emit_delta()
+
+    def maybe_emit_thinking(force: bool = False) -> None:
+        """把攒下的思考增量发一条 `thinking`（与 `delta` 同一套"节流 + 不丢字"口径）。"""
+
+        pending = state["thinking_pending"]
+        if not pending or emit_thinking is None:
+            return
+        now = clock()
+        if not force:
+            if state["thinking_events"] >= max_thinking_events:
+                return
+            if now - state["last_thinking_at"] < thinking_interval_seconds and len(pending) < 60:
+                return
+        state["thinking_pending"] = ""
+        state["last_thinking_at"] = now
+        state["thinking_events"] += 1
+        emit_thinking({"text": pending, "part_id": state["part_id"]})
 
     def learn_part(part: dict[str, Any]) -> None:
         """`message.part.updated` 是**部分的权威形状**：记住类型；类型一到就把攒着的增量定性。"""
@@ -604,6 +626,8 @@ def run_serve_turn(
         emit_delta({"text": pending, "part_id": state["part_id"]})
 
     def flush_part() -> None:
+        # 收尾把两边的余量都补发掉（思考与正文各自成事件，绝不合并）
+        maybe_emit_thinking(force=True)
         if emit_delta is not None:
             # 常驻通道：正文已经按 delta 出去了，收尾只补最后没发完的那一点
             maybe_emit_delta(force=True)
@@ -764,6 +788,7 @@ def run_serve_turn(
             "delta_events": int(state["delta_events"]),
             # 类型未知而没敢当正文的增量条数（正常应为 0；不为 0 说明事件形状变了，查这里）
             "unknown_deltas": int(state["unknown_deltas"]),
+            "thinking_events": int(state["thinking_events"]),
             "permissions": int(state["permissions"]),
             **reporter.stats(),
         })

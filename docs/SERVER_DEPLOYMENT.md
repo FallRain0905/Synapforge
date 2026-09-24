@@ -345,6 +345,10 @@ MAP_VERIFY_EMAIL=you@example.com MAP_VERIFY_PASSWORD=<口令> bash /root/deploy/
 
 | 2026-09-24 | **M-5c S-3 权限卡片**（迁移 `027_agent_turn_approvals.sql` + 四个接口；内核把 `permission.asked` 组卡上报并**有界等待**人批，超时=不执行；页面待批准卡片「批准一次/本次都允许/拒绝」；顺带修"新会话继承上一条角色"与"被拒后 0 字回复无说明"） | `server_verify.sh` **22/22**（本轮三次发布）；**真机两端验收**：拒绝 → 卡片 `is-denied`、journal `→ reject（已回复：True）`、**执行体私有 tmp 里没有该文件**；批准（always）→ 文件存在、内容 `APPROVED`。**机关**：单元 `PrivateTmp=yes` ⇒ 执行体的 `/tmp` 是私有的（`/tmp/systemd-private-…-map-agent@cloud.service-…/tmp`），在宿主 `/tmp` 查文件会误判"没写出来" |
 
+| 2026-09-24 | **M-5c S-4：思考块可见**（内核把 `reasoning` 段按 `thinking` 事件发出，绕开 reporter、封顶后补发不丢字；页面抽屉「思考过程」折叠块 + 「思考中」文案）+ **修中间列横向溢出**（`.my-agent-main` 与 `.panel` 缺 `min-width:0`：宽内容把列撑到 1353px、容器只有 708px，输入框与发送键跑出视口→"点不着打不进字"） | `server_verify.sh` **22/22**（两次发布）；真跑实测：224 字推理在抽屉可见、气泡只有答案、事件 `thinking×5/delta×4`、**全库回答混入思考 = 0**。**强度（`--variant`）按证据暂缓**：常驻通道收下 `model.variant` 但不生效（回读仍是 `variant:"default"`） |
+
+| 2026-09-24 | **运维事件：设备授权过期导致对话通道中断（已处置）**（`device-cloud-01` 的三条项目授权都是 24h TTL，最后一条 04:38 到期 → 执行体每 5 秒 `401 device_project_token_expired`、页面新建会话报裸错误码 `device_project_grant_missing`） | 生成 **30 天**新授权（含 `chat.run` 全套 14 项能力）→ 执行体 `--grant-only` 应用 → 重启 → 恢复（设备 active、无 401、新建会话与真跑一轮均成功）；**设计缺口已记录**：默认 TTL 86400s 且到期无提醒/无续期提示，建议"授权可选有效期 + 列表显示到期时间 + 一键续期" |
+
 发布 W-1 时同步更新了服务器上的 `/root/deploy/server_verify.sh`（tarball 只覆盖 `/opt` 下的副本，
 `/root/deploy` 里的脚本要单独上传——**下次改自检脚本别忘了这一步**）。新增的两条会话内断言
 （工作区概览结构 + 聊天流 200）在提供 `MAP_VERIFY_EMAIL/PASSWORD` 时才会执行。
