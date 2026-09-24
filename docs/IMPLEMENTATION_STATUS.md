@@ -7,6 +7,13 @@
 > 状态口径：DONE 表示开发版链路已实现并有测试；PARTIAL 表示存在明确生产差距；TODO 表示尚未实现。
 >
 > **当前主线**：`docs/DEMO_1_0_IMPLEMENTATION_PLAN.md`（Demo 1.0 用户体验主线，阶段 UX-0 至 UX-7）。新工作优先按该计划推进；本文件的「已完成」列表按阶段归档，不承担计划职责。
+>
+> **仓库托管（2026-09-24）**：源码在 **github.com/FallRain0905/Synapforge**（**公开仓库**，默认分支 `master`，受管文件 480 个 / 6.1 MB）。
+> 上传前做了三件事：① `.gitignore` 补全（`.infra/` 本地 PostgreSQL/MinIO 有 1GB、`dist-sidecar/`、`apps/desktop/dist/`、
+> `apps/api/data/` 运行数据、`.venv/` 等）——构建产物与运行数据都不进仓库；② **凭据脱敏**：docs 里 IP 入口的 nginx Basic
+> 口令及其旧口令共 11 处已替换为 `<Basic 口令已脱敏>`；③ 清掉根目录一个 0 字节的误建文件。
+> 口径：**仓库里不放任何口令/密钥**——服务器 root 口令、平台账号口令、设备/项目令牌、模型 API key 只留在 `~/.ssh/*.secret`、
+> 平台库与执行体的 0600 配置文件里。文档中仍有平台/执行体的 IP（不含凭据）。
 
 ## 已完成
 
