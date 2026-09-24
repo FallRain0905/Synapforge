@@ -2507,6 +2507,16 @@ export type MyAgentRole = {
   description: string;
   /** 这个角色**能执行命令或写文件**（来自角色文件的 tools 开关）：页面要如实标注"会改动工作目录"。 */
   executes: boolean;
+  /** 角色文件内容的 sha256 前 12 位：页面标"定义版本"，便于与仓库里那份对照（R-4）。 */
+  sha256: string;
+  bytes: number;
+  modified_at: string;
+  /** 「硬规则（禁令）」一节的前三条摘要：抽屉里直接摆出来（R-4）。 */
+  rules: string[];
+  /** 与**部署清单**不一致 = 执行体上这份被人手工改过（页面要告警，不要假装是仓库里那份）。 */
+  drifted: boolean;
+  /** 部署清单写下的时间（就是"这份角色是什么时候从仓库装过来的"）。 */
+  installed_at: string;
 };
 
 export type MyAgentEndpoint = {

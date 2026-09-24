@@ -452,6 +452,13 @@ def list_my_agents(store: Any, member_id: str) -> list[MyAgentEndpoint]:
                         name=name,
                         description=str(item.get("description") or "").strip(),
                         executes=bool(item.get("executes")),
+                        # R-4：指纹/摘要/漂移照原样带给页面（平台只做展示，不改写执行体报的哈希）
+                        sha256=str(item.get("sha256") or ""),
+                        bytes=int(item.get("bytes") or 0),
+                        modified_at=str(item.get("modified_at") or ""),
+                        rules=[str(one) for one in (item.get("rules") or [])][:3],
+                        drifted=bool(item.get("drifted")),
+                        installed_at=str(item.get("installed_at") or ""),
                     )
                 )
         last_seen = _parse_time(row["last_seen"])

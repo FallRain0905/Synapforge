@@ -114,6 +114,26 @@ if [[ -d "$ROLES_SRC" ]] && compgen -G "$ROLES_SRC/mm-*.md" >/dev/null; then
   for role_file in "$ROLES_DST"/mm-*.md; do
     head -1 "$role_file" | grep -q '^---$' || { echo "角色文件缺 frontmatter：$role_file" >&2; exit 1; }
   done
+  # M-6 R-4：写一份**部署清单**（角色名 → 内容 sha256 + 安装时间）。
+  # 内核拿它当漂移判据：执行体上的 md 与清单不一致 = 有人手工改过（页面会标出来）。
+  # 它不是角色（opencode 只认 *.md），放同目录便于"清单与文件一起搬"。
+  python3 - "$ROLES_DST" <<'PY'
+import hashlib, json, pathlib, sys
+from datetime import datetime, timezone
+
+directory = pathlib.Path(sys.argv[1])
+roles = {}
+for path in sorted(directory.glob("mm-*.md")):
+    roles[path.stem] = hashlib.sha256(path.read_bytes()).hexdigest()
+manifest = directory / ".mm-roles.json"
+manifest.write_text(
+    json.dumps({"installed_at": datetime.now(timezone.utc).isoformat(), "roles": roles}, ensure_ascii=False, indent=1),
+    encoding="utf-8",
+)
+print(f"已写部署清单：{manifest.name}（{len(roles)} 个角色的 sha256）")
+PY
+  chown "$SERVICE_USER:$SERVICE_USER" "$ROLES_DST/.mm-roles.json" 2>/dev/null || true
+  chmod 0644 "$ROLES_DST/.mm-roles.json" 2>/dev/null || true
 else
   echo "没有角色文件（$ROLES_SRC/mm-*.md）：对话页只会显示「默认（无角色）」" >&2
 fi

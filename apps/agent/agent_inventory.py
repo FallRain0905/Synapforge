@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -35,6 +36,10 @@ OPENCODE_ROLES_TIMEOUT_SECONDS = 20.0
 # 平台在「我的智能体」里额外暴露的**内置**可选模式：它们没有角色文件，但有明确用途。
 # `build`（默认全工具）不在这里——页面上它就是「默认（无角色）」，重复出现只会让人困惑；
 # `compaction` / `summary` / `title` / `explore` / `general` 是 opencode 的内部 agent，不该出现在用户的下拉里。
+# 部署脚本（install-cloud-agent.sh 第 6 步）写下的角色清单：角色名 → 内容 sha256。
+# 放在角色目录里，opencode 只认 `*.md`，所以这个 json 不会被它当角色加载。
+MANIFEST_NAME = ".mm-roles.json"
+
 BUILTIN_SELECTABLE_AGENTS = {
     "plan": "计划模式 · 先出方案再动手，禁用编辑与写入（opencode 内置）",
 }
@@ -163,6 +168,13 @@ class AgentInventory:
                         "name": name,
                         "description": str(item.get("description") or "").strip(),
                         "executes": bool(item.get("executes")),
+                        # R-4：指纹/摘要/漂移照原样上报（平台只做展示，不改写它们）
+                        "sha256": str(item.get("sha256") or ""),
+                        "bytes": int(item.get("bytes") or 0),
+                        "modified_at": str(item.get("modified_at") or ""),
+                        "rules": [str(one) for one in (item.get("rules") or [])][:3],
+                        "drifted": bool(item.get("drifted")),
+                        "installed_at": str(item.get("installed_at") or ""),
                     }
                 )
             return roles
@@ -440,6 +452,96 @@ def _opencode_agent_tools(config_dir: Path | None = None) -> dict[str, dict[str,
     return tools_by_role
 
 
+def _role_rules(text: str, limit: int = 3) -> list[str]:
+    """从角色文件里抽"硬规则（禁令）"这一节的前几条，给页面抽屉当摘要。
+
+    为什么按标题抓而不是另写一份摘要：角色文件的九段骨架由 `scripts/prompt_lint.py` **机械校验**
+    （标题固定措辞），所以这里按标题抓是稳定的；另写一份摘要就多一个会漂移的真源。
+    抓不到就返回空列表——页面如实显示"没有摘要"，不编。
+    """
+
+    lines = text.splitlines()
+    heading_index = None
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("#") and "硬规则" in stripped:
+            heading_index = index
+            break
+    if heading_index is None:
+        return []
+    rules: list[str] = []
+    for line in lines[heading_index + 1 :]:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            break  # 下一节开始
+        if not stripped:
+            continue
+        if not (stripped.startswith(("-", "*")) or re.match(r"^\d+[.．、)）]\s*\S", stripped)):
+            continue
+        cleaned = stripped.lstrip("-*").strip()
+        cleaned = re.sub(r"^\d+[.．、)）]\s*", "", cleaned)
+        cleaned = re.sub(r"\*\*", "", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        if cleaned:
+            rules.append(cleaned[:140])
+        if len(rules) >= limit:
+            break
+    return rules
+
+
+def _role_file_details(config_dir: Path | None = None) -> dict[str, dict[str, Any]]:
+    """角色名 → 文件指纹与摘要：`sha256`（内容哈希）、`bytes`、`modified_at`、`rules`。
+
+    为什么要有 sha256：**防漂移**——执行体上的角色文件是部署时从仓库装过去的，手工改过就与仓库不一致；
+    平台页面标出版本（哈希前缀）与"是否被改动"，比"看起来是同一个角色"可靠。
+    `rules` 让页面抽屉能把"这个角色的硬规则前几条"直接摆出来，用户不必去翻仓库。
+    """
+
+    details: dict[str, dict[str, Any]] = {}
+    base = Path(config_dir) if config_dir is not None else Path.home() / ".config" / "opencode"
+    for dirname in ("agent", "agents"):
+        try:
+            files = sorted((base / dirname).glob("*.md"))
+        except OSError:
+            continue
+        for path in files:
+            try:
+                raw = path.read_bytes()
+                text = raw.decode("utf-8", "replace")
+                stat = path.stat()
+            except OSError:
+                continue
+            details.setdefault(
+                path.stem,
+                {
+                    "sha256": hashlib.sha256(raw).hexdigest(),
+                    "bytes": len(raw),
+                    "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat(),
+                    "rules": _role_rules(text),
+                },
+            )
+    return details
+
+
+def _role_manifest(config_dir: Path | None = None) -> dict[str, Any]:
+    """读**部署时**写下的角色清单（安装脚本生成）：`{角色名: sha256}` + 安装时间。
+
+    它是"仓库里那份"在执行体上的投影：文件哈希与清单不符 = 执行体上被人手工改过（页面据此告警）。
+    **已知边界**：仓库改了 md 但没重跑安装脚本时，清单与文件会一起停在旧版本——那种漂移要靠
+    "改角色就得重跑部署第 6 步"的纪律（见 SOURCES.md §变更纪律），这里只能如实报"清单是什么时候装的"。
+    """
+
+    base = Path(config_dir) if config_dir is not None else Path.home() / ".config" / "opencode"
+    for candidate in (base / "agent" / MANIFEST_NAME, base / MANIFEST_NAME):
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("roles"), dict):
+            return data
+    return {}
+
+
 def _probe_opencode_roles(executable: str, *, config_dir: Path | None = None) -> list[dict[str, str]]:
     """探测对话可选角色：**名字以 `opencode agent list` 为准**（只有真被加载的才会出现），
     说明取自角色文件自己的 frontmatter（见 `_opencode_agent_descriptions`）。
@@ -472,6 +574,8 @@ def _probe_opencode_roles(executable: str, *, config_dir: Path | None = None) ->
         return []
     described = _opencode_agent_descriptions(config_dir)
     tools_by_role = _opencode_agent_tools(config_dir)
+    details = _role_file_details(config_dir)
+    manifest = _role_manifest(config_dir)
     roles: list[dict[str, Any]] = []
     for name in names:
         description = described.get(name) or BUILTIN_SELECTABLE_AGENTS.get(name, "")
@@ -488,7 +592,25 @@ def _probe_opencode_roles(executable: str, *, config_dir: Path | None = None) ->
             executes = False
         else:
             executes = True
-        roles.append({"name": name, "description": description, "executes": executes})
+        detail = details.get(name, {})
+        digest = str(detail.get("sha256") or "")
+        expected = str((manifest.get("roles") or {}).get(name) or "") if isinstance(manifest.get("roles"), dict) else ""
+        roles.append(
+            {
+                "name": name,
+                "description": description,
+                "executes": executes,
+                # R-4：指纹与摘要（页面抽屉用）。**没有文件的自定义角色**（只写在 opencode.json 里）
+                # 这些字段就是空的——如实留空，不编一个哈希。
+                "sha256": digest[:12],
+                "bytes": int(detail.get("bytes") or 0),
+                "modified_at": str(detail.get("modified_at") or ""),
+                "rules": [str(item) for item in (detail.get("rules") or [])][:3],
+                # 漂移：有清单才有判据；文件没进清单（例如清单是旧的）也算"与清单不一致"
+                "drifted": bool(expected and digest and expected != digest),
+                "installed_at": str(manifest.get("installed_at") or ""),
+            }
+        )
     return roles
 
 

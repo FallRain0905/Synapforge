@@ -35,6 +35,15 @@ import { useWorkspace } from "../../lib/workspace";
 
 const ACTIVE_STATUSES = new Set(["PENDING", "CLAIMED"]);
 
+/** 时间戳的紧凑写法（抽屉里显示"装于 …"用；解析不了就退化成原串前 16 位）。 */
+function formatTime(iso: string): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso.slice(0, 16);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 /** 文件大小的可读写法（产出清单里显示，避免"1234567 字节"这种读不出来的数）。 */
 function formatBytes(size: number): string {
   const value = Number(size) || 0;
@@ -583,6 +592,12 @@ export default function MyAgentPage() {
   /** 这一轮有没有走增量通道——决定状态文案（**不假装**：CLI 通道就说"分段"）。 */
   const hasDeltas = useMemo(() => events.some((event) => event.event_type === "delta"), [events]);
   const liveTurnId = detailTurn?.id ?? "";
+  /** 这一轮**实际**用的角色在角色文件上的定义（R-4）：说明 + 硬规则摘要 + 版本 + 是否与部署清单一致。 */
+  const roleDefinition = useMemo(() => {
+    const name = detailTurn?.role || role;
+    if (!name) return null;
+    return agent?.roles.find((item) => item.name === name) ?? null;
+  }, [agent, detailTurn?.role, role]);
   const streamingNow = Boolean(activeTurn);
 
   return (
@@ -1152,6 +1167,32 @@ export default function MyAgentPage() {
                         : "—"}
                     </dd>
                   </dl>
+                  {roleDefinition ? (
+                    <div className="my-agent-role-card" data-testid="my-agent-role-card">
+                      <div className="my-agent-role-card-head">
+                        <strong>{roleLabel(roleDefinition.name)}</strong>
+                        <span className="my-agent-role-card-version" title={`文件 sha256：${roleDefinition.sha256}；${roleDefinition.bytes} 字节`}>
+                          {roleDefinition.sha256 ? `定义版本 ${roleDefinition.sha256}` : "无定义文件"}
+                        </span>
+                      </div>
+                      {roleDefinition.description ? <p className="my-agent-role-card-desc">{roleDefinition.description}</p> : null}
+                      {roleDefinition.rules.length ? (
+                        <ul className="my-agent-role-card-rules" data-testid="my-agent-role-rules">
+                          {roleDefinition.rules.map((rule, index) => (
+                            <li key={index}>{rule}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                      {roleDefinition.drifted ? (
+                        <p className="my-agent-role-card-drift" data-testid="my-agent-role-drift">
+                          ⚠ 这份角色定义与部署清单不一致（可能是执行体上被手工改过）：页面显示的说明与实际跑的不保证一致，
+                          请重跑部署脚本第 6 步把它盖回仓库里那版。
+                        </p>
+                      ) : roleDefinition.installed_at ? (
+                        <p className="my-agent-role-card-note">与部署清单一致 · 装于 {formatTime(roleDefinition.installed_at)}</p>
+                      ) : null}
+                    </div>
+                  ) : null}
                   <div className="my-agent-events" data-testid="my-agent-events">
                     {thinkingText ? (
                       <div className="my-agent-thinking" data-testid="my-agent-thinking">

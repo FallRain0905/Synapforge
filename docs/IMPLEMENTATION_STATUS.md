@@ -892,6 +892,14 @@ JSON parse: domain schemas, agent gateway/session schemas    -> passed
 - 测试：Agent **413** 项（+4）、API **554** 项（+10）；前端 tsc + 构建通过；`server_verify` 22/22。交接 `docs/handoffs/MY_AGENT_M5C_S3_APPROVAL_CARDS_HANDOFF.md`。边界：CLI 回退通道没有权限事件（仍是 `--auto`）；默认保守（没人批不执行），要无人值守放行把 `chat_approvals=false`。
 - **本期自己引入又修掉的回归**：新表 `agent_turn_approvals` 的外键没进删除路径，导致**带权限请求的会话删不掉**（界面点确认没反应）——`delete_conversation` 现在先删审批行再删轮次，并加了契约测试。**规律**：往"挂在轮次上"的表里加东西时必须同步改删除路径（历史上 events 也是这么补的）。
 
+## MY-AGENT M-6 R-4 其二/三（2026-09-24：角色指纹 · 硬规则摘要 · 防漂移）
+
+- 内核：角色探测新增 `sha256`（前 12 位）/`bytes`/`modified_at`/**硬规则摘要**（按 `## … 硬规则 …` 一节抽前三条——该骨架由 `prompt_lint.py` 机械校验，按标题抽是稳定的）/`drifted`/`installed_at`；摘要抓不到就空（不编）。
+- 防漂移：安装脚本第 6 步写 `.mm-roles.json`（`{installed_at, roles:{名: sha256}}`）当"仓库那份在执行体上的投影"；文件哈希与清单不符 = 执行体上被手工改过。**真机实测**：手工给 `mm-research.md` 追加两行 → 页面显示新哈希 `3f1cf2943886` 并报橙字告警 → 按告警指引重跑安装脚本 → 恢复"与部署清单一致"。
+- 页面：抽屉「角色定义」卡（角色名 + 定义版本 + 说明 + 硬规则前三条 + 一致/告警），取**这一轮实际用的角色**（`detailTurn.role`），保证"页面显示的"与"实际跑的"对得上。
+- 测试：内核新增 `RoleFingerprintTests`（指纹/摘要/无清单不报漂移/一致不报/不一致必报），Agent **416** 项；平台 `test_agent_chat*` 40 项；前端 tsc + 构建通过；`server_verify` 22/22（两次发布）。交接 `docs/handoffs/MY_AGENT_M6_R4_ROLE_FINGERPRINT_HANDOFF.md`。
+- 未做（如实记）：**"模式/强度并入"**（= M-5c S-4 的 `--variant`，常驻通道静默无效，两条路等拍板）；**清单只能证明执行体侧未被手工改**，"仓库改了 md 未重装"需部署时上报仓库侧哈希（后继项）；"角色 md 写 model 谁赢"的实测因 lint 仍禁 `model` 而无落点。
+
 ## MY-AGENT M-5c S-4（2026-09-24：思考块已上线；强度按证据暂缓）
 
 - **思考块（已交付）**：内核把 `reasoning` 段增量按新事件 `thinking` 发出去（绕开 reporter、节奏 1.2s、**封顶后收尾补发不丢字**；`process.exited` 带 `thinking_events` 对账）；页面抽屉里「思考过程」折叠块（默认收起）+ 状态文案「思考中（还没开始写正文）」；`thinking`/`delta` 都不进过程事件列表。

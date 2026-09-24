@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -24,6 +25,7 @@ from unittest import mock
 
 from agent_inventory import (
     BUILTIN_SELECTABLE_AGENTS,
+    MANIFEST_NAME,
     AgentInventory,
     _frontmatter_tools,
     _opencode_agent_descriptions,
@@ -188,6 +190,83 @@ class InventoryModelTests(unittest.TestCase):
         self.assertTrue(probed, "预热应该在后台真的探一次")
 
 
+class RoleFingerprintTests(unittest.TestCase):
+    """M-6 R-4：角色文件的指纹（sha256）与硬规则摘要，以及"与部署清单不一致"的漂移判定。"""
+
+    ROLE_TEXT = "\n".join(
+        [
+            "---",
+            "description: 审题分析 · 拆子问题",
+            "mode: primary",
+            "---",
+            "",
+            "## 4 工作方法",
+            "随便写点。",
+            "",
+            "## 5 硬规则（禁令）",
+            "",
+            "1. 禁止凑子问题数——题面写 2 个就是 2 个。",
+            "- **必须**把拿不准的作用对象标成存疑。",
+            "- 不得假装读过没拿到的附件。",
+            "- 第四条不该进摘要。",
+            "",
+            "## 6 输出格式",
+            "内容。",
+            "",
+        ]
+    )
+
+    def probe(self, base: Path, stdout: str) -> list[dict]:
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout)
+        with mock.patch.object(agent_inventory, "_resolve_for_probe", return_value="/usr/bin/opencode"), mock.patch.object(
+            agent_inventory.subprocess, "run", return_value=completed
+        ):
+            return _probe_opencode_roles("opencode", config_dir=base)
+
+    def test_fingerprint_rules_and_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "agent").mkdir(parents=True)
+            role_path = base / "agent" / "mm-analysis.md"
+            # `newline=""`：不随平台把 \n 换成 \r\n（否则哈希在 Windows 与 Linux 上不一样）
+            role_path.write_text(self.ROLE_TEXT, encoding="utf-8", newline="")
+            digest = hashlib.sha256(role_path.read_bytes()).hexdigest()
+
+            fresh = self.probe(base, "mm-analysis (primary)\n")[0]
+            self.assertEqual(fresh["name"], "mm-analysis")
+            self.assertEqual(fresh["sha256"], digest[:12])
+            self.assertGreater(fresh["bytes"], 0)
+            self.assertTrue(fresh["modified_at"])
+            # 只取前三条、去掉编号与加粗标记：给页面抽屉当摘要
+            self.assertEqual(
+                fresh["rules"],
+                [
+                    "禁止凑子问题数——题面写 2 个就是 2 个。",
+                    "必须把拿不准的作用对象标成存疑。",
+                    "不得假装读过没拿到的附件。",
+                ],
+            )
+            # 没有清单就没有判据：不报漂移（不编）
+            self.assertFalse(fresh["drifted"])
+            self.assertEqual(fresh["installed_at"], "")
+
+            manifest = base / "agent" / MANIFEST_NAME
+            manifest.write_text(
+                json.dumps({"installed_at": "2026-09-24T00:00:00+00:00", "roles": {"mm-analysis": digest}}),
+                encoding="utf-8",
+            )
+            matched = self.probe(base, "mm-analysis (primary)\n")[0]
+            self.assertFalse(matched["drifted"])
+            self.assertEqual(matched["installed_at"], "2026-09-24T00:00:00+00:00")
+
+            manifest.write_text(
+                json.dumps({"installed_at": "2026-09-24T00:00:00+00:00", "roles": {"mm-analysis": "deadbeef"}}),
+                encoding="utf-8",
+            )
+            drifted = self.probe(base, "mm-analysis (primary)\n")[0]
+            self.assertTrue(drifted["drifted"], "文件与清单不一致时必须报漂移（防手工改）")
+
+
 class InventoryRoleTests(unittest.TestCase):
     """对话角色（M-6）：名字以 `opencode agent list` 为准，说明取自角色文件自己的 frontmatter。"""
 
@@ -254,8 +333,10 @@ class InventoryRoleTests(unittest.TestCase):
                 agent_inventory.subprocess, "run", return_value=completed
             ):
                 roles = _probe_opencode_roles("opencode", config_dir=base)
+        # R-4 加了指纹/摘要字段，这里按"角色是谁、能不能动手"比核心三字段
+        core = [{key: role[key] for key in ("name", "description", "executes")} for role in roles]
         self.assertEqual(
-            roles,
+            core,
             [
                 {"name": "mm-paper-zh", "description": "中文论文写作 · 给骨架", "executes": True},
                 {"name": "plan", "description": BUILTIN_SELECTABLE_AGENTS["plan"], "executes": False},
@@ -317,7 +398,15 @@ class InventoryRoleTests(unittest.TestCase):
                 }
             ],
         )
-        self.assertEqual(inventory.roles(), [{"name": "mm-review", "description": "逻辑对抗复核", "executes": False}])
+        mapped = inventory.roles()
+        self.assertEqual(
+            [{key: role[key] for key in ("name", "description", "executes")} for role in mapped],
+            [{"name": "mm-review", "description": "逻辑对抗复核", "executes": False}],
+        )
+        # 探测条目里没有指纹字段时，映射给的是"空"而不是编一个值（R-4）
+        self.assertEqual(mapped[0]["sha256"], "")
+        self.assertEqual(mapped[0]["rules"], [])
+        self.assertFalse(mapped[0]["drifted"])
         empty = AgentInventory(
             ttl_seconds=0,
             probe=lambda: [{"adapter_id": "opencode-cli", "state": "AVAILABLE", "version": "1", "executable": "opencode"}],

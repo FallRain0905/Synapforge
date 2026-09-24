@@ -2122,16 +2122,25 @@ class AgentChatTurnEventReport(APIModel):
 
 
 class MyAgentRole(APIModel):
-    """执行体上报的一个角色（opencode 的 agent）：名字 + 说明 + 能不能动手。
+    """执行体上报的一个角色（opencode 的 agent）：名字 + 说明 + 能不能动手 + 定义指纹。
 
     名字是 `opencode agent list` 里真实存在的（执行体探测），说明取自角色定义文件自己的 frontmatter——
     所以页面上看到的选项**一定在那边能用**，不会出现点不动的假选项。
     `executes` 来自角色文件的 `tools` 开关：真则这个角色**能执行命令/写文件**（页面要如实标注"会改动工作目录"）。
+    R-4 追加的四个字段来自角色文件本身：`sha256`（内容哈希前 12 位，页面标"定义版本"）、
+    `rules`（"硬规则（禁令）"一节的前三条摘要）、`drifted`（与**部署清单**不一致 = 执行体上被手工改过）、
+    `installed_at`（清单写下的时间）。**平台只做展示，不改写**这些值——它们必须反映执行体上的真实文件。
     """
 
     name: str
     description: str = ""
     executes: bool = False
+    sha256: str = ""
+    bytes: int = 0
+    modified_at: str = ""
+    rules: list[str] = Field(default_factory=list)
+    drifted: bool = False
+    installed_at: str = ""
 
 
 class MyAgentEndpoint(APIModel):
