@@ -88,6 +88,31 @@ def read_platform_info(state_dir: Path | None = None) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def remember_workspace(state_dir: Path | None, workspace: str) -> None:
+    """把用户选定的 Agent 工作区记进 `platform.json`（**合并写**，不动 url/device_id/paired_at）。
+
+    为什么必须落盘：常驻体重启时命令行不一定带 `--workspace`（开机自启、Windows 服务、手工
+    `daemon-run` 都不带），那时只有这条记录能让它回到用户选的那个目录。不记的话它会退回进程当前
+    目录，而打包后的桌面端那正好是安装目录——用户的文件会被写进 Program Files 旁边，且平台看到的
+    "这台 Agent 的工作区"永远和用户以为的不是一回事（FM-0）。
+    """
+
+    directory = state_dir or default_state_dir()
+    path = platform_info_path(directory)
+    payload = read_platform_info(directory)
+    if str(payload.get("workspace") or "") == str(workspace):
+        return
+    payload["workspace"] = str(workspace)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        if os.name != "nt":
+            os.chmod(path, 0o600)
+    except OSError:
+        # 落盘失败不影响本次运行：这一轮用的是命令行给的那个目录，下次启动顶多回到旧值。
+        pass
+
+
 def host_slug() -> str:
     """与 connect-agent.ps1 一致的标识派生：主机名小写、非字母数字转 '-'。"""
 

@@ -161,18 +161,12 @@ export default function ReviewPage() {
 
   return (
     <div className="page-content" id="reviews" data-testid="review-center">
-      <PageHeading hint={`${pendingGates.length} 个门禁待确认 · ${openRisks.length} 个风险未关闭`} />
+      <PageHeading hint={`${pendingArtifacts.length + pendingGates.length} 项需要人工处理 · ${openRisks.length} 个风险未关闭`} />
 
-      <section className="metrics-grid">
-        <div className="metric"><span>门禁总数</span><strong>{reviewCenter.gates.length}</strong><small>待确认 {pendingGates.length}</small></div>
-        <div className="metric metric-warning"><span>未关闭风险</span><strong>{openRisks.length}</strong><small>已关闭 {closedRisks.length}</small></div>
-        <div className="metric"><span>复核记录</span><strong>{reviewCenter.reviews.length}</strong><small>含机器审计与人工复核</small></div>
-        <div className="metric metric-positive"><span>证据条目</span><strong>{reviewCenter.evidence.length}</strong><small>结论可追溯</small></div>
-      </section>
-
+      <div className="review-priority">
       <Panel
-        title="待审成果物"
-        subtitle="执行产出与 Agent 回答都先进这里：批准后才允许下游任务引用（没批准的内容会被领取校验拦下）"
+        title={`待审成果物 · ${pendingArtifacts.length}`}
+        subtitle="当前要签字的内容：批准后才允许下游引用；未批准内容不会进入交付包"
         testId="pending-artifact-list"
       >
         <div className="list">
@@ -197,7 +191,7 @@ export default function ReviewPage() {
                     <button className="text-button" disabled={busy} data-testid={`artifact-preview-${artifact.id}`} onClick={() => void openPreview(artifact)}>
                       <Eye size={13} /> 查看内容
                     </button>
-                    <button className="text-button" disabled={busy} data-testid={`artifact-approve-${artifact.id}`} onClick={() => void decideArtifact(artifact, "APPROVED", "人工复核通过")}>
+                    <button className="button button-primary review-approve" disabled={busy} data-testid={`artifact-approve-${artifact.id}`} onClick={() => void decideArtifact(artifact, "APPROVED", "人工复核通过")}>
                       <CheckCircle2 size={13} /> 批准
                     </button>
                     <button className="text-button" disabled={busy} data-testid={`artifact-revise-${artifact.id}`} onClick={() => setArtifactRevise({ artifact, summary: "" })}>
@@ -211,6 +205,14 @@ export default function ReviewPage() {
           {loading ? <LoadingSkeleton rows={2} label="正在加载待审成果物" /> : !pendingArtifacts.length && <EmptyState>没有待审内容：执行产出会在任务跑完后出现在这里</EmptyState>}
         </div>
       </Panel>
+      </div>
+
+      <section className="metrics-grid review-metrics" aria-label="审核概览">
+        <div className="metric"><span>门禁总数</span><strong>{reviewCenter.gates.length}</strong><small>待确认 {pendingGates.length}</small></div>
+        <div className="metric metric-warning"><span>未关闭风险</span><strong>{openRisks.length}</strong><small>已关闭 {closedRisks.length}</small></div>
+        <div className="metric"><span>复核记录</span><strong>{reviewCenter.reviews.length}</strong><small>含机器审计与人工复核</small></div>
+        <div className="metric metric-positive"><span>证据条目</span><strong>{reviewCenter.evidence.length}</strong><small>结论可追溯</small></div>
+      </section>
 
       <section className="grid grid-main-side">
         <Panel title="门禁" subtitle="批准由人工复核产生：提交 APPROVED 复核后门禁派生为 PASSED" testId="gate-list">

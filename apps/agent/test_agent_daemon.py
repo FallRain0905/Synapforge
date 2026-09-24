@@ -102,6 +102,61 @@ class PlatformUrlResolutionTests(unittest.TestCase):
         )
 
 
+class WorkspaceResolutionTests(unittest.TestCase):
+    """FM-0：工作区的解析口径只有一处，且"用户选的那个目录"要能跨重启留下来。
+
+    以前四个地方各算一次 `Path(args.workspace).resolve()`（有的还漏了 `expanduser`），
+    注册上报的 `local_workspace` 与 Runner 真正的 cwd 因此可能不是同一个目录；
+    桌面端更糟：壳不传 `--workspace`，内核退回进程当前目录 = 安装目录。
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.state_dir = Path(self.temp.name) / "state"
+        self.state_dir.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def test_tilde_and_relative_paths_are_expanded(self) -> None:
+        self.assertEqual(agentd._workspace_root("~/ws"), (Path.home() / "ws").resolve())
+        self.assertEqual(agentd._workspace_root("."), Path.cwd().resolve())
+        self.assertEqual(agentd._workspace_root(""), Path.cwd().resolve())
+        self.assertEqual(agentd._workspace_root(None), Path.cwd().resolve())
+
+    def test_cli_wins_and_is_persisted(self) -> None:
+        chosen = Path(self.temp.name) / "chosen"
+        args = agentd.argparse.Namespace(workspace=str(chosen))
+        resolved = agentd._resolve_daemon_workspace(args, {"workspace": "/stale/old"}, self.state_dir)
+        self.assertEqual(resolved, str(chosen.resolve()))
+        # 落盘：下次开机不带 --workspace 也要回到这里
+        from sidecar_api import read_platform_info
+
+        self.assertEqual(read_platform_info(self.state_dir).get("workspace"), str(chosen.resolve()))
+
+    def test_platform_json_wins_over_cwd(self) -> None:
+        remembered = str(Path(self.temp.name) / "remembered")
+        args = agentd.argparse.Namespace(workspace=None)
+        self.assertEqual(agentd._resolve_daemon_workspace(args, {"workspace": remembered}, self.state_dir), str(Path(remembered).resolve()))
+
+    def test_falls_back_to_cwd_only_when_nothing_is_known(self) -> None:
+        args = agentd.argparse.Namespace(workspace=None)
+        self.assertEqual(agentd._resolve_daemon_workspace(args, {}, self.state_dir), str(Path.cwd().resolve()))
+
+    def test_remembering_workspace_keeps_the_pairing_record(self) -> None:
+        """`platform.json` 是**合并写**：记住工作区不能把 url/device_id 冲掉。"""
+
+        from sidecar_api import read_platform_info, write_platform_info
+
+        write_platform_info(self.state_dir, "https://synapforge.top", "device-1", "agent-1")
+        agentd.remember_workspace(self.state_dir, str(Path(self.temp.name) / "ws"))
+        payload = read_platform_info(self.state_dir)
+        self.assertEqual(payload["url"], "https://synapforge.top")
+        self.assertEqual(payload["device_id"], "device-1")
+        self.assertEqual(payload["agent_id"], "agent-1")
+        self.assertEqual(payload["workspace"], str(Path(self.temp.name) / "ws"))
+
+
 class GatewayUriTests(unittest.TestCase):
     def test_http_and_https_are_mapped_to_websocket_schemes(self) -> None:
         uri = agentd._gateway_uri("http://127.0.0.1:8010/", "device-1", "session-1", "connection-1")

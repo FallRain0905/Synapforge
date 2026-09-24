@@ -90,6 +90,14 @@ class BuildChatCommandTests(unittest.TestCase):
         plain = build_chat_command(["opencode", "run", "{prompt}"], prompt="hi", agent_role="")
         self.assertEqual(plain, ["opencode", "run", "hi"])
 
+    def test_variant_is_inserted_before_the_prompt(self) -> None:
+        command = build_chat_command(
+            ["opencode", "run", "--format", "json", "{prompt}"],
+            prompt="证明它",
+            variant="high",
+        )
+        self.assertEqual(command[-3:], ["--variant", "high", "证明它"])
+
 
 class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -188,6 +196,17 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command[command.index("--agent") + 1], "mm-review")
         # 角色必须插在提示词之前（插到后面会被 CLI 当成提示词的一部分）
         self.assertLess(command.index("--agent"), len(command) - 1)
+
+    async def test_variant_uses_the_cli_channel_and_reaches_the_command(self) -> None:
+        """serve 会静默忽略 variant，所以非默认强度必须走可证明生效的 CLI 通道。"""
+
+        self.claim_result["turn"]["variant"] = "max"
+        chat = self.loop()
+        chat.config.chat_server_port = 4199
+        chat._ensure_server = lambda: self.fail("variant turn must not touch serve")  # noqa: SLF001
+        await chat.run_once()
+        self.assertIn("--variant", self.commands[0])
+        self.assertEqual(self.commands[0][self.commands[0].index("--variant") + 1], "max")
 
     async def test_input_files_are_downloaded_and_announced_in_the_prompt(self) -> None:
         """M-3：这一轮带的附件先落盘，再在提示词里告诉执行体去哪儿看。"""

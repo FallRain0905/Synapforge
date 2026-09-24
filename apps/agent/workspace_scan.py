@@ -68,11 +68,19 @@ EXCLUDED_NAMES = frozenset({"sidecar.json", "platform.json", "worker.json", ".DS
 
 DEFAULT_MAX_FILES = 20_000
 
+# 平台**下发**到工作区的目录（`input_fetcher` 把任务/对话的输入落在这里）：不是这一轮的产出。
+# 为什么必须排除：带输入的任务以前会把 `inputs/` 里的文件当成本轮产出**重新上传成成果物**——
+# 同一份文件在项目里出现两次（原件 + "产物"），审计上看起来像 Agent 又生成了一份东西。
+INPUT_DIR_NAMES = frozenset({"inputs", "user_data"})
+
 
 def is_excluded(relative_path: str) -> bool:
     """是否属于"不该当产出"的路径（相对路径，正斜杠分隔）。"""
 
     parts = [part for part in relative_path.replace("\\", "/").split("/") if part]
+    if parts and parts[0] in INPUT_DIR_NAMES:
+        # 只认**顶层**：工具自己建的 `src/inputs/` 仍然是产出，平台下发的才排除
+        return True
     if any(part in EXCLUDED_DIRS for part in parts[:-1]):
         return True
     name = parts[-1] if parts else ""
@@ -165,6 +173,7 @@ __all__ = [
     "EXCLUDED_DIRS",
     "EXCLUDED_NAMES",
     "EXCLUDED_SUFFIXES",
+    "INPUT_DIR_NAMES",
     "SnapshotDiff",
     "diff",
     "is_excluded",

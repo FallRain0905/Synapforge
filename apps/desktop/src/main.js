@@ -72,19 +72,72 @@ function saveConfig(patch) {
   return runtime.config;
 }
 
+// ---- Agent 工作区（FM-0） -------------------------------------------------
+//
+// 工作区是内核的**启动参数**（`--workspace`）：任务在这里跑、输入文件下到 `<工作区>/inputs/`、
+// 产物也从这里扫。以前壳不传这个参数，内核只好用进程当前目录——打包后那正是安装目录
+// （`resources\sidecar`），于是"用户的文件"写进了程序安装目录（还常是只读），
+// 平台看到的 `local_workspace` 也就永远和用户以为的不是一回事。
+// 现在：用户选 → 记进 desktop.json → 每次启动都显式传给内核（内核自己也会把它记一份）。
+
+function defaultWorkspace() {
+  return path.join(app.getPath("documents"), "MathAgentWorkspace");
+}
+
+function workspacePath() {
+  const configured = String(runtime.config.workspace || "").trim();
+  return configured ? path.resolve(configured) : defaultWorkspace();
+}
+
+function ensureWorkspace() {
+  const target = workspacePath();
+  try {
+    fs.mkdirSync(target, { recursive: true });
+  } catch (error) {
+    // 建不出来不拦启动：内核那边会如实报 workspace_unavailable，用户能在本机页看到原因
+    logLine(`[shell] 工作区不可用：${target}（${String(error)}）`);
+  }
+  return target;
+}
+
+async function chooseWorkspace() {
+  const current = workspacePath();
+  const parent = BrowserWindow.getFocusedWindow() || workbench || setupWindow || null;
+  const options = {
+    title: "选择 Agent 工作目录",
+    defaultPath: current,
+    buttonLabel: "用这个目录",
+    properties: ["openDirectory", "createDirectory"],
+  };
+  const result = parent && !parent.isDestroyed() ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options);
+  if (result.canceled || !result.filePaths.length) {
+    return { cancelled: true, workspace: current };
+  }
+  const chosen = path.resolve(result.filePaths[0]);
+  saveConfig({ workspace: chosen });
+  logLine(`[shell] Agent 工作目录改为 ${chosen}（重启内核生效）`);
+  // 必须重启内核：工作区是启动参数。热改会让"正在跑的那一轮"中途换地址，
+  // 输入与产物落在两个目录里，比晚几秒生效糟糕得多。
+  restartSidecar();
+  broadcast();
+  return { cancelled: false, workspace: chosen };
+}
+
 // ---- sidecar 生命周期 ----------------------------------------------------
 
 function resolveSidecarCommand() {
+  const workspace = ensureWorkspace();
+  const workspaceArg = ["--workspace", workspace];
   // 1) 打包后：随安装包一起分发的内核
   const packaged = path.join(process.resourcesPath || "", "sidecar", "math-agent-sidecar.exe");
-  if (fs.existsSync(packaged)) return { cmd: packaged, args: ["--state-dir", STATE_DIR], mode: "packaged" };
+  if (fs.existsSync(packaged)) return { cmd: packaged, args: ["--state-dir", STATE_DIR, ...workspaceArg], mode: "packaged" };
   // 2) 开发态：直接用仓库里的 Python 源码跑
   const repo = path.resolve(__dirname, "..", "..", "..");
   const entry = path.join(repo, "apps", "agent", "agentd.py");
   if (fs.existsSync(entry)) {
     return {
       cmd: process.env.MAP_PYTHON || "python",
-      args: ["-X", "utf8", entry, "daemon-run", "--state-dir", STATE_DIR],
+      args: ["-X", "utf8", entry, "daemon-run", "--state-dir", STATE_DIR, ...workspaceArg],
       mode: "source",
       cwd: path.join(repo, "apps", "agent"),
     };
@@ -130,6 +183,18 @@ function startSidecar() {
     }
   });
   waitForInfo();
+}
+
+function restartSidecar() {
+  // 计数归零：换工作区是我们**主动**杀内核，不该算进"异常退出"的 3 次上限里
+  runtime.restartAttempts = 0;
+  runtime.info = null;
+  runtime.status = null;
+  if (runtime.sidecar && !runtime.sidecar.killed) {
+    runtime.sidecar.kill(); // exit 处理器会在 2 秒后用新参数重启
+    return;
+  }
+  startSidecar();
 }
 
 function waitForInfo(deadlineSeconds = 10) {
@@ -198,6 +263,7 @@ function snapshot() {
       app_version: app.getVersion(),
       pending: runtime.pending,
       auto_launch: Boolean(runtime.config.auto_launch),
+      workspace: workspacePath(),
       attention: attentionSnapshot(),
     },
   };
@@ -480,6 +546,7 @@ function updateTray() {
       { label: "开机自启", type: "checkbox", checked: Boolean(runtime.config.auto_launch), click: (item) => setAutoLaunch(Boolean(item.checked)) },
       { label: "检查更新", click: () => void checkUpdate({ silent: false }) },
       { label: "服务器地址…", click: () => showSetup() },
+      { label: "Agent 工作目录…", click: () => void chooseWorkspace() },
       { type: "separator" },
       { label: "复制诊断信息", click: () => clipboard.writeText(JSON.stringify(snapshot(), null, 2)) },
       { label: "退出", click: () => { quitting = true; app.quit(); } },
@@ -531,6 +598,7 @@ function appMenu() {
         { type: "separator" },
         { label: "检查更新", click: () => void checkUpdate({ silent: false }) },
         { label: "服务器地址…", click: () => showSetup() },
+        { label: "Agent 工作目录…", click: () => void chooseWorkspace() },
         { type: "separator" },
         { label: "退出", role: "quit" },
       ],
@@ -844,6 +912,8 @@ ipcMain.handle("save-config", (_event, patch) => {
   if (patch && "auto_launch" in patch) setAutoLaunch(Boolean(patch.auto_launch));
   return { ...saved, platform_url: runtime.platformUrl, app_version: app.getVersion() };
 });
+// 选 Agent 工作目录：弹系统目录选择框 → 落 desktop.json → 重启内核（工作区是启动参数）
+ipcMain.handle("choose-workspace", () => chooseWorkspace());
 ipcMain.handle("pair", async (_event, { platformUrl, pairingBlob }) => {
   if (platformUrl) saveConfig({ platform_url: platformUrl });
   await api("/pair", { method: "POST", body: { platform_url: platformUrl || runtime.platformUrl, pairing_blob: pairingBlob } });

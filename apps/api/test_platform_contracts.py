@@ -60,6 +60,10 @@ class PlatformContractTests(unittest.TestCase):
                 "025_agent_chat_roles.sql",
                 "026_agent_turn_outputs.sql",
                 "027_agent_turn_approvals.sql",
+                "028_agent_chat_variants.sql",
+                "029_drive_nodes.sql",
+                "030_agent_workspaces.sql",
+                "031_drive_grants.sql",
             ],
         )
         initial = files[0].read_text(encoding="utf-8").lower()
@@ -101,6 +105,36 @@ class PlatformContractTests(unittest.TestCase):
         self.assertIn("agents_package_id_idx", agent_description)
         self.assertIn("update agents set instance_id = agent_id", agent_description)
         self.assertNotIn("?", agent_description)
+        # 031（FM-5 云盘授权）：Grant / Grant Node / Lease，三张表都要有 RLS
+        grants = files[30].read_text(encoding="utf-8").lower()
+        for table in ["file_access_grants", "file_access_grant_nodes", "file_access_leases"]:
+            self.assertIn(f"create table if not exists {table}", grants)
+            self.assertIn(f"alter table {table} enable row level security", grants)
+        # 撤销靠 epoch 而不是删行；lease 只存哈希
+        self.assertIn("revocation_epoch", grants)
+        self.assertIn("token_hash", grants)
+        self.assertNotIn("?", grants)
+        # 030（FM-3 Agent 工作区）：工作区登记 + 操作队列 + 传输会话 + 审计
+        workspaces = files[29].read_text(encoding="utf-8").lower()
+        for table in ["agent_workspaces", "workspace_operations", "file_transfer_sessions", "workspace_audit"]:
+            self.assertIn(f"create table if not exists {table}", workspaces)
+            self.assertIn(f"alter table {table} enable row level security", workspaces)
+        # 幂等键唯一 + 队列索引（领取走它们）
+        self.assertIn("workspace_operations_idempotency_idx", workspaces)
+        self.assertIn("workspace_operations_queue_idx", workspaces)
+        # 平台不存宿主机绝对路径：工作区标识是哈希
+        self.assertIn("workspace_identity", workspaces)
+        self.assertNotIn("?", workspaces)
+        # 029（FM-1 个人云盘）：节点树 + 项目引用 + 对象清理队列 + 审计，四张表都要有 RLS
+        drive_nodes = files[28].read_text(encoding="utf-8").lower()
+        for table in ["drive_nodes", "drive_project_refs", "drive_object_cleanup", "drive_audit"]:
+            self.assertIn(f"create table if not exists {table}", drive_nodes)
+            self.assertIn(f"alter table {table} enable row level security", drive_nodes)
+        # 同父同名唯一只约束存活节点（回收站里的名字要能被重新用）/ 每成员一个根
+        self.assertIn("drive_nodes_sibling_name_idx", drive_nodes)
+        self.assertIn("where deleted_at is null and is_root = false", drive_nodes)
+        self.assertIn("drive_nodes_root_idx", drive_nodes)
+        self.assertNotIn("?", drive_nodes)
         # 022（AIP-1d）：意图对象的两个字段（预算 / 显式证据要求）
         task_intent = files[21].read_text(encoding="utf-8").lower()
         for column in ["budget", "evidence_requirements"]:

@@ -1358,6 +1358,8 @@ export type DriveUsage = {
   free_bytes: number;
   file_count: number;
   used_percent: number;
+  /** 回收站里的文件数（FM-1 起后端返回；它们仍占配额） */
+  trashed_count?: number;
 };
 
 export type DriveListing = { usage: DriveUsage; files: DriveFile[] };
@@ -2542,6 +2544,8 @@ export type MyAgentConversation = {
   model: string;
   /** 会话上选的角色（空 = 默认）。中途可改，**只影响下一轮**。 */
   role: string;
+  /** 推理强度；非默认值由执行体用 `--variant` 走 CLI 通道，当前会降级为分段输出。 */
+  variant: "" | "minimal" | "high" | "max";
   session_key: string | null;
   turn_count: number;
   project_id: string;
@@ -2560,6 +2564,8 @@ export type MyAgentTurn = {
   model: string;
   /** 这一轮**实际**用的角色（建轮次时从会话抄下来）：历史里"这轮谁跑的"不会被后来的设置改写。 */
   role: string;
+  /** 这一轮实际使用的推理强度。 */
+  variant: "" | "minimal" | "high" | "max";
   session_key: string | null;
   usage: Record<string, unknown>;
   error: string;
@@ -2660,6 +2666,7 @@ export async function createMyAgentConversation(body: {
   device_id: string;
   model?: string;
   role?: string;
+  variant?: "" | "minimal" | "high" | "max";
   title?: string;
 }): Promise<MyAgentConversation> {
   const response = await apiFetch(`${API_URL}/api/my-agent/conversations`, {
@@ -2681,10 +2688,10 @@ export async function deleteMyAgentConversation(conversationId: string): Promise
   if (!response.ok) throw await apiError(response, "会话删除失败");
 }
 
-/** 改会话设置（角色 / 模型）：**只影响下一轮**（已经跑过的轮次记着它当时用的是什么）。 */
+/** 改会话设置（角色 / 模型 / 强度）：**只影响下一轮**（已经跑过的轮次保留实际设置）。 */
 export async function updateMyAgentConversation(
   conversationId: string,
-  body: { role?: string; model?: string; title?: string },
+  body: { role?: string; model?: string; variant?: "" | "minimal" | "high" | "max"; title?: string },
 ): Promise<MyAgentConversation> {
   const response = await apiFetch(`${API_URL}/api/my-agent/conversations/${conversationId}`, {
     method: "PATCH",
@@ -2728,5 +2735,531 @@ export async function stopMyAgentTurn(turnId: string): Promise<MyAgentTurn> {
   if (!response.ok) {
     throw await apiError(response, "停止失败", { turn_already_finished: "这一轮已经结束了" });
   }
+  return response.json();
+}
+
+// ---- 个人云盘文件管理器（FM-1/FM-2） ---------------------------------------
+//
+// 这一组走的是新的节点树接口（`/api/drive/nodes*`）。旧的 `listDriveFiles/uploadDriveFile/...`
+// 保持不动（`/drive` 老入口与别处的调用还在用）。**下载必须走 `apiFetch`**：普通 `<a href>` 不带
+// Authorization，在 `PLATFORM_AUTH_MODE=required` 下会 401（踩过这个坑）。
+
+export type DriveNode = {
+  id: string;
+  parent_id: string | null;
+  kind: "file" | "directory";
+  name: string;
+  size_bytes: number;
+  content_hash: string | null;
+  mime_type: string | null;
+  is_archive: boolean;
+  source_artifact_id: string | null;
+  revision: number;
+  scan_status: string;
+  is_root: boolean;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+  trashed_with: string | null;
+  trashed_count?: number;
+};
+
+export type DriveBreadcrumb = { id: string; name: string; kind: string; is_root: boolean };
+
+export type DriveNodeListing = {
+  parent: DriveNode;
+  nodes: DriveNode[];
+  total: number;
+  next_cursor: string | null;
+  truncated: boolean;
+  usage: DriveUsage;
+  breadcrumb: DriveBreadcrumb[];
+};
+
+export type DriveProjectRef = {
+  id: string;
+  drive_node_id: string;
+  project_id: string;
+  artifact_id: string | null;
+  imported_by: string;
+  imported_at: string;
+  legacy_import: boolean;
+};
+
+export type DriveAuditEvent = {
+  id: string;
+  action: string;
+  capability: string;
+  decision: string;
+  reason: string;
+  content_hash: string | null;
+  size_bytes: number;
+  revision: number | null;
+  created_at: string;
+};
+
+export type DriveNodeDetail = {
+  node: DriveNode;
+  breadcrumb: DriveBreadcrumb[];
+  refs: DriveProjectRef[];
+  audit: DriveAuditEvent[];
+};
+
+export type DriveExtraction = {
+  node: DriveNode;
+  archive_id: string;
+  files: number;
+  bytes: number;
+  directories: number;
+  skipped_nested: string[];
+  skipped_junk: number;
+  usage: DriveUsage;
+};
+
+const DRIVE_UPLOAD_MESSAGES: Record<string, string> = {
+  file_name_conflict: "同目录下已有同名文件（不会覆盖，请改名或换目录）",
+  file_quota_exceeded: "云盘空间不足",
+  file_name_invalid: "文件名不合法（不能含路径分隔符、保留名或尾随点/空格）",
+  drive_upload_too_large: "单个文件超过上传上限",
+  file_empty: "空文件不能上传",
+};
+
+export function driveUploadMessages(): Record<string, string> {
+  return { ...DRIVE_UPLOAD_MESSAGES };
+}
+
+export async function listDriveNodes(params: {
+  parentId?: string | null;
+  query?: string;
+  sort?: string;
+  cursor?: string | null;
+  limit?: number;
+} = {}): Promise<DriveNodeListing> {
+  const search = new URLSearchParams();
+  if (params.parentId) search.set("parent_id", params.parentId);
+  if (params.query) search.set("query", params.query);
+  if (params.sort) search.set("sort", params.sort);
+  if (params.cursor) search.set("cursor", params.cursor);
+  if (params.limit) search.set("limit", String(params.limit));
+  const response = await apiFetch(`${API_URL}/api/drive/nodes?${search.toString()}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "目录读取失败");
+  return response.json();
+}
+
+export async function getDriveNode(nodeId: string): Promise<DriveNodeDetail> {
+  const response = await apiFetch(`${API_URL}/api/drive/nodes/${nodeId}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "文件详情读取失败", { file_node_not_found: "文件不存在或已被清除" });
+  return response.json();
+}
+
+/** 下载：拿字节 → 浏览器造链接（带 Authorization 的 fetch，不能用 <a href>）。 */
+export async function downloadDriveNode(node: DriveNode): Promise<void> {
+  const response = await apiFetch(`${API_URL}/api/drive/nodes/${node.id}/content`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "下载失败", { file_node_not_found: "文件不存在" });
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = node.name;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+export async function createDriveDirectory(parentId: string | null, name: string): Promise<{ node: DriveNode; usage: DriveUsage }> {
+  const response = await apiFetch(`${API_URL}/api/drive/directories`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ parent_id: parentId, name }),
+  });
+  if (!response.ok) throw await apiError(response, "新建文件夹失败", DRIVE_UPLOAD_MESSAGES);
+  return response.json();
+}
+
+/**
+ * 上传（带进度）：用 XHR 而不是 fetch —— fetch 拿不到上传进度，"文件级进度条"就没法做真。
+ * 403/404 之外的状态统一走 `apiError` 的文案映射。
+ */
+export function uploadDriveNode(
+  file: globalThis.File,
+  parentId: string | null,
+  onProgress?: (percent: number) => void,
+): Promise<{ node: DriveNode; usage: DriveUsage }> {
+  return new Promise((resolve, reject) => {
+    const form = new FormData();
+    if (parentId) form.append("parent_id", parentId);
+    form.append("file", file);
+    const request = new XMLHttpRequest();
+    request.open("POST", `${API_URL}/api/drive/files`);
+    const token = getSessionToken();
+    if (token) request.setRequestHeader("Authorization", `Bearer ${token}`);
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) onProgress(Math.round((event.loaded / event.total) * 100));
+    };
+    request.onload = () => {
+      let payload: any = {};
+      try {
+        payload = JSON.parse(request.responseText || "{}");
+      } catch {
+        payload = {};
+      }
+      if (request.status >= 200 && request.status < 300) {
+        resolve(payload);
+        return;
+      }
+      const detail = String(payload?.detail ?? "");
+      const code = detail.includes(":") ? detail.split(":")[0] : detail;
+      if (request.status === 403 || request.status === 404 || request.status === 401) {
+        reject(new ApiError(request.status, DRIVE_UPLOAD_MESSAGES[code] ?? (detail || "上传失败")));
+        return;
+      }
+      reject(new ApiError(request.status, DRIVE_UPLOAD_MESSAGES[code] ?? (detail || "上传失败")));
+    };
+    request.onerror = () => reject(new ApiError(0, "上传失败：网络中断"));
+    request.send(form);
+  });
+}
+
+export async function renameDriveNode(nodeId: string, name: string, expectedRevision?: number): Promise<{ node: DriveNode }> {
+  const response = await apiFetch(`${API_URL}/api/drive/nodes/${nodeId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, expected_revision: expectedRevision }),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "改名失败", { ...DRIVE_UPLOAD_MESSAGES, file_revision_conflict: "这个文件刚被别人改过，请刷新后再试" });
+  }
+  return response.json();
+}
+
+export async function moveDriveNode(nodeId: string, parentId: string | null, expectedRevision?: number): Promise<{ node: DriveNode }> {
+  const response = await apiFetch(`${API_URL}/api/drive/nodes/${nodeId}/move`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ parent_id: parentId, expected_revision: expectedRevision }),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "移动失败", {
+      file_name_conflict: "目标目录里已有同名文件",
+      file_directory_cycle: "不能把目录移动到它自己的子目录里",
+      file_revision_conflict: "这个文件刚被别人改过，请刷新后再试",
+    });
+  }
+  return response.json();
+}
+
+export async function copyDriveNode(nodeId: string, parentId?: string | null, name?: string): Promise<{ node: DriveNode; usage: DriveUsage }> {
+  const response = await apiFetch(`${API_URL}/api/drive/nodes/${nodeId}/copy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ parent_id: parentId ?? null, name: name ?? null }),
+  });
+  if (!response.ok) throw await apiError(response, "复制失败", DRIVE_UPLOAD_MESSAGES);
+  return response.json();
+}
+
+export async function trashDriveNode(nodeId: string): Promise<{ id: string; trashed_count: number; usage: DriveUsage }> {
+  const response = await apiFetch(`${API_URL}/api/drive/nodes/${nodeId}`, { method: "DELETE" });
+  if (!response.ok) throw await apiError(response, "删除失败", { file_root_immutable: "根目录不能删除" });
+  return response.json();
+}
+
+export async function listDriveTrash(): Promise<{ nodes: DriveNode[]; usage: DriveUsage }> {
+  const response = await apiFetch(`${API_URL}/api/drive/trash`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "回收站读取失败");
+  return response.json();
+}
+
+export async function restoreDriveNode(nodeId: string): Promise<{ node: DriveNode; usage: DriveUsage }> {
+  const response = await apiFetch(`${API_URL}/api/drive/nodes/${nodeId}/restore`, { method: "POST" });
+  if (!response.ok) {
+    throw await apiError(response, "恢复失败", {
+      file_name_conflict: "原目录下已有同名文件，先改名或删掉那个再恢复",
+      file_not_trashed: "这个文件不在回收站里",
+    });
+  }
+  return response.json();
+}
+
+export async function purgeDriveNode(nodeId: string): Promise<{ id: string; objects_deleted: number; objects_pending: number }> {
+  const response = await apiFetch(`${API_URL}/api/drive/trash/${nodeId}`, { method: "DELETE" });
+  if (!response.ok) {
+    throw await apiError(response, "彻底清除失败", {
+      file_referenced_by_project: "这个文件被项目引用过，不能彻底清除",
+      file_directory_not_empty: "目录里还有东西，先清空再彻底清除",
+      file_not_trashed: "只有回收站里的文件能彻底清除",
+    });
+  }
+  return response.json();
+}
+
+export async function extractDriveArchive(nodeId: string, targetParentId?: string | null): Promise<DriveExtraction> {
+  const response = await apiFetch(`${API_URL}/api/drive/extractions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ node_id: nodeId, target_parent_id: targetParentId ?? null }),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "解压失败", {
+      archive_format_unsupported: "这个格式还不支持解压（目前支持 zip / tar / tar.gz / tgz）",
+      archive_path_unsafe: "归档里有不安全的路径或链接，已拒绝整份解压",
+      archive_too_many_entries: "归档里条目太多",
+      archive_uncompressed_size_exceeded: "解压后体积超过上限",
+      archive_ratio_exceeded: "压缩比异常（疑似压缩炸弹），已拒绝",
+      archive_target_conflict: "归档里有重复或冲突的路径",
+      archive_empty: "归档是空的",
+      file_quota_exceeded: "云盘空间不足，解压需要更多空间",
+    });
+  }
+  return response.json();
+}
+
+export async function retryDriveCleanup(): Promise<Record<string, number>> {
+  const response = await apiFetch(`${API_URL}/api/drive/cleanup/retry`, { method: "POST" });
+  if (!response.ok) throw await apiError(response, "清理重试失败");
+  return response.json();
+}
+
+// ---- Agent 工作区文件服务（FM-3/FM-4） -------------------------------------
+//
+// 工作区那侧是**队列语义**：人点一下 = 入队一个操作，Agent 领到才执行。所以这里没有"同步返回目录"
+// 的接口——`runWorkspaceOperation` 负责"入队 → 轮询 → 拿到终态"，页面只等它。
+
+export type AgentWorkspace = {
+  id: string;
+  agent_id: string;
+  device_id: string | null;
+  project_id: string | null;
+  display_name: string;
+  workspace_identity: string;
+  kind: "cloud" | "desktop";
+  status: "online" | "offline" | "unavailable";
+  policy_version: string;
+  protected_paths: string[];
+  last_seen_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type WorkspaceOperation = {
+  id: string;
+  workspace_id: string;
+  operation_type: string;
+  relative_path: string;
+  arguments: Record<string, any>;
+  status: "queued" | "claimed" | "running" | "succeeded" | "failed" | "cancelled" | "expired";
+  result: Record<string, any> | null;
+  error_code: string | null;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+};
+
+export type WorkspaceEntry = {
+  name: string;
+  relative_path: string;
+  kind: "file" | "directory";
+  size_bytes: number;
+  modified_at: string;
+  is_symlink: boolean;
+};
+
+export async function listAgentWorkspaces(): Promise<{
+  workspaces: AgentWorkspace[];
+  operations: WorkspaceOperation[];
+  large_file_bytes: number;
+}> {
+  const response = await apiFetch(`${API_URL}/api/agent-workspaces`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "工作区列表读取失败");
+  return response.json();
+}
+
+export async function getAgentWorkspace(workspaceId: string): Promise<{ workspace: AgentWorkspace; operations: WorkspaceOperation[]; audit: any[] }> {
+  const response = await apiFetch(`${API_URL}/api/agent-workspaces/${workspaceId}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "工作区读取失败", { workspace_not_found: "这个工作区不存在（或 Agent 已注销）" });
+  return response.json();
+}
+
+export async function createWorkspaceOperation(
+  workspaceId: string,
+  payload: { operation_type: string; relative_path?: string; arguments?: Record<string, any>; idempotency_key: string; fail_when_offline?: boolean },
+): Promise<{ operation: WorkspaceOperation; workspace: AgentWorkspace }> {
+  const response = await apiFetch(`${API_URL}/api/agent-workspaces/${workspaceId}/operations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "操作入队失败", {
+      workspace_path_outside_root: "路径越界（只能用工作区内的相对路径）",
+      workspace_path_invalid: "路径不合法",
+      workspace_path_required: "要指定路径",
+      operation_idempotency_conflict: "同一个幂等键对应了不同的内容",
+    });
+  }
+  return response.json();
+}
+
+export async function getWorkspaceOperation(workspaceId: string, operationId: string): Promise<{ operation: WorkspaceOperation }> {
+  const response = await apiFetch(`${API_URL}/api/agent-workspaces/${workspaceId}/operations/${operationId}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "操作状态读取失败");
+  return response.json();
+}
+
+export async function cancelWorkspaceOperation(workspaceId: string, operationId: string): Promise<{ operation: WorkspaceOperation }> {
+  const response = await apiFetch(`${API_URL}/api/agent-workspaces/${workspaceId}/operations/${operationId}/cancel`, { method: "POST" });
+  if (!response.ok) throw await apiError(response, "取消失败");
+  return response.json();
+}
+
+export async function createWorkspaceTransfer(payload: {
+  source_type: "drive" | "workspace" | "temp";
+  target_type: "drive" | "workspace" | "temp";
+  workspace_id?: string;
+  operation_id?: string;
+  expected_size?: number;
+  expected_hash?: string;
+  ttl_seconds?: number;
+}): Promise<{ transfer: { id: string; storage_key: string; status: string } }> {
+  const response = await apiFetch(`${API_URL}/api/workspace-transfers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw await apiError(response, "传输会话创建失败");
+  return response.json();
+}
+
+export async function putWorkspaceTransferContent(transferId: string, content: Blob): Promise<void> {
+  const response = await apiFetch(`${API_URL}/api/workspace-transfers/${transferId}/content`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: content,
+  });
+  if (!response.ok) {
+    throw await apiError(response, "内容上传失败", {
+      workspace_transfer_hash_mismatch: "内容哈希与声明不一致",
+      workspace_transfer_size_mismatch: "内容大小与声明不一致",
+    });
+  }
+}
+
+export async function getWorkspaceTransferContent(transferId: string): Promise<Blob> {
+  const response = await apiFetch(`${API_URL}/api/workspace-transfers/${transferId}/content`, { cache: "no-store" });
+  if (!response.ok) {
+    throw await apiError(response, "内容下载失败", { workspace_transfer_expired: "传输会话已过期（重新发起一次）" });
+  }
+  return response.blob();
+}
+
+const WORKSPACE_TERMINAL = new Set(["succeeded", "failed", "cancelled", "expired"]);
+
+export function isWorkspaceOperationFinished(operation: WorkspaceOperation): boolean {
+  return WORKSPACE_TERMINAL.has(operation.status);
+}
+
+/** 入队 + 轮询到终态。`onTick` 让页面能显示 queued → running 的真实过程（不乐观假成功）。 */
+export async function runWorkspaceOperation(
+  workspaceId: string,
+  payload: { operation_type: string; relative_path?: string; arguments?: Record<string, any>; fail_when_offline?: boolean },
+  options: { onTick?: (operation: WorkspaceOperation) => void; timeoutMs?: number; intervalMs?: number } = {},
+): Promise<WorkspaceOperation> {
+  const key = `${payload.operation_type}:${payload.relative_path ?? ""}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+  const created = await createWorkspaceOperation(workspaceId, { ...payload, idempotency_key: key });
+  let operation = created.operation;
+  options.onTick?.(operation);
+  const deadline = Date.now() + (options.timeoutMs ?? 120_000);
+  while (!isWorkspaceOperationFinished(operation)) {
+    if (Date.now() > deadline) {
+      throw new Error("操作等太久还没结果（Agent 可能不在线）；可以在下面的队列里取消它");
+    }
+    await new Promise((resolve) => setTimeout(resolve, options.intervalMs ?? 1200));
+    const latest = await getWorkspaceOperation(workspaceId, operation.id);
+    operation = latest.operation;
+    options.onTick?.(operation);
+  }
+  return operation;
+}
+
+export function workspaceOperationPayload(operation: WorkspaceOperation): Record<string, any> {
+  return { operation_type: operation.operation_type, relative_path: operation.relative_path, arguments: operation.arguments };
+}
+
+// ---- 云盘文件访问授权（FM-5） ----------------------------------------------
+
+export type FileAccessGrant = {
+  id: string;
+  owner_member_id: string;
+  agent_id: string;
+  device_id: string | null;
+  project_id: string;
+  task_id: string | null;
+  run_id: string | null;
+  conversation_id: string | null;
+  turn_id: string | null;
+  scope_type: "file" | "folder" | "drive";
+  root_node_id: string | null;
+  include_future_nodes: boolean;
+  capabilities: string[];
+  expires_at: string;
+  revoked_at: string | null;
+  revoke_reason: string | null;
+  created_at: string;
+  active?: boolean;
+  node_count?: number;
+  node_ids?: string[];
+};
+
+export async function listFileAccessGrants(params: { nodeId?: string; agentId?: string } = {}): Promise<{ grants: FileAccessGrant[] }> {
+  const search = new URLSearchParams();
+  if (params.nodeId) search.set("node_id", params.nodeId);
+  if (params.agentId) search.set("agent_id", params.agentId);
+  const response = await apiFetch(`${API_URL}/api/file-access-grants?${search.toString()}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "授权列表读取失败");
+  return response.json();
+}
+
+export async function createFileAccessGrant(payload: {
+  agentId: string;
+  deviceId?: string | null;
+  projectId: string;
+  nodeId?: string | null;
+  scopeType?: "file" | "folder" | "drive";
+  includeFutureNodes?: boolean;
+  expiresInSeconds?: number;
+}): Promise<{ grant: FileAccessGrant }> {
+  const response = await apiFetch(`${API_URL}/api/file-access-grants`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      agent_id: payload.agentId,
+      device_id: payload.deviceId ?? null,
+      project_id: payload.projectId,
+      node_id: payload.nodeId ?? null,
+      scope_type: payload.scopeType ?? "file",
+      include_future_nodes: payload.includeFutureNodes ?? false,
+      expires_in_seconds: payload.expiresInSeconds ?? 7 * 24 * 3600,
+    }),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "授权创建失败", {
+      file_access_capability_denied: "这个权限不允许授予（第一期只开放只读与导入）",
+      device_revoked: "设备已被撤销，不能再授权",
+      device_project_grant_invalid: "这台设备还没被授权进入该项目",
+      file_node_not_found: "文件不存在（或不是你的）",
+    });
+  }
+  return response.json();
+}
+
+export async function revokeFileAccessGrant(grantId: string, reason = "revoked_by_member"): Promise<{ grant: FileAccessGrant }> {
+  const response = await apiFetch(`${API_URL}/api/file-access-grants/${grantId}/revoke`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason }),
+  });
+  if (!response.ok) throw await apiError(response, "撤销失败");
   return response.json();
 }

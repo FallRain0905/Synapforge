@@ -62,12 +62,15 @@
     <h2>设置</h2>
     <label class="field"><span>平台地址（工作台与配对都用它）</span>
       <input id="platform" placeholder="https://synapforge.top" /></label>
+    <label class="field"><span>Agent 工作目录（任务在这里执行；输入文件下到它的 inputs/ 子目录）</span>
+      <input id="workspace" readonly /></label>
     <div class="switch">
       <input type="checkbox" id="auto-launch" />
       <span>开机自启（托盘常驻后台领任务）</span>
     </div>
     <div class="row" style="margin-top: 12px">
       <button id="save">保存设置</button>
+      <button class="secondary" id="choose-workspace">选择工作目录…</button>
       <button class="secondary" id="check-update">检查更新</button>
       <span class="hint" id="save-hint"></span>
     </div>

@@ -90,10 +90,14 @@ def ensure_schema(store: Any) -> None:
     if columns and "outputs" not in columns:
         # 2026-09-24：这一轮产出的文件（成果物，待审）——页面据此给出「下载 / 转入云盘」
         store.db.execute("ALTER TABLE agent_turns ADD COLUMN outputs TEXT NOT NULL DEFAULT '[]'")
+    if columns and "variant" not in columns:
+        store.db.execute("ALTER TABLE agent_turns ADD COLUMN variant TEXT NOT NULL DEFAULT ''")
     conversation_columns = {row[1] for row in store.db.execute("PRAGMA table_info(agent_conversations)")}
     if conversation_columns and "role" not in conversation_columns:
         # M-6：会话上选的角色（空 = 默认，不传 `--agent`）
         store.db.execute("ALTER TABLE agent_conversations ADD COLUMN role TEXT NOT NULL DEFAULT ''")
+    if conversation_columns and "variant" not in conversation_columns:
+        store.db.execute("ALTER TABLE agent_conversations ADD COLUMN variant TEXT NOT NULL DEFAULT ''")
 
     store.db.executescript(
         """
@@ -106,6 +110,7 @@ def ensure_schema(store: Any) -> None:
             title TEXT NOT NULL DEFAULT '',
             model TEXT NOT NULL DEFAULT '',
             role TEXT NOT NULL DEFAULT '',
+            variant TEXT NOT NULL DEFAULT '',
             command_template TEXT NOT NULL DEFAULT '[]',
             session_key TEXT,
             created_at TEXT NOT NULL,
@@ -122,6 +127,7 @@ def ensure_schema(store: Any) -> None:
             content TEXT NOT NULL DEFAULT '',
             model TEXT NOT NULL DEFAULT '',
             role TEXT NOT NULL DEFAULT '',
+            variant TEXT NOT NULL DEFAULT '',
             session_key TEXT,
             usage TEXT NOT NULL DEFAULT '{}',
             error TEXT NOT NULL DEFAULT '',
@@ -180,6 +186,7 @@ def _conversation(row: Any, turn_count: int = 0) -> AgentChatConversation:
         title=str(row["title"] or ""),
         model=str(row["model"] or ""),
         role=str(row["role"] or "") if "role" in row.keys() else "",
+        variant=str(row["variant"] or "") if "variant" in row.keys() else "",
         session_key=str(row["session_key"]) if row["session_key"] else None,
         turn_count=turn_count,
         created_at=_parse_time(row["created_at"]),
@@ -198,6 +205,7 @@ def _turn(row: Any) -> AgentChatTurn:
         content=str(row["content"] or ""),
         model=str(row["model"] or ""),
         role=str(row["role"] or "") if "role" in row.keys() else "",
+        variant=str(row["variant"] or "") if "variant" in row.keys() else "",
         session_key=str(row["session_key"]) if row["session_key"] else None,
         usage=_json(row["usage"], {}),
         error=str(row["error"] or ""),
@@ -536,8 +544,8 @@ def create_conversation(store: Any, member_id: str, data: AgentChatConversationC
     conversation_id = str(uuid4())
     timestamp = _now()
     store.db.execute(
-        "INSERT INTO agent_conversations (id, member_id, project_id, device_id, agent_id, title, model, role, command_template, session_key, created_at, updated_at, archived_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)",
+        "INSERT INTO agent_conversations (id, member_id, project_id, device_id, agent_id, title, model, role, variant, command_template, session_key, created_at, updated_at, archived_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, NULL)",
         (
             conversation_id,
             member_id,
@@ -547,6 +555,7 @@ def create_conversation(store: Any, member_id: str, data: AgentChatConversationC
             data.title.strip(),
             model,
             data.role.strip(),
+            data.variant,
             json.dumps(template, ensure_ascii=False),
             timestamp,
             timestamp,
@@ -607,6 +616,9 @@ def update_conversation(
     if data.model is not None:
         updates.append("model = ?")
         values.append(data.model.strip())
+    if data.variant is not None:
+        updates.append("variant = ?")
+        values.append(data.variant)
     if data.title is not None:
         updates.append("title = ?")
         values.append(data.title.strip())
@@ -701,8 +713,8 @@ def append_message(store: Any, conversation_id: UUID, member_id: str, data: Agen
     turn_id = str(uuid4())
     timestamp = _now()
     store.db.execute(
-        "INSERT INTO agent_turns (id, conversation_id, seq, status, prompt, content, model, role, session_key, usage, error, claimed_by, artifact_ids, claim_expires_at, created_at, claimed_at, completed_at) "
-        "VALUES (?, ?, ?, 'PENDING', ?, '', ?, ?, NULL, '{}', '', NULL, ?, NULL, ?, NULL, NULL)",
+        "INSERT INTO agent_turns (id, conversation_id, seq, status, prompt, content, model, role, variant, session_key, usage, error, claimed_by, artifact_ids, claim_expires_at, created_at, claimed_at, completed_at) "
+        "VALUES (?, ?, ?, 'PENDING', ?, '', ?, ?, ?, NULL, '{}', '', NULL, ?, NULL, ?, NULL, NULL)",
         (
             turn_id,
             str(conversation_id),
@@ -711,6 +723,8 @@ def append_message(store: Any, conversation_id: UUID, member_id: str, data: Agen
             str(conversation_row["model"] or ""),
             # 角色在**建这一轮**时就定下来（会话上后续改了角色只影响下一轮）——历史里"这轮谁跑的"才如实
             str(conversation_row["role"] or ""),
+            # 强度同样在建轮次时冻结；下一轮才读取会话上的新设置。
+            str(conversation_row["variant"] or ""),
             json.dumps(attachments, ensure_ascii=False),
             timestamp,
         ),

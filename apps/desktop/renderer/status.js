@@ -38,6 +38,9 @@ function render(snapshot) {
   const lastError = (status.shell && status.shell.last_error) || connection.last_error;
   $("last-error").textContent = lastError ? `最后错误：${lastError}` : "";
 
+  // 工作区是只读展示：改它要重启内核（`--workspace` 是启动参数），所以只能通过「选择工作目录…」
+  $("workspace").value = (status.shell && status.shell.workspace) || "—";
+
   $("pair-card").style.display = paired ? "none" : "block";
 
   const agents = status.local_agents || [];
@@ -94,6 +97,18 @@ $("pair").addEventListener("click", async () => {
 $("rescan").addEventListener("click", async () => render(await window.shell.rescan()));
 $("pause").addEventListener("click", async () => render(await window.shell.togglePause()));
 $("emergency").addEventListener("click", async () => render(await window.shell.toggleEmergency()));
+$("choose-workspace").addEventListener("click", async () => {
+  // 选完目录壳会重启内核（工作区是启动参数），这里只把结果如实说出来，不假装已经生效
+  $("save-hint").textContent = "已选择，正在重启内核…";
+  try {
+    const result = await window.shell.chooseWorkspace();
+    $("save-hint").textContent = result && result.cancelled
+      ? "已取消（工作目录没变）"
+      : `工作目录已改为 ${result.workspace}，内核重启中`;
+  } catch (error) {
+    $("save-hint").textContent = `选择失败：${error.message || error}`;
+  }
+});
 
 window.shell.onStatus((snapshot) => render(snapshot));
 window.shell.onLog((line) => {

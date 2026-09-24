@@ -36,6 +36,19 @@ const STAGE_LABEL: Record<string, string> = {
   delivery: "交付冻结",
 };
 
+const TASK_STATUS_LABEL: Record<string, string> = {
+  DRAFT: "草稿",
+  READY: "待领取",
+  CLAIMED: "已领取",
+  RUNNING: "执行中",
+  WAITING_REVIEW: "待复核",
+  NEEDS_REVISION: "需返工",
+  BLOCKED: "已阻塞",
+  FAILED: "失败",
+  APPROVED: "已批准",
+  CANCELLED: "已取消",
+};
+
 /**
  * 与 `store._task_transition_allowed` 对齐的可选流转。
  *
@@ -535,13 +548,19 @@ export default function TasksPage() {
         {grouped.length ? (
           <div className="grid grid-4">
             {grouped.map((group) => (
-              <div key={group.stage}>
-                <div className="eyebrow" style={{ marginBottom: 8 }}>{STAGE_LABEL[group.stage] ?? group.stage} · {group.tasks.length}</div>
+              <div className="task-stage-column" key={group.stage}>
+                <div className="task-stage-heading">
+                  <strong>{STAGE_LABEL[group.stage] ?? group.stage}</strong>
+                  <span>{group.tasks.length} 项</span>
+                </div>
                 <div className="list">
                   {group.tasks.slice(0, 6).map((task) => {
                     const diagnosis = diagnosisOf(task);
                     return (
-                      <div className="list-item list-item-static" key={task.id}>
+                      <div className="list-item list-item-static task-board-item" key={task.id}>
+                        <span className={`task-status-rail status-${String(task.status).toLowerCase()}`}>
+                          {TASK_STATUS_LABEL[String(task.status)] ?? String(task.status)}
+                        </span>
                         <div className="item-copy">
                           <strong>{task.title}</strong>
                           <small>{diagnosis.reason || diagnosis.label}</small>
@@ -563,7 +582,10 @@ export default function TasksPage() {
             <div className="table-head"><span>任务</span><span>阶段</span><span>负责人</span><span>状态</span><span /></div>
             {visible.map((task) => (
               <div className="table-row" key={task.id} data-testid={`task-row-${task.id}`}>
-                <div className="table-title">
+                <div className="table-title task-table-title">
+                  <span className={`task-status-rail status-${String(task.status).toLowerCase()}`}>
+                    {TASK_STATUS_LABEL[String(task.status)] ?? String(task.status)}
+                  </span>
                   <strong>{task.title}</strong>
                   <small>{task.description || "暂无说明"} · 更新于 {formatTime(task.updated_at)}</small>
                 </div>

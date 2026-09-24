@@ -1,0 +1,607 @@
+/* 个人云盘文件管理器（FM-2）。
+ *
+ * 单独放一个文件而不是塞进 `globals.css`：那边同时有别的改动在途，页面级的样式没必要挤在一起
+ * （Next.js 的 App Router 支持页面直接 import 自己的 CSS）。
+ * 命名统一 `drive-` 前缀，避免与全局类撞车。
+ */
+
+/* 页面与面板的网格**不许把剩余高度分给行**。
+ *
+ * 量出来的真因（1440 截图里那两片空白）：`.page-content` 是 grid，行默认会把容器剩余高度
+ * **按份分掉**——指标卡于是被撑到 214px（内容只有 ~90px），面板里也各自多出几十像素。
+ * 这两条只写在本页作用域里（`globals.css` 是共享的，不动它）：
+ * `align-content: start` 让行贴合内容、`grid-auto-rows: min-content` 锁住默认行高。 */
+.drive-page {
+  align-content: start;
+  align-items: start;
+  grid-auto-rows: min-content;
+}
+
+.drive-page .panel {
+  align-content: start;
+  align-items: start;
+}
+
+.drive-page .metrics-grid {
+  align-content: start;
+  align-items: start;
+  grid-auto-rows: min-content;
+}
+
+/* 工具条必须**压成一行**。
+ *
+ * 踩过的坑（截图里一眼看出来）：全局有 `input, select, textarea { width: 100% }`（与卡片选项
+ * 被拉成整行是同一个来源），面板头部里的下拉因此占满整行、把工具条撑成三行高，
+ * 顺带把「文件」面板的标题区顶出一大片空白。这里给本页控件写死宽度把它收回来。 */
+.drive-page .drive-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.drive-page .drive-toolbar select {
+  width: auto;
+  min-width: 116px;
+  padding: 5px 8px;
+  border: 1px solid var(--border, #d8dbe0);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  font-size: 13px;
+}
+
+.drive-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--border, #d8dbe0);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+}
+
+.drive-search input {
+  border: none;
+  outline: none;
+  background: transparent;
+  width: 150px;
+  font-size: 13px;
+}
+
+/* 面板头部在窄屏会换行：让工具条自己占满一行而不是各占一行 */
+.drive-page .panel-heading { align-items: flex-start; flex-wrap: wrap; }
+.drive-page .panel-heading-actions { flex-wrap: wrap; justify-content: flex-end; }
+
+.drive-crumbs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-wrap: wrap;
+  margin: 4px 0 10px;
+  font-size: 13px;
+}
+
+.drive-crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.drive-crumb button {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 6px;
+  color: var(--text-muted, #5b6270);
+}
+
+.drive-crumb button:hover {
+  background: var(--surface-hover, #f2f4f7);
+}
+
+.drive-crumb-current {
+  color: var(--text, #14171f) !important;
+  font-weight: 600;
+}
+
+.drive-crumb-sep {
+  color: var(--text-muted, #9aa1ad);
+}
+
+.drive-new-row,
+.drive-batch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  background: var(--surface-hover, #f6f7f9);
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+
+.drive-new-row input {
+  flex: 1 1 200px;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--border, #d8dbe0);
+  border-radius: 6px;
+}
+
+.drive-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border, #e3e6eb);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.drive-list-dragging {
+  outline: 2px dashed var(--accent, #2f6feb);
+  outline-offset: 2px;
+}
+
+.drive-row {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 92px 140px auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border, #eef0f4);
+  font-size: 13px;
+}
+
+.drive-row:last-child {
+  border-bottom: none;
+}
+
+.drive-row-head {
+  background: var(--surface-hover, #f6f7f9);
+  font-weight: 600;
+  color: var(--text-muted, #5b6270);
+  font-size: 12px;
+}
+
+.drive-row:hover {
+  background: var(--surface-hover, #fafbfc);
+}
+
+.drive-cell-check,
+.drive-cell-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.drive-cell-actions {
+  justify-content: flex-end;
+}
+
+.drive-cell-name {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.drive-cell-name small {
+  color: var(--text-muted, #8b93a1);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drive-cell-size,
+.drive-cell-time {
+  color: var(--text-muted, #5b6270);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.drive-name-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  min-width: 0;
+  color: inherit;
+  font: inherit;
+}
+
+/* 名字必须能截断：flex 子项默认 min-width:auto，长名字会把整行顶破（这个站里踩过很多次） */
+.drive-node-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.drive-rename-input {
+  min-width: 120px;
+  padding: 3px 6px;
+  border: 1px solid var(--accent, #2f6feb);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.drive-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted, #5b6270);
+  cursor: pointer;
+}
+
+.drive-icon-button:hover:not(:disabled) {
+  background: var(--surface-hover, #eef0f4);
+  color: var(--text, #14171f);
+}
+
+.drive-icon-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.drive-more {
+  margin-top: 8px;
+  width: 100%;
+  padding: 8px;
+  border: 1px dashed var(--border, #d8dbe0);
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--text-muted, #5b6270);
+  font-size: 13px;
+}
+
+.drive-danger {
+  color: var(--danger, #c0392b) !important;
+}
+
+.drive-job {
+  padding: 6px 0;
+}
+
+.drive-note {
+  color: var(--text-muted, #5b6270);
+  font-size: 12px;
+}
+
+.drive-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 380px;
+  max-width: 92vw;
+  background: var(--surface, #fff);
+  border-left: 1px solid var(--border, #e3e6eb);
+  box-shadow: -8px 0 24px rgba(15, 20, 30, 0.08);
+  padding: 16px;
+  overflow-y: auto;
+  z-index: 7;
+}
+
+.drive-drawer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.drive-drawer-head small {
+  display: block;
+  color: var(--text-muted, #8b93a1);
+  font-size: 12px;
+}
+
+.drive-detail-grid {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 6px 10px;
+  margin: 0 0 14px;
+  font-size: 13px;
+}
+
+.drive-detail-grid dt {
+  color: var(--text-muted, #8b93a1);
+}
+
+.drive-detail-grid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.drive-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-right: 8px;
+}
+
+.drive-drawer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 10px 0;
+  border-top: 1px solid var(--border, #eef0f4);
+  border-bottom: 1px solid var(--border, #eef0f4);
+}
+
+.drive-audit h3 {
+  font-size: 13px;
+  margin: 12px 0 6px;
+}
+
+.drive-audit-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.drive-picker {
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 0;
+}
+
+.drive-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+}
+
+.drive-picker-row:hover {
+  background: var(--surface-hover, #f2f4f7);
+}
+
+/* 手机上：列表收成两列、行操作换行；抽屉整宽（计划 §8.1 的移动端形态） */
+@media (max-width: 900px) {
+  .drive-row {
+    grid-template-columns: 28px minmax(0, 1fr) auto;
+    row-gap: 4px;
+  }
+
+  .drive-row-head .drive-cell-size,
+  .drive-row-head .drive-cell-time {
+    display: none;
+  }
+
+  .drive-cell-size::before,
+  .drive-cell-time::before {
+    content: attr(data-label) " ";
+    color: var(--text-muted, #9aa1ad);
+  }
+
+  .drive-cell-time {
+    display: none;
+  }
+
+  .drive-cell-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .drive-drawer {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .drive-search input {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drive-row,
+  .drive-icon-button {
+    transition: none;
+  }
+}
+
+/* ---------- 统一文件管理（FM-4）：左侧根列表 + 右侧内容 ---------- */
+
+.drive-shell {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.drive-body {
+  min-width: 0; /* flex/grid 子项默认 min-width:auto：宽内容会把整页顶出横向滚动条（这站踩过多次） */
+  display: grid;
+  gap: 22px;
+  align-content: start;
+}
+
+.drive-rail {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+  padding: 12px 10px;
+  border: 1px solid var(--border, #e3e6eb);
+  border-radius: 12px;
+  background: var(--surface, #fff);
+  position: sticky;
+  top: 12px;
+}
+
+.drive-rail h2 {
+  font-size: 12px;
+  color: var(--text-muted, #8b93a1);
+  margin: 2px 4px 6px;
+  font-weight: 600;
+}
+
+.drive-rail-item {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  padding: 7px 8px;
+  cursor: pointer;
+  color: inherit;
+}
+
+.drive-rail-item:hover {
+  background: var(--surface-hover, #f2f4f7);
+}
+
+.drive-rail-item.active {
+  background: var(--accent-soft, #eef2ff);
+}
+
+.drive-rail-label {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.drive-rail-label strong {
+  font-size: 13px;
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drive-rail-label small {
+  font-size: 11px;
+  color: var(--text-muted, #8b93a1);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drive-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex: 0 0 auto;
+}
+
+.drive-dot.ok {
+  background: var(--green, #2f9e63);
+}
+
+.drive-dot.off {
+  background: var(--text-muted, #9aa1ad);
+}
+
+.drive-source-body {
+  display: grid;
+  gap: 22px;
+  align-content: start;
+}
+
+.drive-offline {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--warning-border, #f0d9a8);
+  background: var(--warning-soft, #fdf6e6);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.drive-guard {
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface-hover, #eef0f4);
+  color: var(--text-muted, #5b6270);
+  flex: 0 0 auto;
+}
+
+.drive-op-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.drive-op-row .drive-node-name {
+  flex: 1 1 220px;
+}
+
+/* 「位置」按钮：只在窄屏出现（宽屏左侧栏常驻） */
+.drive-rail-toggle {
+  display: none !important;
+}
+
+@media (max-width: 900px) {
+  .drive-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .drive-rail {
+    display: none;
+  }
+
+  .drive-rail.drive-rail-open {
+    display: grid;
+    position: static;
+  }
+
+  .drive-rail-toggle {
+    display: inline-flex !important;
+  }
+}
+
+/* 授权弹窗里的两行字段（沿用全局 select 的样式，只控制宽度与排布） */
+.drive-grant-field {
+  display: grid;
+  gap: 4px;
+  margin: 10px 0;
+  font-size: 13px;
+}
+
+.drive-grant-field > span {
+  color: var(--text-muted, #5b6270);
+}
+
+.drive-grant-field select {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border, #d8dbe0);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  font-size: 13px;
+}

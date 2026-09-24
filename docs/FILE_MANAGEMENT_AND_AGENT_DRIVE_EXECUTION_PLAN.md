@@ -801,7 +801,11 @@ Agent 工作区：
 
 ### FM-0：阻塞修复与契约冻结确认
 
-**状态：READY**
+**状态：DONE（2026-09-24，交接 `docs/handoffs/FM_0_BLOCKERS_AND_WORKSPACE_HANDOFF.md`）**——
+端到端验收 `scripts/deploy/_fm0_verify.py` 9/9 通过；发现并修掉三处真问题（`loop_identity` 未定义导致
+带输入的任务从未真正拿到输入、任务通道把 `inputs/` 当产出重复上传、成员响应泄漏宿主机绝对路径），
+工作区口径统一为 `_workspace_root` 并补上桌面端选择/持久化/传参。**FM-1 起注意**：`028` 编号已被并行的
+MY-AGENT 强度工作占用，新增 migration 必须重新扫描编号。
 
 目标：先修会让后续文件链路不可信的现有问题。
 
@@ -826,7 +830,10 @@ Agent 工作区：
 
 ### FM-1：个人云盘正式数据模型和服务层
 
-**状态：READY，依赖 FM-0**
+**状态：DONE（2026-09-24，交接 `docs/handoffs/FM_1_DRIVE_SCHEMA_AND_SERVICE_HANDOFF.md`）**——
+迁移 `029`、节点树/引用/清理队列/审计四张表（含 RLS 与部分唯一索引）、服务层（目录/上传/下载/改名/移动/复制/
+回收站/配额/去重/并发）、旧接口兼容与幂等回填全部落地；`scripts/deploy/_fm1_verify.py` **26/26**。
+**FM-2 起注意**：`/api/drive` 旧路由是兼容壳，新语义一律走 `/api/drive/nodes*`；解压与 UI 属 FM-2。
 
 工作项：
 
@@ -854,7 +861,11 @@ Agent 工作区：
 
 ### FM-2：个人云盘文件管理器
 
-**状态：READY，依赖 FM-1**
+**状态：DONE（2026-09-24，交接 `docs/handoffs/FM_2_DRIVE_FILE_MANAGER_HANDOFF.md`）**——
+安全解压 22 类攻击样本全拒（扫描阶段零写入 + 失败补偿清理 + 配额整份过闸）、`/drive` 目录式管理器
+（面包屑/搜索/排序/分页/上传进度/改名移动复制/回收站/批量/详情抽屉）；HTTP 端到端 **47/47**，
+浏览器实机走完全流程并修掉两个真缺陷（渲染期请求风暴、网格行分掉剩余高度造成的空白）。
+**FM-3 起沿用**：路径安全写法（拒绝 `..`/绝对/盘符/UNC/symlink）与审计字段口径已在 `app/drive.py` 定好。
 
 工作项：
 
@@ -879,7 +890,10 @@ Agent 工作区：
 
 ### FM-3：Agent 工作区文件服务
 
-**状态：READY，依赖 FM-0**
+**状态：DONE（2026-09-24，交接 `docs/handoffs/FM_3_AGENT_WORKSPACE_FILE_SERVICE_HANDOFF.md`）**——
+迁移 `030` 四张表（含 RLS）、平台队列/传输/审计服务、两套 HTTP 契约（Gateway 零改动）、
+内核 `file_worker` + `safe_archive`（两道路径锁 + 先临时目录后原子移动）；端到端 **27/27**。
+**部署注意**：新能力 `workspace.files.*` 旧授权串没有，执行体需重新签发授权后再用 `--workspace-files` 打开。
 
 工作项：
 
@@ -904,7 +918,9 @@ Agent 工作区：
 
 ### FM-4：统一文件管理 UI
 
-**状态：READY，依赖 FM-2、FM-3**
+**状态：DONE（2026-09-24，交接 `docs/handoffs/FM_4_UNIFIED_FILE_UI_HANDOFF.md`）**——
+`/drive` 左侧根列表（云盘 + 多个 Agent 工作区）+ 工作区队列语义浏览器（状态可见/失败可重试/排队可取消/
+保护路径不给入口/离线只读缓存 + 最后同步时间）；浏览器实机验收通过（含 390px）。
 
 工作项：
 
@@ -927,7 +943,10 @@ Agent 工作区：
 
 ### FM-5：云盘授权与 Agent 读取
 
-**状态：READY，依赖 FM-1、FM-3**
+**状态：DONE（2026-09-24，交接 `docs/handoffs/FM_5_AGENT_DRIVE_GRANTS_HANDOFF.md`）**——
+迁移 `031` 三张表（含 RLS）、Grant/Node/Lease 服务（默认只读、快照范围、epoch 撤销、联动撤销）、
+Agent 专用读取接口、内核物化到 `inputs/` + Manifest；端到端 **22/22**（含撤销演练与负向矩阵）。
+**偏差**：前端授权面板未做浏览器实机、`/devices` 授权视图未做。
 
 工作项：
 
@@ -953,7 +972,10 @@ Agent 工作区：
 
 ### FM-6：显式跨空间传输与生产加固
 
-**状态：READY，依赖 FM-4、FM-5**
+**状态：部分交付（2026-09-24，交接 `docs/handoffs/FM_6_FILE_TRANSFER_HARDENING_HANDOFF.md`）**——
+跨空间显式传输两条路 + 冲突口径 + 传输历史 + 过期回收 + 孤儿扫描 + S3 协议测试已交付并端到端 **15/15**；
+**未做**：断点续传、真 MinIO/S3 与 PostgreSQL/RLS 真机验证（本机无 Docker）、soak 与备份恢复演练、
+定时回收任务、前端跨空间传输入口、旧接口 Deprecation 头。见交接 §4 的逐条清单。
 
 工作项：
 

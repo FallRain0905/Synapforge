@@ -648,6 +648,17 @@ button.profile-avatar { border: 0; cursor: pointer; }
   .mobile-tab { font-size: 10.5px; }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 /* 数据未到位时的骨架占位（LoadingSkeleton） */
 .skeleton { display: grid; gap: 10px; }
 .skeleton-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-muted); }
@@ -858,8 +869,8 @@ button.profile-avatar { border: 0; cursor: pointer; }
 /* 聊天 Tab：左栏铺满剩余视口高度、右栏与它等高；两侧各自内部滚动，页面本身不滚 */
 .page-content[data-page="workspace"] > .workspace-grid { flex: 1 1 auto; min-height: 0; }
 .workspace-grid.is-fill { align-items: stretch; }
-.workspace-grid.is-fill > .workspace-main { display: flex; min-height: 0; }
-.workspace-grid.is-fill > .workspace-main > .panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.workspace-grid.is-fill > .workspace-main { display: flex; min-width: 0; min-height: 0; }
+.workspace-grid.is-fill > .workspace-main > .panel { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .workspace-grid.is-fill .chat-stream { flex: 1 1 auto; max-height: none; min-height: 0; }
 .workspace-grid.is-fill > .workspace-side { display: flex; flex-direction: column; min-height: 0; overflow-y: auto; gap: var(--space-4); }
 .workspace-grid.is-fill > .workspace-side > .panel:last-child { flex: 1 1 auto; }
@@ -898,7 +909,7 @@ button.profile-avatar { border: 0; cursor: pointer; }
    这里把铺满相关的约束全部退回自然流，页面照旧整体滚动。 */
 @media (max-width: 980px) {
   .page-content[data-page="workspace"] > .workspace-grid.is-fill { flex: 0 0 auto; }
-  .workspace-grid.is-fill > .workspace-main > .panel { flex: 0 0 auto; }
+  .workspace-grid.is-fill > .workspace-main > .panel { flex: 1 1 auto; }
   .workspace-grid.is-fill .chat-stream { flex: 0 0 auto; max-height: 48vh; min-height: 200px; }
   .workspace-grid.is-fill > .workspace-side { overflow: visible; }
   .workspace-grid.is-fill > .workspace-side > .panel:last-child { flex: 0 0 auto; }
@@ -1327,6 +1338,7 @@ button.profile-avatar { border: 0; cursor: pointer; }
   padding: 0;
 }
 .my-agent-picker select:focus-visible { outline: none; }
+.my-agent-session-toggle { display: none; align-items: center; gap: 6px; }
 .my-agent-meta-line { font-size: 12px; color: var(--muted); margin-left: auto; white-space: nowrap; }
 
 /* 对话流：人类气泡靠右、执行体回答靠左，与项目工作区同一套读法 */
@@ -1428,6 +1440,21 @@ button.profile-avatar { border: 0; cursor: pointer; }
 }
 .composer-send:disabled { opacity: 0.4; cursor: not-allowed; }
 .composer-send.is-stop { background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); }
+.my-agent-new-reply {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: -2px auto 0;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-soft);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  font-size: 12px;
+}
 
 /* 「+」展开的添加面板（浮在输入框上方；仿 zcode 的添加区：图标 + 名称 + 一行说明） */
 .composer-add {
@@ -1612,6 +1639,22 @@ button.profile-avatar { border: 0; cursor: pointer; }
 
 .my-agent-events { display: grid; gap: 6px; min-width: 0; }
 .my-agent-events-label { font-size: 11.5px; color: var(--muted); margin-bottom: 2px; }
+.my-agent-process-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+.my-agent-process-toggle:hover { background: var(--surface-muted); }
+.my-agent-process-toggle span { margin-left: auto; color: var(--muted); }
 .my-agent-event {
   display: flex;
   gap: 8px;
@@ -1640,14 +1683,105 @@ button.profile-avatar { border: 0; cursor: pointer; }
   background: var(--surface);
 }
 
+.my-agent-session-drawer, .my-agent-session-backdrop { display: none; }
+.my-agent-session-drawer {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 10;
+  width: min(340px, calc(100% - 28px));
+  padding: var(--space-3);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.my-agent-session-drawer .ask-new-chat { flex: 0 0 auto; }
+.my-agent-session-drawer .ask-sessions-scroll { flex: 1 1 auto; }
+.my-agent-session-backdrop { position: absolute; inset: 0; z-index: 9; background: rgba(0, 0, 0, 0.38); }
+
 @media (max-width: 1240px) {
   .my-agent-layout { grid-template-columns: 224px minmax(0, 1fr); }
 }
 @media (max-width: 900px) {
   .my-agent-layout { grid-template-columns: minmax(0, 1fr); }
   .ask-sessions { display: none; }
+  .my-agent-session-toggle { display: inline-flex; }
+  .my-agent-session-drawer, .my-agent-session-backdrop { display: flex; }
+  .my-agent-session-backdrop { display: block; }
   .my-agent-toolbar { gap: 6px; }
   .my-agent-picker select { max-width: 150px; }
+}
+@media (max-width: 560px) {
+  .my-agent-shell { overflow: hidden; }
+  .my-agent-toolbar { flex-wrap: nowrap; }
+  .my-agent-title { flex: 1 1 auto; }
+  .my-agent-picker, .my-agent-meta-line, .my-agent-role-note { display: none; }
+  .my-agent-drawer-toggle { flex: 0 0 auto; min-height: 40px; padding-inline: 10px; }
+  .composer-bar { flex-wrap: wrap; }
+  .composer-icon-button, .composer-send, .icon-button { width: 40px; height: 40px; }
+  .composer-picker { flex: 1 1 120px; min-height: 40px; }
+  .composer-picker select { max-width: 100%; }
+  .composer-count { order: 5; flex: 1 1 100%; }
+  .ask-session-delete { width: 40px; height: 40px; display: inline-flex; align-items: center; justify-content: center; }
+  .my-agent-approval-actions .button { min-height: 40px; }
+  .my-agent-mode-footer { align-items: flex-start; }
+  .my-agent-mode-footer > .hint { display: none; }
+}
+
+/* W12：项目当前推进区。 */
+.overview-current { display: flex; justify-content: space-between; gap: var(--space-5); padding: 24px; border: 1px solid var(--border-strong); border-left: 4px solid var(--text); border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--shadow); }
+.overview-current-copy { display: grid; gap: 6px; min-width: 0; }
+.overview-current-copy h2 { font-size: clamp(22px, 3vw, 30px); letter-spacing: -0.025em; }
+.overview-current-copy p, .overview-current-copy small { color: var(--muted); }
+.overview-current-copy > strong { margin-top: 8px; font-size: 15px; }
+.overview-current-action { display: flex; flex: 0 0 auto; flex-direction: column; align-items: flex-end; justify-content: center; gap: 10px; }
+.overview-blocker, .overview-clear { display: inline-flex; align-items: center; gap: 6px; width: fit-content; margin-top: 8px; padding: 6px 9px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-soft); font-size: 12px; }
+.overview-blocker { border-left: 3px solid var(--amber); }
+.overview-clear { color: var(--muted); }
+.overview-quick-links { opacity: 0.82; }
+.overview-quick-links .card { box-shadow: none; padding: var(--space-4); }
+
+.workspace-tabs { position: sticky; top: 55px; z-index: 12; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; background: var(--surface); padding-top: 8px; }
+.workspace-tabs .tab { flex: 0 0 auto; min-height: 40px; }
+
+/* W12：任务状态以文字和轨道辅助扫读。 */
+.task-stage-column { min-width: 0; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-muted); }
+.task-stage-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.task-stage-heading strong { font-size: 12.5px; }
+.task-stage-heading span { color: var(--muted); font-size: 11px; }
+.task-board-item { grid-template-columns: auto minmax(0, 1fr); align-items: start; padding-inline: 4px; }
+.task-board-item > .status-pill { grid-column: 2; }
+.task-status-rail { display: inline-flex; align-items: center; justify-content: center; min-width: 52px; min-height: 22px; padding: 2px 6px; border-left: 3px solid var(--muted); background: var(--surface); color: var(--text-soft); font-size: 10.5px; font-weight: 600; white-space: nowrap; }
+.task-status-rail.status-running, .task-status-rail.status-claimed, .task-status-rail.status-ready { border-left-color: var(--text); }
+.task-status-rail.status-waiting_review, .task-status-rail.status-needs_revision { border-left-color: var(--amber); }
+.task-status-rail.status-blocked, .task-status-rail.status-failed { border-left-color: var(--red); }
+.task-status-rail.status-approved { border-left-color: var(--green); }
+.task-table-title { grid-template-columns: auto minmax(0, 1fr); align-items: center; column-gap: 8px; }
+.task-table-title small { grid-column: 1 / -1; }
+
+.review-priority .panel { border-color: var(--border-strong); border-left: 4px solid var(--text); box-shadow: var(--shadow); }
+.review-priority .list-item { padding-block: 13px; border-bottom: 1px solid var(--border); border-radius: 0; }
+.review-priority .list-item:last-child { border-bottom: 0; }
+.review-approve { min-height: 36px; padding: 6px 12px; }
+.review-metrics { opacity: 0.86; }
+
+@media (max-width: 760px) {
+  .overview-current { flex-direction: column; padding: 18px; }
+  .overview-current-action { align-items: stretch; }
+  .overview-current-action .button { justify-content: center; min-height: 40px; }
+  .overview-quick-links { grid-template-columns: minmax(0, 1fr); }
+  .workspace-tabs { top: 51px; margin-inline: calc(-1 * var(--space-4)); padding-inline: var(--space-4); }
+  .review-priority .list-actions { justify-items: start; width: 100%; }
+  .review-priority .form-row { gap: 12px; }
+  .review-priority .text-button, .review-priority .button { min-height: 40px; }
+}
+@media (max-width: 400px) {
+  .workspace-tabs { margin-inline: calc(-1 * var(--space-3)); padding-inline: var(--space-3); }
+  .task-table-title { grid-template-columns: minmax(0, 1fr); }
+  .task-table-title small { grid-column: auto; }
 }
 
 /* M-3 附件：输入区上方的芯片 + 气泡里的附件名 */

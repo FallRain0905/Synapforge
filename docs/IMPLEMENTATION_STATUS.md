@@ -907,3 +907,122 @@ JSON parse: domain schemas, agent gateway/session schemas    -> passed
 - **强度（`--variant`）没上，附证据**：CLI 通道接受该参数（`high/minimal/max/default` exit=0，同题 token 画像不同），但**常驻通道把 `message.model.variant` 收下却不生效**——发完消息回读会话仍是 `model.variant = "default"`（v1/v2 两条读接口一致）。上它就是"设了没生效"的静默坑；两条可选路（①只做 CLI 通道并在页面标注；②继续探 serve 侧配置声明 `variants` 的正确形状）见交接 §3。
 - **顺手修的两个真问题**：① **中间列横向溢出**（`.my-agent-main`/`.panel` 缺 `min-width: 0`，宽内容把列撑到 1353px / 容器 708px，输入框与发送键跑到视口外→"点不着打不进字"）——已修并注入验证；② **设备授权 24h 过期导致对话通道中断**（执行体每 5s `401 device_project_token_expired`、新建会话报裸错误码）——已用 30 天新授权恢复；**设计缺口**：到期无提醒、无续期提示，建议"授权可选有效期 + 列表显示到期 + 一键续期"（细交接 §4）。
 - 交接 `docs/handoffs/MY_AGENT_M5C_S4_THINKING_HANDOFF.md`。
+
+## FM-6 显式跨空间传输与生产加固（2026-09-24：**部分交付**，端到端 15/15）
+
+- **已交付**：跨空间显式传输两条路（云盘→工作区、工作区→云盘 + 存进云盘）、冲突口径（同名不覆盖、
+  哈希不符拒收、每次调用都是独立的一次显式复制）、传输历史（会话 + 操作终态 + 失败原因 + 可重试）、
+  过期会话回收（删对象）、孤儿对象扫描（**只报告不删**）、S3 后端协议测试（注入客户端 + 云盘服务在 S3 上跑通）。
+- **验收** `scripts/deploy/_fm6_verify.py` **15/15**（真 HTTP + 真 Worker：传输往返、并发 8 路全部有终态、
+  同名冲突如实失败、回收删对象、扫描不删对象）。测试：`test_file_transfers.py` 12 项、`test_s3_object_store.py` 5 项。
+- **测试抓到的真问题**：会话与操作之间没对号（`operation_id` 不回填）→ 传输历史看不到成败与原因；已修。
+- **未做（逐条）**：断点续传、真 MinIO/S3 端到端（本机无 Docker）、PostgreSQL/RLS 真机验证、
+  长时间 soak 与备份/恢复演练、定时回收任务、**前端跨空间传输入口**、旧接口 `Deprecation` 头。
+- 交接 `docs/handoffs/FM_6_FILE_TRANSFER_HARDENING_HANDOFF.md`（含 FM 全计划收尾状态与下一步建议顺序）。
+
+## FM-5 云盘文件访问授权与 Agent 读取（2026-09-24：**已交付，平台 20 + 内核 6 + 端到端 22/22**）
+
+- 迁移 `031`（`file_access_grants` / `file_access_grant_nodes` / `file_access_leases`，全开 RLS）+ 服务层：
+  默认只读能力（写/删/移动**不在可授予集合**）、粒度 file/folder/drive、文件夹授权**快照**语义
+  （勾"包含以后新增"才动态）、过期上限 30 天、撤销 = `epoch+1` **不删行**、设备/成员/任务/Agent 联动撤销。
+- Agent 侧：`/api/agent/file-leases/exchange`（明文只签一次、库里只存哈希）+ `/api/agent/drive/files`
+  + `/node/{id}` + `/node/{id}/content`（每次重判范围/能力/epoch/设备）+ `/materialize`；
+  内核 `drive_materializer.py` 物化到 `<workspace>/inputs/`（sha256 对账、不覆盖、失败如实记账、写 Manifest），
+  接入 `daemon-run --drive-grant <id>`。
+- **测试抓到真问题**：授权列表原先只按组织收口 → 同组织同事能看到你的授权对象；已改为按 `owner_member_id` 收口。
+- 验收 `scripts/deploy/_fm5_verify.py` **22/22**（含撤销演练：撤销后同段 lease 立刻失效、已物化副本按计划保留）。
+- **偏差**：前端授权面板（详情抽屉「授权给哪些 Agent」+ 一键撤销）已写完并通过构建，但**未做浏览器实机**；
+  `/devices` 的授权视图没做；续期接口可用但页面无入口。交接 `docs/handoffs/FM_5_AGENT_DRIVE_GRANTS_HANDOFF.md`。
+
+## FM-3 Agent 工作区文件服务（2026-09-24：**已交付，内核 20 + 平台 22 + 端到端 27/27**）
+
+- **平台侧**：迁移 `030`（`agent_workspaces`/`workspace_operations`/`file_transfer_sessions`/`workspace_audit`，全开 RLS）
+  + 服务层（登记、幂等入队、领取、start/progress/complete、取消、过期回收、传输会话、审计）
+  + 两套 HTTP 契约（Agent 侧 `X-Agent-Id` + 项目能力令牌；浏览器侧人类会话）。**Gateway 零改动**。
+  - 平台只做**语法**路径校验，权威校验在 Agent；工作区只存 `workspace_identity`（路径哈希），**不持有宿主机路径**；
+  - 离线**照常入队**保持 `queued`（`fail_when_offline` 才立刻失败）；`complete` 只认第一次。
+- **内核侧**：`file_worker.py`（领取→执行→回报；**两道锁**：逐级 `lstat` 拒 symlink/junction/reparse
+  ＋ `resolve()`+`commonpath` 兜底；上传先写临时文件再 `os.replace`）与 `safe_archive.py`（先解到临时目录、
+  校验通过再原子移动）。`daemon-run --workspace-files` **默认关**（需要新能力，见交接 §4）。
+- **新增能力** `workspace.files.{read,write,claim}`：**旧授权串里没有**，已配对设备需重新签发授权。
+- **验收**：`scripts/deploy/_fm3_verify.py` **27/27**（真平台 + 真 Worker 真动文件；逃逸样本两道锁全拒、
+  保护路径拒删且文件仍在、离线不假装、幂等 409、审计无路径明文）。
+- 测试：内核 **20**（含 Windows junction 用例）、平台 **22**；交接 `docs/handoffs/FM_3_AGENT_WORKSPACE_FILE_SERVICE_HANDOFF.md`。
+
+## FM-4 统一文件管理界面（2026-09-24：**已交付并通过浏览器实机验收**）
+
+- `/drive` 左侧「位置」栏 = 个人云盘 + 每个已接入的 Agent 工作区（在线状态 + 最后同步时间）；右侧同一套浏览形态。
+- 工作区那侧**队列语义**：每个动作入队 → Agent 领取 → 执行，状态全程可见（失败可重试、排队可取消），
+  **不乐观改本地列表**；**保护路径不显示操作入口**（`.git`/`.math-agent-platform`/工作区根/自报保护目录）；
+  **离线只读缓存**（最后一次成功目录落 `localStorage` + 「最后同步 X」，不再塞注定失败的 list）。
+- 内核一处修正：`list` 结果返回**生效的**保护清单，否则页面会以为 `.git` 可删、点了必被拒。
+- 浏览器实机：多根切换、目录进出、新建/上传/下载（真执行）、详情抽屉、离线缓存与排队、390/900/1280/1440
+  无横向滚动；页面全文无宿主机绝对路径。
+- 交接 `docs/handoffs/FM_4_UNIFIED_FILE_UI_HANDOFF.md`。
+
+## FM-2 个人云盘文件管理器（2026-09-24：**已交付，后端 24 项 + 端到端 47/47 + 浏览器实机走完全流程，未部署**）
+
+- **安全解压**（`app/archive.py` + `POST /api/drive/extractions`）：Zip Slip/绝对路径/盘符/UNC、
+  zip symlink、tar symlink/hardlink/设备文件、控制字符、保留名、超深、条目数、单文件与总量、
+  压缩比（zip bomb）、归档内冲突、不支持格式、空归档——**22 类攻击样本一律拒绝**；
+  嵌套归档与 `__MACOSX`/`.DS_Store` 跳过并如实计数。扫描阶段**不写任何东西**，落库中途失败**补偿清理**
+  （用户看到的要么完整、要么什么都没有）。配额在整份解压上一次性过闸。
+- **`/drive` 改成目录式文件管理器**：面包屑/双击进入/搜索/排序/游标分页、新建文件夹、
+  拖拽上传（**XHR 真进度**）、下载、行内改名、移动（目录选择弹窗）、复制、删除→回收站、
+  回收站恢复/彻底清除（各带二次确认）、批量选择与批量操作、解压入口、**详情抽屉**（sha256/修订/
+  来源成果物/项目引用/**最近审计**/操作按钮），保留"加入项目"与"转换入知识库"。移动端 ≤900px 收成标签行。
+- **浏览器实机抓出并修掉两个真缺陷**：①`loadNodes/loadTrash` 的 `useCallback` 依赖 `notify`（每次渲染都换
+  identity）→ 每渲染重新拉目录 + 刚点开的控件被下次渲染换掉（"点了没反应"）；②页面两片空白——全局
+  `.page-content` 的行会把剩余高度分掉（指标卡被撑到 214px）、全局 `input/select { width:100% }` 把排序
+  下拉拉成整行。修法都在本页作用域内（没动共享 `globals.css`）。
+- 样式放独立的 `app/drive/drive.css`（避开并行改动）；测试 `test_drive_extraction.py` 24 项、
+  `scripts/deploy/_fm2_verify.py` **47/47**；API 全量通过（仅 2 项既有 LaTeX 失败）、前端 tsc + 构建通过。
+- **偏差**：解压不递归嵌套归档、无批量下载、解压为同步请求（异步队列与断点续传属 FM-6）。
+  交接 `docs/handoffs/FM_2_DRIVE_FILE_MANAGER_HANDOFF.md`。
+
+## FM-1 个人云盘正式数据模型与服务层（2026-09-24：**已交付并端到端验收 26/26，未部署**）
+
+- **数据模型**：`029_drive_nodes.sql` 建 `drive_nodes`（目录树）+ `drive_project_refs`（项目引用）
+  + `drive_object_cleanup`（对象清理队列）+ `drive_audit`（审计），四张表都开 RLS；
+  部分唯一索引保证"同父同名唯一（回收站名字可重用）"与"每成员一个根"。老表 `personal_drive_files`
+  一行不动，启动时**幂等回填**进节点树（同 id/storage_key/hash/created_at），`project_ids` 展开成引用行。
+- **服务层**（`app/drive.py`）：建目录、上传（同目录同名 409、不覆盖）、下载（每次校验 hash）、
+  改名/移动（拒环、修订冲突 409）、复制（同名自动 `-副本`）、软删除→回收站→恢复→彻底清除、
+  分页/搜索/排序、审计。错误码用计划 §6.5 的 `file_*` 词表；旧路由保持历史形状与历史错误码。
+- **四个确定答案**：名字按 NFKC+大小写折叠归一（Windows/macOS 上是同一个名字）；
+  配额按**去重后的物理对象**算、软删除仍计入；写操作走进程内写锁 + 事务（SQLite 只有一条连接，
+  一个线程 rollback 会丢掉另一个线程未提交的插入——并发测试抓出来的真问题）；
+  对象删除**先落库后删对象**，失败留 `pending`+`attempts`+`last_error` 可重试。
+- **两处刻意的行为变化**：同内容上传不再合并成同一条记录（现在是两个文件、共用对象、只收一份费）；
+  旧 `DELETE /api/drive/{id}` 仍是硬删，新 `DELETE /api/drive/nodes/{id}` 才进回收站。
+  「转入云盘」保持幂等（点两次同一个成果物 → 同一份文件；同名不同内容自动加 `-2`）。
+- **验收**：`scripts/deploy/_fm1_verify.py` **26/26**（真 uvicorn + 真 multipart + 真下载头 +
+  真并发 + required 模式）；新增 `test_drive_nodes.py` 40 项；API 全量 **602 项**（仅 2 项既有 LaTeX 失败）。
+- **偏差**：PostgreSQL 侧只到 schema/RLS/索引，服务层 PG 实现与 advisory lock 留 FM-6；
+  写锁是进程内的（单 worker 正确）；解压归 FM-2。交接 `docs/handoffs/FM_1_DRIVE_SCHEMA_AND_SERVICE_HANDOFF.md`。
+
+## FM-0 文件管理前置：阻塞修复 · 工作区口径 · 契约边界（2026-09-24，**已完成并端到端验收，未部署**）
+
+- **修了一个"从来没拿到输入"的真 bug**：`agentd._execute_task` 引用从未定义的 `loop_identity`
+  （参数名是 `identity`），`NameError` 被"取不到输入也照常跑"的兜底吃掉——任务照常成功上报，
+  但提示词里写着"输入文件处理失败"、`inputs/` 永远空着。现在提示词列文件、清单记账。
+- **工作区口径统一成一处**（`_workspace_root`）：注册上报的 `local_workspace`、Runner 的 cwd、
+  输入落点、产出扫描根是同一个目录；桌面壳新增「Agent 工作目录…」（托盘/菜单/本机页），
+  从 `desktop.json` 持久化、每次启动显式传 `--workspace`，内核也把选择合并写进 `platform.json`
+  （打包后 cwd 是安装目录这条老坑到此为止）。
+- **`inputs/` 不再被当成产出**：任务通道的扫描器补齐顶层排除（对话通道早就排除了）——
+  以前输入会被重新上传成"本轮成果物"，同一份文件在项目里出现两次。
+- **成员响应不再带宿主机绝对路径**：新增 `app/path_privacy.py`，`GET /api/agents` 给
+  `workspace_identity`（sha256 前 12 位）而不是 `local_workspace`；Run 的 `observed_input_files`
+  （含边界结论里嵌的那份）与 Artifact 的 `source_path` 只留文件名；设备侧注册/心跳仍返回原值以便对账。
+- **输入清单**：`<workspace>/.math-agent-platform/inputs-manifest.json` 记
+  `artifact id → 相对路径 → sha256 → 字节数`（FM-5 输入 Manifest 的底座）。
+- **端到端验收** `scripts/deploy/_fm0_verify.py`（临时库/临时对象目录跑真 API + 真内核）：**9/9 通过**
+  ——输入落地、字节与 hash 一致、清单对账、提示词无"处理失败"、Runner cwd == 注册工作区、
+  输入未被重复上传、Run `SUCCEEDED`、任务 `WAITING_REVIEW`。
+- **事实核对**：生产对象存储 `OBJECT_STORE_BACKEND=local`（22 个对象；24 个 artifact 里 **5 个没有
+  `storage_key`**）；云端工作区 `/srv/synapforge/cloud` 与单元文件一致。**Compose 变量不一致已记录**：
+  `infra/docker-compose.yml`（禁区）传的 `STAGE4_MINIO_ENDPOINT` 没有任何生产代码读，Compose 里的
+  MinIO 起了但从不被用——留给 FM-6（S3/MinIO 生产化）一起修。
+- 测试：Agent **439** 项（11 skipped）、平台 **563** 项（2 项既有 LaTeX 环境失败）、`node --check` 通过；
+  本期**未改 `apps/web`**、未跑部署脚本。交接 `docs/handoffs/FM_0_BLOCKERS_AND_WORKSPACE_HANDOFF.md`。

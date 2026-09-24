@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Generator, TypeVar
 from uuid import UUID
 
-from fastapi import Body, FastAPI, File, Header, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
@@ -46,7 +46,12 @@ from .contracts import (
     DeliveryBundleRequest,
     DeliveryChecklistRequest,
     DeliveryCompileRequest,
+    DriveDirectoryCreate,
+    DriveExtractionCreate,
     DriveImportRequest,
+    DriveNodeCopy,
+    DriveNodeMove,
+    DriveNodePatch,
     AiSettingsUpdate,
     CompetitionPackReviewRequest,
     ConversationCreate,
@@ -163,10 +168,24 @@ from .contracts import (
     AttentionItem,
     TaskFlags,
     TaskStatus,
+    WorkspaceOperationClaim,
+    WorkspaceOperationComplete,
+    WorkspaceOperationCreate,
+    WorkspaceOperationProgress,
+    WorkspaceRegisterRequest,
+    WorkspaceTransferCreate,
+    FileAccessGrantCreate,
+    FileAccessGrantDecision,
+    FileLeaseExchange,
+    FileTransferDriveToWorkspace,
+    FileTransferSave,
+    FileTransferWorkspaceToDrive,
 )
 from .store import Store
 from .accounts import LOGIN_THROTTLE
 from .object_store import create_object_store
+from .path_privacy import public_agent, public_artifact, public_run
+from . import archive, drive, drive_grants, file_transfers, workspace_files
 from .cumcm_importer import CumcmHandoffImporter, CumcmImporter
 from .gateway import GatewayProtocolError, GatewayService
 from . import agent_chat, ai_chat, ai_probe, boundary_gate, collaboration, convert_queue, delivery, document_api, kb_gateway, knowledge_base, observability, pack_api, personal_drive
@@ -177,6 +196,9 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 store = Store(BASE_DIR / "data" / "platform.db", object_store=create_object_store(BASE_DIR / "data" / "objects"))
 # 「我的智能体」对话表（agent_conversations / agent_turns / agent_turn_events）：启动时建好
 agent_chat.ensure_schema(store)
+# 个人云盘（FM-1）：节点树 + 引用 + 对象清理队列 + 审计；老表数据一次性回填（幂等）
+drive.ensure_schema(store)
+DRIVE_BACKFILL = drive.backfill_legacy(store)
 importer = CumcmImporter(store)
 handoff_importer = CumcmHandoffImporter(store)
 gateway = GatewayService(store)
@@ -1702,6 +1724,903 @@ def copy_artifact_into_drive(artifact_id: UUID, request: Request) -> dict[str, A
         raise HTTPException(status_code=status, detail=str(error)) from error
 
 
+# ---- 个人云盘文件服务（FM-1：目录树、下载、改名/移动/复制、回收站、审计） ----
+#
+# 旧的四条路由（上面那一段）继续可用，内部已经改走同一套服务；这一段是**新接口**，
+# 路径与错误码按文件管理计划 §6.1/§6.5 定，UI（FM-2）与后续的跨空间传输（FM-6）都用它。
+
+
+def _drive_actor(request: Request) -> drive.DriveActor:
+    """操作者上下文：从会话解析成员，并带出他所属的组织（服务层每一步都校验）。
+
+    成员行缺失时**拒绝**（403）而不是编一个组织——云盘是私有资产，宁可不服务也不猜。
+    """
+
+    member_id = _request_member_id(request)
+    try:
+        return drive.actor_for(store, member_id)
+    except drive.DriveError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+
+
+def _drive_error(error: drive.DriveError) -> HTTPException:
+    """稳定错误码 → HTTP 状态：找不到 404、冲突 409、配额 413、其余 400。"""
+
+    code = error.code
+    if code in {"file_node_not_found", "drive_actor_unknown"}:
+        return HTTPException(status_code=404, detail=str(error))
+    if code in {
+        "file_name_conflict",
+        "file_revision_conflict",
+        "file_directory_cycle",
+        "file_referenced_by_project",
+        "file_directory_not_empty",
+        "file_not_trashed",
+    }:
+        return HTTPException(status_code=409, detail=str(error))
+    if code in {"file_quota_exceeded", "file_copy_too_large"}:
+        return HTTPException(status_code=413, detail=str(error))
+    # 解压：条目数/总大小/压缩比超限按"太大"处理（413），路径不安全与格式不支持是 400，
+    # 目标冲突是 409——前端据此决定是提示改参数还是直接报错
+    if code in {"archive_too_many_entries", "archive_uncompressed_size_exceeded", "archive_ratio_exceeded"}:
+        return HTTPException(status_code=413, detail=str(error))
+    if code == "archive_target_conflict":
+        return HTTPException(status_code=409, detail=str(error))
+    return HTTPException(status_code=400, detail=str(error))
+
+
+@app.get("/api/drive/nodes", response_model=dict[str, Any])
+def list_drive_nodes(
+    request: Request,
+    parent_id: str | None = Query(default=None, description="空 = 根目录"),
+    query: str = Query(default=""),
+    sort: str = Query(default="name"),
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=500),
+) -> dict[str, Any]:
+    """列一个目录（分页 + 搜索 + 排序）。"""
+
+    actor = _drive_actor(request)
+    try:
+        listing = drive.list_children(store, actor, parent_id, query=query, sort=sort, cursor=cursor, limit=limit)
+    except drive.DriveError as error:
+        raise _drive_error(error) from error
+    return {
+        "parent": listing["parent"],
+        "nodes": listing["nodes"],
+        "total": listing["total"],
+        "next_cursor": listing["next_cursor"],
+        "truncated": listing["truncated"],
+        "usage": drive.usage(store, actor),
+        "breadcrumb": drive.breadcrumb(store, actor, str(listing["parent"]["id"])),
+    }
+
+
+@app.get("/api/drive/nodes/{node_id}", response_model=dict[str, Any])
+def get_drive_node(node_id: str, request: Request) -> dict[str, Any]:
+    """节点详情：元数据 + 面包屑 + 项目引用（详情抽屉的数据源）。"""
+
+    actor = _drive_actor(request)
+    try:
+        node = drive.get_node(store, actor, node_id)
+        return {
+            "node": node,
+            "breadcrumb": drive.breadcrumb(store, actor, node_id),
+            "refs": drive.refs_for(store, node_id),
+            "audit": drive.audit_log(store, actor, node_id, limit=20),
+        }
+    except drive.DriveError as error:
+        raise _drive_error(error) from error
+
+
+@app.get("/api/drive/nodes/{node_id}/content")
+def download_drive_node(node_id: str, request: Request) -> Response:
+    """下载文件正文：响应头必须 latin-1 安全（中文名走 RFC 5987 `filename*`）。"""
+
+    actor = _drive_actor(request)
+    try:
+        node, content = drive.read_content(store, actor, node_id)
+    except drive.DriveError as error:
+        raise _drive_error(error) from error
+    headers = {
+        "Content-Disposition": content_disposition(node["name"]),
+        "Content-Type": node.get("mime_type") or "application/octet-stream",
+        "X-Drive-Revision": str(node.get("revision", 1)),
+        "X-Content-SHA256": str(node.get("content_hash") or ""),
+    }
+    return Response(content=content, media_type=headers["Content-Type"], headers=headers)
+
+
+@app.post("/api/drive/directories", response_model=dict[str, Any], status_code=201)
+def create_drive_directory(data: DriveDirectoryCreate, request: Request) -> dict[str, Any]:
+    """新建目录。"""
+
+    actor = _drive_actor(request)
+    try:
+        node = drive.create_directory(store, actor, data.parent_id, data.name)
+    except drive.DriveError as error:
+        raise _drive_error(error) from error
+    return {"node": node, "usage": drive.usage(store, actor)}
+
+
+@app.post("/api/drive/files", response_model=dict[str, Any], status_code=201)
+def upload_drive_node(
+    request: Request,
+    file: UploadFile = File(...),
+    parent_id: str | None = Form(default=None),
+) -> dict[str, Any]:
+    """上传文件到指定目录（默认根目录）。同名**不覆盖**，返回 409 让前端去问用户。"""
+
+    actor = _drive_actor(request)
+    content = read_upload_limited(
+        file,
+        environment_name="MAX_DRIVE_UPLOAD_BYTES",
+        default_bytes=drive.quota_bytes(store),
+        error_code="drive_upload_too_large",
+    )
+    try:
+        node = drive.put_file(store, actor, parent_id, file.filename or "unnamed", content, file.content_type)
+    except drive.DriveError as error:
+        raise _drive_error(error) from error
+    return {"node": node, "usage": drive.usage(store, actor)}
+
+
+@app.patch("/api/drive/nodes/{node_id}", response_model=dict[str, Any])
+def rename_drive_node(node_id: str, data: DriveNodePatch, request: Request) -> dict[str, Any]:
+    """改名（可带 `expected_revision` 做并发校验）。"""
+
+    actor = _drive_actor(request)
+    try:
+        node = drive.rename(store, actor, node_id, data.name, expected_revision=data.expected_revision)
+    except drive.DriveError as error:
+        raise _drive_error(error) from error
+    return {"node": node}
+
+
+@app.post("/api/drive/nodes/{node_id}/move", response_model=dict[str, Any])
+def move_drive_node(node_id: str, data: DriveNodeMove, request: Request) -> dict[str, Any]:
+    """移动到另一个目录（拒绝把目录移进自己的子树）。"""
+
+    actor = _drive_actor(request)
+    try:
+        node = drive.move(store, actor, node_id, data.parent_id, expected_revision=data.expected_revision)
+    except drive.DriveError as error:
+        raise _drive_error(error) from error
+    return {"node": node, "breadcrumb": drive.breadcrumb(store, actor, node["id"])}
+
+
+@app.post("/api/drive/nodes/{node_id}/copy", response_model=dict[str, Any], status_code=201)
+def copy_drive_node(node_id: str, data: DriveNodeCopy, request: Request) -> dict[str, Any]:
+    """复制节点（同名自动加「-副本」后缀，默认保留两份）。"""
+
+    actor = _drive_actor(request)
+    try:
+        node = drive.copy(store, actor, node_id, data.parent_id, name=data.name)
+    except drive.DriveError as error:
+        raise _drive_error(error) from error
+    return {"node": node, "usage": drive.usage(store, actor)}
+
+
+@app.delete("/api/drive/nodes/{node_id}", response_model=dict[str, Any])
+def trash_drive_node(node_id: str, request: Request) -> dict[str, Any]:
+    """删除 → **进回收站**（软删除）。彻底清除是 `DELETE /api/drive/trash/{node_id}`。"""
+
+    actor = _drive_actor(request)
+    try:
+        result = drive.trash(store, actor, node_id)
+    except drive.DriveError as error:
+        raise _drive_error(error) from error
+    return {**result, "usage": drive.usage(store, actor)}
+
+
+@app.get("/api/drive/trash", response_model=dict[str, Any])
+def list_drive_trash(request: Request) -> dict[str, Any]:
+    """回收站：只列"这次删除的根"，并给出这次删了多少个节点。"""
+
+    actor = _drive_actor(request)
+    return {"nodes": drive.trash_list(store, actor), "usage": drive.usage(store, actor)}
+
+
+@app.post("/api/drive/nodes/{node_id}/restore", response_model=dict[str, Any])
+def restore_drive_node(node_id: str, request: Request) -> dict[str, Any]:
+    """从回收站恢复（名字被占用时明确报冲突，不覆盖）。"""
+
+    actor = _drive_actor(request)
+    try:
+        node = drive.restore(store, actor, node_id)
+    except drive.DriveError as error:
+        raise _drive_error(error) from error
+    return {"node": node, "usage": drive.usage(store, actor)}
+
+
+@app.delete("/api/drive/trash/{node_id}", response_model=dict[str, Any])
+def purge_drive_node(node_id: str, request: Request) -> dict[str, Any]:
+    """彻底清除（只有在回收站里的节点能清除；被项目引用的一律拒绝）。
+
+    对象删除**失败不算失败**：记录进 `drive_object_cleanup` 队列并如实返回 `objects_pending`，
+    由 `retry_cleanup` 重试——数据库追踪记录绝不能先丢（计划 §7.3）。
+    """
+
+    actor = _drive_actor(request)
+    try:
+        result = drive.purge(store, actor, node_id)
+    except drive.DriveError as error:
+        raise _drive_error(error) from error
+    return {**result, "usage": drive.usage(store, actor)}
+
+
+@app.post("/api/drive/extractions", response_model=dict[str, Any], status_code=201)
+def extract_drive_archive(data: DriveExtractionCreate, request: Request) -> dict[str, Any]:
+    """安全解压（.zip/.tar/.tar.gz/.tgz）：先全量校验、再落库；失败时不留半个目录。
+
+    攻击面（Zip Slip、绝对路径、盘符、UNC、symlink/hardlink、设备文件、zip bomb、条目数、
+    嵌套归档、同名冲突）在 `app/archive.py` 的**扫描阶段**一律拦掉，那里不写任何东西。
+    """
+
+    actor = _drive_actor(request)
+    try:
+        return archive.extract_archive(
+            store,
+            actor,
+            data.node_id,
+            target_parent_id=data.target_parent_id,
+            directory_name=data.directory_name,
+        )
+    except drive.DriveError as error:
+        raise _drive_error(error) from error
+
+
+@app.get("/api/drive/nodes/{node_id}/audit", response_model=dict[str, Any])
+def drive_node_audit(node_id: str, request: Request, limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
+    """节点审计：谁、什么时候、做了什么、允许还是拒绝。"""
+
+    actor = _drive_actor(request)
+    try:
+        drive.get_node(store, actor, node_id)  # 归属校验（别人的节点不给看审计）
+    except drive.DriveError as error:
+        raise _drive_error(error) from error
+    # 节点的完整审计（含 Agent 通过授权读取的记录）——按节点收口，不按成员收口
+    return {"node_id": node_id, "events": drive.node_audit(store, node_id, actor.organization_id, limit=limit)}
+
+
+@app.post("/api/drive/cleanup/retry", response_model=dict[str, Any])
+def retry_drive_cleanup(request: Request, limit: int = Query(default=50, ge=1, le=500)) -> dict[str, Any]:
+    """重试对象清理队列（运维/定时任务用）。只处理**自己组织**的待删对象。"""
+
+    actor = _drive_actor(request)
+    pending = store.db.execute(
+        "SELECT COUNT(*) AS c FROM drive_object_cleanup WHERE organization_id = ? AND status = 'pending'",
+        (actor.organization_id,),
+    ).fetchone()["c"]
+    result = drive.retry_cleanup(store, limit=limit)
+    return {**result, "pending_before": int(pending)}
+
+
+# ---- Agent 工作区文件服务（FM-3） ------------------------------------------
+#
+# 两条通道**分开**（计划 §4 的核心边界）：
+#   * **Agent 侧**（设备/项目令牌）：登记工作区、领取操作、回报进度与结果、读写传输内容；
+#   * **浏览器侧**（人类会话）：看工作区、入队操作、看操作状态、取消。
+# 平台**不**入站连接 Agent 机器，也不持有宿主机绝对路径（工作区只有 `workspace_identity`）。
+# Gateway 的命令列表零改动——这是一套独立的、版本化的轮询契约。
+
+
+def _workspace_actor(request: Request) -> workspace_files.WorkspaceActor:
+    member_id = _request_member_id(request)
+    try:
+        return workspace_files.actor_for(store, member_id)
+    except workspace_files.WorkspaceError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+
+
+def _workspace_error(error: workspace_files.WorkspaceError) -> HTTPException:
+    """稳定错误码 → HTTP：找不到 404、冲突/离线/过期 409、路径与参数问题 400。"""
+
+    code = error.code
+    if code in {"workspace_not_found", "workspace_operation_not_found", "workspace_transfer_not_found", "workspace_actor_unknown"}:
+        return HTTPException(status_code=404, detail=str(error))
+    if code in {"operation_idempotency_conflict", "workspace_operation_already_finished", "workspace_offline", "workspace_operation_expired"}:
+        return HTTPException(status_code=409, detail=str(error))
+    return HTTPException(status_code=400, detail=str(error))
+
+
+def _authorize_workspace_member(actor: workspace_files.WorkspaceActor, workspace: dict[str, Any]) -> None:
+    """工作区可见性：挂了项目的按项目成员判定，没挂的按同组织。"""
+
+    project_id = workspace.get("project_id")
+    if not project_id:
+        return
+    try:
+        store.authorize_member(UUID(str(project_id)), actor.member_id, "project.view")
+    except (PermissionError, ValueError) as error:
+        raise HTTPException(status_code=403, detail="project_membership_required") from error
+
+
+@app.post("/api/agent/workspaces/register", response_model=dict[str, Any])
+def register_agent_workspace(data: WorkspaceRegisterRequest, request: Request) -> dict[str, Any]:
+    """Agent 上报工作区（心跳时带）。凭据是项目能力令牌；`workspace_identity` 由内核算好。"""
+
+    agent_id = request.headers.get("X-Agent-Id", "")
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id_required")
+    project_id = str(data.project_id) if data.project_id else None
+    if project_id:
+        _require_agent_capability(request, data.project_id, "workspace.files.claim", agent_id)
+    agent_row = store.db.execute("SELECT owner_member_id FROM agents WHERE agent_id = ?", (agent_id,)).fetchone()
+    if agent_row is None:
+        raise HTTPException(status_code=404, detail="agent_not_found")
+    actor = workspace_files.actor_for(store, str(agent_row["owner_member_id"]))
+    try:
+        workspace = workspace_files.register_workspace(
+            store,
+            agent_id=agent_id,
+            organization_id=actor.organization_id,
+            display_name=data.display_name,
+            workspace_identity=data.workspace_identity,
+            device_id=data.device_id,
+            project_id=project_id,
+            kind=data.kind,
+            protected_paths=data.protected_paths,
+            policy_version=data.policy_version,
+        )
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+    return {"workspace": workspace}
+
+
+@app.get("/api/agent-workspaces", response_model=dict[str, Any])
+def list_agent_workspaces(request: Request) -> dict[str, Any]:
+    """工作区列表（浏览器侧）：带在线状态与最近同步时间；**不返回宿主机路径**。"""
+
+    actor = _workspace_actor(request)
+    workspaces = []
+    for workspace in workspace_files.list_workspaces(store, actor):
+        try:
+            _authorize_workspace_member(actor, workspace)
+        except HTTPException:
+            continue  # 不是我能看的项目工作区：不出现在列表里（不给出"存在但无权"的信号）
+        workspaces.append(workspace)
+    return {
+        "workspaces": workspaces,
+        "operations": workspace_files.list_operations(store, actor, limit=50),
+        "large_file_bytes": workspace_files.LARGE_FILE_BYTES,
+    }
+
+
+@app.get("/api/agent-workspaces/{workspace_id}", response_model=dict[str, Any])
+def get_agent_workspace(workspace_id: str, request: Request) -> dict[str, Any]:
+    actor = _workspace_actor(request)
+    try:
+        workspace = workspace_files.get_workspace(store, actor, workspace_id)
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+    _authorize_workspace_member(actor, workspace)
+    return {
+        "workspace": workspace,
+        "operations": workspace_files.list_operations(store, actor, workspace_id, limit=100),
+        "audit": workspace_files.audit_log(store, actor, workspace_id=workspace_id, limit=50),
+    }
+
+
+@app.post("/api/agent-workspaces/{workspace_id}/operations", response_model=dict[str, Any], status_code=201)
+def create_workspace_operation(workspace_id: str, data: WorkspaceOperationCreate, request: Request) -> dict[str, Any]:
+    """入队一个文件操作（人点的）。Agent 离线时默认保持 queued，不假装执行。"""
+
+    actor = _workspace_actor(request)
+    try:
+        workspace = workspace_files.get_workspace(store, actor, workspace_id)
+        _authorize_workspace_member(actor, workspace)
+        operation = workspace_files.create_operation(
+            store,
+            actor,
+            workspace_id,
+            operation_type=data.operation_type,
+            relative_path=data.relative_path,
+            arguments=data.arguments,
+            idempotency_key=data.idempotency_key,
+            expected_revision=data.expected_revision,
+            fail_when_offline=data.fail_when_offline,
+        )
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+    return {"operation": operation, "workspace": workspace}
+
+
+@app.get("/api/agent-workspaces/{workspace_id}/operations/{operation_id}", response_model=dict[str, Any])
+def get_workspace_operation(workspace_id: str, operation_id: str, request: Request) -> dict[str, Any]:
+    actor = _workspace_actor(request)
+    try:
+        workspace_files.get_workspace(store, actor, workspace_id)
+        operation = workspace_files.get_operation(store, actor, operation_id)
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+    if str(operation["workspace_id"]) != str(workspace_id):
+        raise HTTPException(status_code=404, detail="workspace_operation_not_found")
+    return {"operation": operation}
+
+
+@app.post("/api/agent-workspaces/{workspace_id}/operations/{operation_id}/cancel", response_model=dict[str, Any])
+def cancel_workspace_operation(workspace_id: str, operation_id: str, request: Request) -> dict[str, Any]:
+    actor = _workspace_actor(request)
+    try:
+        workspace_files.get_workspace(store, actor, workspace_id)
+        operation = workspace_files.cancel_operation(store, actor, operation_id)
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+    if str(operation["workspace_id"]) != str(workspace_id):
+        raise HTTPException(status_code=404, detail="workspace_operation_not_found")
+    return {"operation": operation}
+
+
+@app.post("/api/agent/workspace-operations/claim", response_model=dict[str, Any])
+def claim_workspace_operations(data: WorkspaceOperationClaim, request: Request) -> dict[str, Any]:
+    """Agent 领活（轮询）。带项目能力令牌与 X-Agent-Id；离线工作区不发活。"""
+
+    agent_id = request.headers.get("X-Agent-Id", "")
+    project_id = request.headers.get("X-Project-Id", "")
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id_required")
+    if project_id:
+        _require_agent_capability(request, UUID(project_id), "workspace.files.claim", agent_id)
+    workspace_files.expire_stale_operations(store)
+    operations = workspace_files.claim_operations(
+        store,
+        agent_id=agent_id,
+        workspace_id=data.workspace_id,
+        limit=data.limit,
+        lease_seconds=data.lease_seconds,
+    )
+    return {"operations": operations, "large_file_bytes": workspace_files.LARGE_FILE_BYTES}
+
+
+@app.post("/api/agent/workspace-operations/{operation_id}/start", response_model=dict[str, Any])
+def start_workspace_operation(operation_id: str, request: Request) -> dict[str, Any]:
+    agent_id = request.headers.get("X-Agent-Id", "")
+    try:
+        operation = workspace_files.start_operation(store, operation_id, agent_id=agent_id)
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+    return {"operation": operation}
+
+
+@app.post("/api/agent/workspace-operations/{operation_id}/progress", response_model=dict[str, Any])
+def progress_workspace_operation(operation_id: str, data: WorkspaceOperationProgress, request: Request) -> dict[str, Any]:
+    agent_id = request.headers.get("X-Agent-Id", "")
+    try:
+        operation = workspace_files.progress_operation(store, operation_id, agent_id=agent_id, progress=data.progress)
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+    return {"operation": operation}
+
+
+@app.post("/api/agent/workspace-operations/{operation_id}/complete", response_model=dict[str, Any])
+def complete_workspace_operation(operation_id: str, data: WorkspaceOperationComplete, request: Request) -> dict[str, Any]:
+    agent_id = request.headers.get("X-Agent-Id", "")
+    try:
+        operation = workspace_files.complete_operation(
+            store,
+            operation_id,
+            agent_id=agent_id,
+            success=data.success,
+            result=data.result,
+            error_code=data.error_code,
+            error_message=data.error_message,
+        )
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+    return {"operation": operation}
+
+
+def _agent_transfer_actor(request: Request, agent_id: str, capability: str) -> workspace_files.WorkspaceActor:
+    """Agent 侧读写传输内容：用项目能力令牌 + X-Agent-Id 认证，映射到该 Agent 所属成员的组织。"""
+
+    project_id = request.headers.get("X-Project-Id", "")
+    if project_id:
+        _require_agent_capability(request, UUID(project_id), capability, agent_id)
+    row = store.db.execute("SELECT owner_member_id FROM agents WHERE agent_id = ?", (agent_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="agent_not_found")
+    try:
+        return workspace_files.actor_for(store, str(row["owner_member_id"]))
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+
+
+@app.put("/api/agent/workspace-transfers/{transfer_id}/content", response_model=dict[str, Any])
+async def agent_write_workspace_transfer(transfer_id: str, request: Request) -> dict[str, Any]:
+    """Agent 把工作区里的字节写进传输会话（下载方向：Agent → 平台对象存储）。"""
+
+    agent_id = request.headers.get("X-Agent-Id", "")
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id_required")
+    actor = _agent_transfer_actor(request, agent_id, "workspace.files.write")
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="transfer_body_required")
+    try:
+        transfer = workspace_files.write_transfer_content(store, actor, transfer_id, body)
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+    return {"transfer": transfer}
+
+
+@app.get("/api/agent/workspace-transfers/{transfer_id}/content")
+def agent_read_workspace_transfer(transfer_id: str, request: Request) -> Response:
+    """Agent 读取传输会话里的字节（上传方向：平台对象存储 → 工作区）。"""
+
+    agent_id = request.headers.get("X-Agent-Id", "")
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id_required")
+    actor = _agent_transfer_actor(request, agent_id, "workspace.files.read")
+    try:
+        transfer, content = workspace_files.read_transfer_content(store, actor, transfer_id, mark_consumed=True)
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+    headers = {
+        "Content-Type": "application/octet-stream",
+        "X-Transfer-SHA256": str(transfer.get("source_hash") or ""),
+        "X-Transfer-Size": str(len(content)),
+    }
+    return Response(content=content, media_type="application/octet-stream", headers=headers)
+
+
+@app.post("/api/workspace-transfers", response_model=dict[str, Any], status_code=201)
+def create_workspace_transfer(data: WorkspaceTransferCreate, request: Request) -> dict[str, Any]:
+    """开传输会话（大文件走对象存储，两边只交换会话 id 与哈希）。"""
+
+    actor = _workspace_actor(request)
+    try:
+        transfer = workspace_files.create_transfer(
+            store,
+            actor,
+            source_type=data.source_type,
+            target_type=data.target_type,
+            operation_id=data.operation_id,
+            workspace_id=data.workspace_id,
+            source_id=data.source_id,
+            source_hash=data.source_hash,
+            target_id=data.target_id,
+            expected_size=data.expected_size,
+            expected_hash=data.expected_hash,
+            ttl_seconds=data.ttl_seconds,
+        )
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+    return {"transfer": transfer}
+
+
+@app.put("/api/workspace-transfers/{transfer_id}/content", response_model=dict[str, Any])
+async def write_workspace_transfer(transfer_id: str, request: Request) -> dict[str, Any]:
+    """上传内容（原样字节）：声明了哈希/大小就必须对得上，否则拒绝。"""
+
+    actor = _workspace_actor(request)
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="transfer_body_required")
+    try:
+        transfer = workspace_files.write_transfer_content(
+            store, actor, transfer_id, body, mime_type=request.headers.get("Content-Type")
+        )
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+    return {"transfer": transfer}
+
+
+@app.get("/api/workspace-transfers/{transfer_id}/content")
+def read_workspace_transfer(transfer_id: str, request: Request) -> Response:
+    actor = _workspace_actor(request)
+    try:
+        transfer, content = workspace_files.read_transfer_content(store, actor, transfer_id, mark_consumed=True)
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+    headers = {
+        "Content-Type": "application/octet-stream",
+        "X-Transfer-SHA256": str(transfer.get("source_hash") or ""),
+        "X-Transfer-Size": str(len(content)),
+    }
+    return Response(content=content, media_type="application/octet-stream", headers=headers)
+
+
+@app.get("/api/agent-workspaces/{workspace_id}/audit", response_model=dict[str, Any])
+def workspace_audit_log(workspace_id: str, request: Request, limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
+    actor = _workspace_actor(request)
+    try:
+        workspace_files.get_workspace(store, actor, workspace_id)
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+    return {"workspace_id": workspace_id, "events": workspace_files.audit_log(store, actor, workspace_id=workspace_id, limit=limit)}
+
+
+@app.post("/api/workspace-transfers/cleanup", response_model=dict[str, Any])
+def cleanup_workspace_transfers(request: Request) -> dict[str, Any]:
+    """过期传输会话回收（对象删掉、状态置 expired）。"""
+
+    actor = _workspace_actor(request)
+    return workspace_files.cleanup_expired_transfers(store, actor)
+
+# ---- 云盘文件访问授权（FM-5） -----------------------------------------------
+#
+# 两条通道：**人类侧**建/看/续/撤授权；**Agent 侧**换短期 lease 并只读被授权的那部分文件。
+# 平台始终不入站连接 Agent 机器，Agent 也**不能**用成员令牌访问云盘——它只有 lease。
+# 与 S-3 的权限卡片无关：那是"工具执行批准"，这里是"数据访问范围"，两者不能互相替代。
+
+
+def _grant_error(error: drive_grants.GrantError) -> HTTPException:
+    code = error.code
+    if code in {"file_access_grant_not_found", "file_node_not_found", "agent_not_found", "device_not_found"}:
+        return HTTPException(status_code=404, detail=str(error))
+    if code in {
+        "file_access_grant_revoked",
+        "file_access_grant_expired",
+        "file_access_lease_revoked",
+        "file_access_lease_expired",
+        "file_access_scope_denied",
+        "file_access_capability_denied",
+        # 身份/绑定不符（错的 Agent/设备/项目/Run）：这是**授权失败**，不是"请求写错了"，
+        # 所以按 403 返回（400 会让人以为改改参数就能过）
+        "file_access_agent_mismatch",
+        "file_access_device_mismatch",
+        "file_access_project_mismatch",
+        "file_access_run_mismatch",
+    }:
+        return HTTPException(status_code=403, detail=str(error))
+    return HTTPException(status_code=400, detail=str(error))
+
+
+@app.post("/api/file-access-grants", response_model=dict[str, Any], status_code=201)
+def create_file_access_grant(data: FileAccessGrantCreate, request: Request) -> dict[str, Any]:
+    """给某个 Agent 授权云盘里的文件/文件夹/整盘（默认只读 + 可导入项目）。"""
+
+    member_id = _request_member_id(request)
+    try:
+        owner_actor = drive.actor_for(store, member_id)
+        actor = workspace_files.actor_for(store, member_id)
+        grant = drive_grants.create_grant(
+            store,
+            actor,
+            owner_drive_actor=owner_actor,
+            node_id=data.node_id,
+            agent_id=data.agent_id,
+            device_id=data.device_id,
+            project_id=str(data.project_id),
+            scope_type=data.scope_type,
+            capabilities=data.capabilities or None,
+            include_future_nodes=data.include_future_nodes,
+            task_id=data.task_id,
+            run_id=data.run_id,
+            conversation_id=data.conversation_id,
+            turn_id=data.turn_id,
+            expires_in_seconds=data.expires_in_seconds,
+        )
+    except drive.DriveError as error:
+        raise HTTPException(status_code=404 if error.code == "file_node_not_found" else 400, detail=str(error)) from error
+    except drive_grants.GrantError as error:
+        raise _grant_error(error) from error
+    return {"grant": grant}
+
+
+@app.get("/api/file-access-grants", response_model=dict[str, Any])
+def list_file_access_grants(request: Request, node_id: str | None = None, agent_id: str | None = None) -> dict[str, Any]:
+    """列出我发出的授权（可按节点或 Agent 过滤）。"""
+
+    try:
+        actor = workspace_files.actor_for(store, _request_member_id(request))
+        grants = drive_grants.list_grants(store, actor, node_id=node_id, agent_id=agent_id)
+    except drive_grants.GrantError as error:
+        raise _grant_error(error) from error
+    return {"grants": grants}
+
+
+@app.get("/api/file-access-grants/{grant_id}", response_model=dict[str, Any])
+def get_file_access_grant(grant_id: str, request: Request) -> dict[str, Any]:
+    try:
+        actor = workspace_files.actor_for(store, _request_member_id(request))
+        return {"grant": drive_grants.get_grant(store, actor, grant_id)}
+    except drive_grants.GrantError as error:
+        raise _grant_error(error) from error
+
+
+@app.post("/api/file-access-grants/{grant_id}/revoke", response_model=dict[str, Any])
+def revoke_file_access_grant(grant_id: str, data: FileAccessGrantDecision, request: Request) -> dict[str, Any]:
+    """撤销：epoch +1 并作废该 Grant 下的所有 lease（Agent 下一次读取立刻失败）。"""
+
+    try:
+        actor = workspace_files.actor_for(store, _request_member_id(request))
+        return {"grant": drive_grants.revoke_grant(store, actor, grant_id, reason=data.reason)}
+    except drive_grants.GrantError as error:
+        raise _grant_error(error) from error
+
+
+@app.post("/api/file-access-grants/{grant_id}/renew", response_model=dict[str, Any])
+def renew_file_access_grant(grant_id: str, data: FileAccessGrantDecision, request: Request) -> dict[str, Any]:
+    try:
+        actor = workspace_files.actor_for(store, _request_member_id(request))
+        return {"grant": drive_grants.renew_grant(store, actor, grant_id, expires_in_seconds=data.expires_in_seconds)}
+    except drive_grants.GrantError as error:
+        raise _grant_error(error) from error
+
+
+@app.post("/api/agent/file-leases/exchange", response_model=dict[str, Any])
+def exchange_file_lease(data: FileLeaseExchange, request: Request) -> dict[str, Any]:
+    """Agent 换短期 lease：要项目能力令牌 + X-Agent-Id（+ 设备 id）。"""
+
+    agent_id = request.headers.get("X-Agent-Id", "")
+    project_id = request.headers.get("X-Project-Id", "")
+    device_id = request.headers.get("X-Device-Id") or None
+    if not agent_id or not project_id:
+        raise HTTPException(status_code=400, detail="agent_and_project_required")
+    _require_agent_capability(request, UUID(project_id), "artifact.read", agent_id)
+    try:
+        return drive_grants.exchange_lease(
+            store,
+            grant_id=data.grant_id,
+            agent_id=agent_id,
+            device_id=device_id,
+            project_id=project_id,
+            run_id=data.run_id,
+            ttl_seconds=data.ttl_seconds,
+        )
+    except drive_grants.GrantError as error:
+        raise _grant_error(error) from error
+
+
+def _agent_lease_headers(request: Request) -> tuple[str, str, str | None, str]:
+    agent_id = request.headers.get("X-Agent-Id", "")
+    project_id = request.headers.get("X-Project-Id", "")
+    device_id = request.headers.get("X-Device-Id") or None
+    lease = request.headers.get("X-File-Access-Lease", "")
+    if not agent_id or not project_id:
+        raise HTTPException(status_code=400, detail="agent_and_project_required")
+    if not lease:
+        raise HTTPException(status_code=401, detail="file_access_lease_required")
+    _require_agent_capability(request, UUID(project_id), "artifact.read", agent_id)
+    return agent_id, project_id, device_id, lease
+
+
+@app.get("/api/agent/drive/files", response_model=dict[str, Any])
+def agent_list_granted_files(request: Request) -> dict[str, Any]:
+    """Agent 列出被授权的文件（只有这一小块；跨范围一律看不到）。"""
+
+    agent_id, project_id, device_id, lease = _agent_lease_headers(request)
+    try:
+        return drive_grants.agent_list_granted(
+            store, lease_token=lease, agent_id=agent_id, project_id=project_id, device_id=device_id
+        )
+    except drive_grants.GrantError as error:
+        raise _grant_error(error) from error
+
+
+@app.get("/api/agent/drive/nodes/{node_id}", response_model=dict[str, Any])
+def agent_get_granted_node(node_id: str, request: Request) -> dict[str, Any]:
+    agent_id, project_id, device_id, lease = _agent_lease_headers(request)
+    try:
+        loaded = drive_grants._load_lease(store, lease, agent_id=agent_id, project_id=project_id, device_id=device_id)
+        if not drive_grants._covered(store, loaded["grant"], node_id):
+            raise drive_grants.GrantError("file_access_scope_denied", node_id)
+        owner_actor = drive.DriveActor(
+            member_id=str(loaded["grant"]["owner_member_id"]), organization_id=str(loaded["grant"]["organization_id"])
+        )
+        return {"node": drive.get_node(store, owner_actor, node_id)}
+    except (drive_grants.GrantError, drive.DriveError) as error:
+        raise _grant_error(error) if isinstance(error, drive_grants.GrantError) else HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.get("/api/agent/drive/nodes/{node_id}/content")
+def agent_get_granted_content(node_id: str, request: Request) -> Response:
+    """读正文：范围/能力/epoch/设备状态逐条校验（每次读都重判，撤销立刻生效）。"""
+
+    agent_id, project_id, device_id, lease = _agent_lease_headers(request)
+    try:
+        node, content = drive_grants.agent_read_content(
+            store, lease_token=lease, agent_id=agent_id, project_id=project_id, device_id=device_id, node_id=node_id
+        )
+    except drive_grants.GrantError as error:
+        raise _grant_error(error) from error
+    headers = {
+        "Content-Disposition": content_disposition(node["name"]),
+        "Content-Type": node.get("mime_type") or "application/octet-stream",
+        "X-Content-SHA256": str(node.get("content_hash") or ""),
+    }
+    return Response(content=content, media_type=headers["Content-Type"], headers=headers)
+
+
+@app.post("/api/agent/drive/materialize", response_model=dict[str, Any])
+def agent_materialize_drive(request: Request) -> dict[str, Any]:
+    """物化清单：Agent 据此把文件落到 `<workspace>/inputs/`，并写来源 Manifest。"""
+
+    agent_id, project_id, device_id, lease = _agent_lease_headers(request)
+    try:
+        return drive_grants.agent_materialize_manifest(
+            store, lease_token=lease, agent_id=agent_id, project_id=project_id, device_id=device_id
+        )
+    except drive_grants.GrantError as error:
+        raise _grant_error(error) from error
+
+# ---- 显式跨空间传输与维护口（FM-6） -----------------------------------------
+
+
+def _transfer_error(error: Exception) -> HTTPException:
+    if isinstance(error, file_transfers.TransferError):
+        code = error.code
+    elif isinstance(error, workspace_files.WorkspaceError):
+        code = error.code
+    else:
+        code = "file_transfer_failed"
+    if code in {"file_node_not_found", "workspace_not_found", "workspace_transfer_not_found"}:
+        return HTTPException(status_code=404, detail=str(error))
+    if code in {"file_name_conflict", "file_revision_conflict", "file_transfer_expired"}:
+        return HTTPException(status_code=409, detail=str(error))
+    if code in {"file_quota_exceeded", "file_upload_hash_mismatch"}:
+        return HTTPException(status_code=413 if code == "file_quota_exceeded" else 400, detail=str(error))
+    if code.startswith("file_access_"):
+        return HTTPException(status_code=403, detail=str(error))
+    return HTTPException(status_code=400, detail=str(error))
+
+
+@app.post("/api/file-transfers/drive-to-workspace", response_model=dict[str, Any], status_code=201)
+def transfer_drive_to_workspace(data: FileTransferDriveToWorkspace, request: Request) -> dict[str, Any]:
+    """云盘 → Agent 工作区：显式复制一次（不做后台同步）。同名默认不覆盖。"""
+
+    actor = _workspace_actor(request)
+    try:
+        return file_transfers.drive_to_workspace(
+            store,
+            actor,
+            node_id=data.node_id,
+            workspace_id=data.workspace_id,
+            relative_path=data.relative_path,
+            overwrite=data.overwrite,
+        )
+    except (file_transfers.TransferError, workspace_files.WorkspaceError) as error:
+        raise _transfer_error(error) from error
+
+
+@app.post("/api/file-transfers/workspace-to-drive", response_model=dict[str, Any], status_code=201)
+def transfer_workspace_to_drive(data: FileTransferWorkspaceToDrive, request: Request) -> dict[str, Any]:
+    """Agent 工作区 → 云盘：先让 Agent 传进传输会话。"""
+
+    actor = _workspace_actor(request)
+    try:
+        return file_transfers.workspace_to_drive(store, actor, workspace_id=data.workspace_id, relative_path=data.relative_path)
+    except (file_transfers.TransferError, workspace_files.WorkspaceError) as error:
+        raise _transfer_error(error) from error
+
+
+@app.post("/api/file-transfers/save-to-drive", response_model=dict[str, Any], status_code=201)
+def save_transfer_into_drive(data: FileTransferSave, request: Request) -> dict[str, Any]:
+    """把人选定的传输内容存进云盘（同名冲突 409，不静默覆盖）。"""
+
+    actor = _workspace_actor(request)
+    try:
+        return file_transfers.save_transfer_to_drive(store, actor, transfer_id=data.transfer_id, parent_id=data.parent_id, name=data.name)
+    except (file_transfers.TransferError, workspace_files.WorkspaceError) as error:
+        raise _transfer_error(error) from error
+
+
+@app.get("/api/file-transfers", response_model=dict[str, Any])
+def list_file_transfers(request: Request, workspace_id: str | None = None, limit: int = Query(default=50, ge=1, le=200)) -> dict[str, Any]:
+    """传输历史：会话 + 关联操作的终态与失败原因（失败可重试）。"""
+
+    actor = _workspace_actor(request)
+    return {"transfers": file_transfers.transfer_history(store, actor, workspace_id=workspace_id, limit=limit)}
+
+
+@app.post("/api/file-maintenance/transfers/cleanup", response_model=dict[str, Any])
+def cleanup_file_transfers(request: Request) -> dict[str, Any]:
+    """过期传输会话回收。"""
+
+    actor = _workspace_actor(request)
+    return file_transfers.cleanup_transfers(store, actor)
+
+
+@app.post("/api/file-maintenance/orphans/scan", response_model=dict[str, Any])
+def scan_file_orphans(request: Request) -> dict[str, Any]:
+    """孤儿对象扫描：只报告不删（生产加固的"先能看见"那一步）。"""
+
+    actor = _workspace_actor(request)
+    return file_transfers.scan_orphans(store, actor)
+
+
 @app.get("/api/documents/layers", response_model=dict[str, Any])
 def get_document_layers() -> dict[str, Any]:
     """文档三层（草稿/提交/批准）定义与门禁规则。"""
@@ -2617,7 +3536,8 @@ def agent_reject_handoff(handoff_id: UUID, data: HandoffDecisionRequest, request
 @app.get("/api/projects/{project_id}/artifacts", response_model=list[Artifact])
 def list_artifacts(project_id: UUID) -> list[Artifact]:
     project_or_404(project_id)
-    return store.list_artifacts(project_id)
+    # 来源路径是执行体机器上的绝对路径：成员侧只留文件名（身份靠 id + 内容 hash + 版本）
+    return [public_artifact(artifact) for artifact in store.list_artifacts(project_id)]
 
 
 @app.get("/api/projects/{project_id}/gates", response_model=list[Gate])
@@ -2827,7 +3747,7 @@ def get_artifact_detail(project_id: UUID, artifact_id: UUID) -> ArtifactDetail:
     ][-20:]
 
     return ArtifactDetail(
-        artifact=artifact,
+        artifact=public_artifact(artifact),
         lineage=lineage,
         consumers=consumers,
         reviews=reviews,
@@ -3136,11 +4056,14 @@ def list_events(
 
 @app.get("/api/agents", response_model=list[Agent])
 def list_agents(request: Request) -> list[Agent]:
-    """Agent 列表按组织收口（此前全局可见，任何登录成员都能看到别人的机器与工作区路径）。"""
+    """Agent 列表按组织收口（此前全局可见，任何登录成员都能看到别人的机器与工作区路径）。
+
+    响应再过一道 `path_privacy`：成员看到的是工作区**标识**，不是那台机器的绝对路径。
+    """
 
     try:
         member = store.resolve_session(_bearer_token(request))
-        return store.list_agents(member.organization_id)
+        return [public_agent(agent) for agent in store.list_agents(member.organization_id)]
     except Exception as error:
         raise account_error(error) from error
 
@@ -3187,7 +4110,8 @@ def create_review(project_id: UUID, data: ReviewCreate, request: Request) -> Rev
 @app.get("/api/projects/{project_id}/runs", response_model=list[Run])
 def list_runs(project_id: UUID) -> list[Run]:
     project_or_404(project_id)
-    return store.list_runs(project_id)
+    # 观察到输入文件在执行体机器上是绝对路径：成员侧只留文件名（真值仍在库里与边界结论里）
+    return [public_run(run) for run in store.list_runs(project_id)]
 
 
 @app.get("/api/runs/{run_id}", response_model=Run)
@@ -3206,7 +4130,7 @@ def get_run(run_id: UUID, request: Request) -> Run:
         store.authorize_member(run.project_id, _request_member_id(request), "project.view")
     except PermissionError as error:
         raise HTTPException(status_code=403, detail=str(error)) from error
-    return run
+    return public_run(run)
 
 
 @app.post("/api/projects/{project_id}/runs", response_model=Run, status_code=201)

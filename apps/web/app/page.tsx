@@ -77,6 +77,14 @@ export default function OverviewPage() {
           }
         : { label: "进入交付", href: "/delivery", hint: "流程已跑通：装配、检查、编译与提交包" };
 
+  const blocker = tasksNeedingExecutor
+    ? { label: `${tasksNeedingExecutor} 个任务缺少执行方式`, href: "/tasks" }
+    : pendingGates.length
+      ? { label: `${pendingGates.length} 个门禁待确认`, href: "/review" }
+      : openRisks.length
+        ? { label: `${openRisks.length} 个风险未关闭`, href: "/review" }
+        : null;
+
   if (noProject) {
     return (
       <div className="page-content" id="overview" data-testid="project-overview">
@@ -106,30 +114,49 @@ export default function OverviewPage() {
     <div className="page-content" id="overview" data-testid="project-overview">
       <PageHeading
         actions={
-          <>
-            <Link className="button button-secondary" href="/workspace" data-testid="overview-open-workspace">
-              <MessagesSquare size={16} /> 项目工作区
-            </Link>
-            <Link className="button button-secondary" href="/pack"><FileCheck2 size={16} /> 模板包</Link>
-            {primary.href ? (
-              <Link className="button button-primary" href={primary.href} data-testid="overview-next-step">
-                <ArrowUpRight size={16} /> {primary.label}
-              </Link>
-            ) : (
-              <button className="button button-primary" data-testid="overview-next-step" onClick={() => setCreateOpen(true)}>
-                <FolderPlus size={16} /> {primary.label}
-              </button>
-            )}
-          </>
+          <Link className="button button-secondary" href="/workspace" data-testid="overview-open-workspace">
+            <MessagesSquare size={16} /> 项目工作区
+          </Link>
         }
         hint={project ? `项目「${project.name}」· 当前阶段 ${stageLabels[project.stage] ?? project.stage} · ${onlineAgents} 个 Agent 在线` : "等待项目数据"}
       />
 
       {error && <div className="pack-missing"><strong>API 未连接</strong><span>{error}</span></div>}
 
+      <section className="overview-current" data-testid="overview-current">
+        <div className="overview-current-copy">
+          <span className="eyebrow"><span className="eyebrow-dot" /> 当前推进</span>
+          <h2>{project?.name}</h2>
+          <p>
+            {stageLabels[project?.stage ?? ""] ?? project?.stage} · 进度 {Math.round(project?.progress ?? 0)}%
+          </p>
+          <strong>{nextStep ? `下一步：${nextStep.label}` : "主流程已跑通，进入交付"}</strong>
+          <small>{primary.hint}</small>
+          {blocker ? (
+            <Link className="overview-blocker" href={blocker.href}>
+              <AlertTriangle size={14} /> 阻塞：{blocker.label} <ArrowUpRight size={13} />
+            </Link>
+          ) : (
+            <span className="overview-clear"><CheckCircle2 size={14} /> 当前没有阻塞项</span>
+          )}
+        </div>
+        <div className="overview-current-action">
+          {primary.href ? (
+            <Link className="button button-primary" href={primary.href} data-testid="overview-next-step">
+              <ArrowUpRight size={16} /> {primary.label}
+            </Link>
+          ) : (
+            <button className="button button-primary" data-testid="overview-next-step" onClick={() => setCreateOpen(true)}>
+              <FolderPlus size={16} /> {primary.label}
+            </button>
+          )}
+          <Link className="text-button" href="/pack"><FileCheck2 size={14} /> 模板包</Link>
+        </div>
+      </section>
+
       <Panel
-        title="下一步"
-        subtitle={nextStep ? `还差一步：${nextStep.label}——${nextStep.hint}` : "主流程已跑通，往下是交付与审核"}
+        title="推进路径"
+        subtitle="已完成项留作复核，当前步骤保持突出"
         testId="overview-steps"
       >
         <div className="list">
@@ -236,7 +263,7 @@ export default function OverviewPage() {
         </Panel>
       </section>
 
-      <section className="grid grid-3">
+      <section className="grid grid-3 overview-quick-links" aria-label="更多工具">
         {QUICK_LINKS.map((link) => (
           <Link key={link.href} href={link.href} className="card list-item list-item-static" style={{ gap: 14 }}>
             <span className="icon-tile icon-tile-blue">{link.icon}</span>

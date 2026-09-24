@@ -98,12 +98,20 @@ class PersonalDriveTests(unittest.TestCase):
         self.assertEqual(listing["usage"]["file_count"], 2)
         self.assertEqual(listing["usage"]["used_bytes"], 12 + 14)
 
-    def test_duplicate_content_is_reused(self) -> None:
+    def test_duplicate_content_shares_the_object_but_stays_two_files(self) -> None:
+        """FM-1 起语义变了：同内容的两份文件是**两个文件**，只共用底层对象。
+
+        旧实现命中同 hash 就直接返回同一条记录——上传 `a.csv` 与 `b.csv`（内容相同）会"少一个文件"，
+        用户在云盘里根本看不到第二份。去重应该发生在**对象**这一层（省空间、省配额），
+        不该吃掉用户的文件。`used_bytes` 因此只算一份（见 029 迁移与 `app/drive.py` 的说明）。
+        """
+
         first = self._upload("a.csv", b"same content")
         second = self._upload("b.csv", b"same content")
-        self.assertEqual(first["file"]["id"], second["file"]["id"])
+        self.assertNotEqual(first["file"]["id"], second["file"]["id"])
+        self.assertEqual(first["file"]["content_hash"], second["file"]["content_hash"])
         usage = main.list_personal_drive(make_request())["usage"]
-        self.assertEqual(usage["file_count"], 1)
+        self.assertEqual(usage["file_count"], 2)
         self.assertEqual(usage["used_bytes"], len(b"same content"))
 
     def test_quota_rejects_oversize(self) -> None:

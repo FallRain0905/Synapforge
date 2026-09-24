@@ -52,6 +52,24 @@ class PruningTests(unittest.TestCase):
             with self.subTest(relative=relative):
                 self.assertTrue(is_excluded(relative))
 
+    def test_platform_downloaded_inputs_are_not_outputs(self) -> None:
+        """FM-0：平台下发的输入不算这一轮的产出。
+
+        以前任务通道只排依赖/构建目录，`inputs/` 里的文件会被 diff 当成"新增"**重新上传成成果物**：
+        同一份文件在项目里出现两次（原件 + "产物"），看起来像 Agent 又生成了一份东西。
+        """
+
+        for relative in ("inputs/题目原文.txt", "inputs/nested/data.csv", "user_data/seed.csv"):
+            with self.subTest(relative=relative):
+                self.assertTrue(is_excluded(relative))
+
+    def test_only_top_level_input_dirs_are_excluded(self) -> None:
+        """工具自己建的 `src/inputs/` 仍然是产出——排除只认顶层（平台下发的落点就是顶层）。"""
+
+        for relative in ("src/inputs/data.csv", "code/inputs/seed.py", "outputs/inputs.csv"):
+            with self.subTest(relative=relative):
+                self.assertFalse(is_excluded(relative))
+
 
 class SnapshotDiffTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -102,6 +120,20 @@ class SnapshotDiffTests(unittest.TestCase):
         self.write("paper/main.tex", "\\documentclass{article}")
         stamps, _ = snapshot(self.root)
         self.assertEqual(sorted(stamps), ["paper/main.tex"])
+
+    def test_inputs_downloaded_mid_run_do_not_become_outputs(self) -> None:
+        """真流程的样子：先拍快照（此时还没有输入），跑之前平台把输入下到 inputs/，跑完再拍。
+
+        产物只能是自己写出来的 `answer.md`——把输入也收进去就成了"Agent 生成了一份题目原文"。
+        """
+
+        before, _ = snapshot(self.root)
+        self.write("inputs/题目原文.txt", "问题一……")
+        self.write(".math-agent-platform/inputs-manifest.json", "{}")
+        self.write("answer.md", "# 回答")
+
+        after, _ = snapshot(self.root)
+        self.assertEqual(diff(before, after).changed, ["answer.md"])
 
     def test_max_files_truncates_and_says_so(self) -> None:
         for index in range(12):

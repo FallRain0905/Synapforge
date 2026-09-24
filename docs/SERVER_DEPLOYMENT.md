@@ -351,6 +351,8 @@ MAP_VERIFY_EMAIL=you@example.com MAP_VERIFY_PASSWORD=<口令> bash /root/deploy/
 
 | 2026-09-24 | **运维事件：设备授权过期导致对话通道中断（已处置）**（`device-cloud-01` 的三条项目授权都是 24h TTL，最后一条 04:38 到期 → 执行体每 5 秒 `401 device_project_token_expired`、页面新建会话报裸错误码 `device_project_grant_missing`） | 生成 **30 天**新授权（含 `chat.run` 全套 14 项能力）→ 执行体 `--grant-only` 应用 → 重启 → 恢复（设备 active、无 401、新建会话与真跑一轮均成功）；**设计缺口已记录**：默认 TTL 86400s 且到期无提醒/无续期提示，建议"授权可选有效期 + 列表显示到期时间 + 一键续期" |
 
+| 2026-09-24 | **FM-0 只读事实核对（两台机都没改任何配置、没发版）**：平台侧对象存储后端与容量；`artifacts` 里有多少行其实没有内容对象；云端 Agent 的工作区路径是否与单元文件一致 | 平台：`/etc/math-agent-platform/api.env` 里 `OBJECT_STORE_BACKEND=local` → `/opt/math-agent-platform/apps/api/data/objects`（**22 个对象 / 212K**），`artifacts` 24 行里 **5 行 `storage_key` 为空**（只有元数据）→ FM-1 迁移要按"无内容"处理这些行。执行体：`map-agent@cloud.service` 的 `WorkingDirectory=/srv/synapforge/%i` 与 `--workspace /srv/synapforge/cloud` 一致（实测 cwd 相同），`inputs/` 里已有早期验证文件。**Compose 配置陷阱（只记录，未改禁区文件）**：`infra/docker-compose.yml` 给 api 传 `STAGE4_MINIO_ENDPOINT`，而 `create_object_store` 读 `OBJECT_STORE_BACKEND`/`S3_BUCKET`/`S3_ENDPOINT_URL`/`S3_REGION`——**没有任何生产代码读前者**，所以 Compose 起的 MinIO 从不被使用，FM-6 做 S3/MinIO 生产化时一并修 |
+
 发布 W-1 时同步更新了服务器上的 `/root/deploy/server_verify.sh`（tarball 只覆盖 `/opt` 下的副本，
 `/root/deploy` 里的脚本要单独上传——**下次改自检脚本别忘了这一步**）。新增的两条会话内断言
 （工作区概览结构 + 聊天流 200）在提供 `MAP_VERIFY_EMAIL/PASSWORD` 时才会执行。

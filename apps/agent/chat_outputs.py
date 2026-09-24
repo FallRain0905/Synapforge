@@ -22,17 +22,15 @@ from typing import Any, Callable
 
 try:  # 包内导入（正常运行）
     from .result_uploader import AgentArtifactClient, DiscoveredOutput, OutputDiscovery
-    from .workspace_scan import diff, is_excluded, snapshot
+    from .workspace_scan import INPUT_DIR_NAMES, diff, is_excluded, snapshot
 except ImportError:  # 直接脚本执行 / 测试以顶层模块导入
     from result_uploader import AgentArtifactClient, DiscoveredOutput, OutputDiscovery  # type: ignore
-    from workspace_scan import diff, is_excluded, snapshot  # type: ignore
+    from workspace_scan import INPUT_DIR_NAMES, diff, is_excluded, snapshot  # type: ignore
 
 # 一轮最多收这么多产出（对话不是流水线，防的是"模型把整个目录写爆"）
 MAX_OUTPUTS_PER_TURN = 20
 # 单文件上限：与成果物上传上限同量级；超了只记名字不传（如实告知，不截断）
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
-# 平台下发的输入目录：不算这一轮的产出
-INPUT_DIR_NAMES = frozenset({"inputs", "user_data"})
 
 
 @dataclass(frozen=True)

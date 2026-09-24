@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import io
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 import sidecar_entry
 
@@ -39,6 +41,60 @@ class StdioEncodingTests(unittest.TestCase):
         sidecar_entry._force_utf8_stdio()
         sidecar_entry._force_utf8_stdio()
         self.assertTrue(sys.stdout.encoding)
+
+
+class WorkspaceArgumentTests(unittest.TestCase):
+    """FM-0：工作目录必须能被显式传给内核，不能在入口里硬写成 `Path.cwd()`。
+
+    修复前的行为：`_daemon_args` 无条件写 `workspace=str(Path.cwd())`。打包成 exe 后进程的 cwd 是
+    安装目录（`resources\\sidecar`），于是"工作区"落在程序安装目录里——只读、用户也找不到自己的文件；
+    而且因为命令行上永远"有值"，`daemon_run` 里"读 platform.json 记住的工作区"那条路等于死代码。
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.state_dir = Path(self.temp.name)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def _args(self, workspace: str | None) -> object:
+        import argparse
+
+        return argparse.Namespace(
+            url=None,
+            state_dir=str(self.state_dir),
+            contract_only=False,
+            device_token=None,
+            workspace=workspace,
+            port=None,
+        )
+
+    def test_cli_workspace_wins_and_is_forwarded(self) -> None:
+        chosen = str(self.state_dir / "我的工作区")
+        daemon_args = sidecar_entry._daemon_args(self._args(chosen))
+        self.assertEqual(daemon_args.workspace, chosen)
+
+    def test_remembered_workspace_is_used_when_the_shell_gives_none(self) -> None:
+        remembered = str(self.state_dir / "remembered")
+        (self.state_dir / "platform.json").write_text(
+            '{"url": "https://synapforge.top", "device_id": "d1", "workspace": "%s"}' % remembered.replace("\\", "\\\\"),
+            encoding="utf-8",
+        )
+        daemon_args = sidecar_entry._daemon_args(self._args(None))
+        self.assertEqual(daemon_args.workspace, remembered)
+
+    def test_nothing_known_leaves_it_to_the_kernel(self) -> None:
+        """两边都不知道时不在这里编一个值：让 `daemon_run` 按"命令行 > platform.json > 当前目录"决定。"""
+
+        daemon_args = sidecar_entry._daemon_args(self._args(None))
+        self.assertIsNone(daemon_args.workspace)
+
+    def test_workspace_flag_exists_on_the_parser(self) -> None:
+        """入口的参数解析必须认 `--workspace`（壳就是用它把用户选的目录传进来的）。"""
+
+        source = Path(sidecar_entry.__file__).read_text(encoding="utf-8")
+        self.assertIn('"--workspace"', source)
 
 
 if __name__ == "__main__":

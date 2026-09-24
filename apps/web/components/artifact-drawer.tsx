@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Download, FileText, Loader2, RefreshCcw, X } from "lucide-react";
 import {
@@ -48,6 +48,9 @@ export function ArtifactDrawer({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState(false);
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const closeRef = useRef<HTMLButtonElement | null>(null);
+  const onCloseRef = useRef(onClose);
   // 类型以服务端详情为准：聊天卡片里的引用通常只带 id，客户端不知道是文本还是二进制
   const type = String(detail?.artifact.artifact_type ?? artifact.artifact_type ?? "");
   const readable = type ? TEXT_TYPES.has(type) : true; // 类型未知时先按文本试读，读到空再提示
@@ -74,12 +77,50 @@ export function ArtifactDrawer({
   }, [load]);
 
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    onCloseRef.current = onClose;
   }, [onClose]);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeRef.current?.focus();
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab" || !drawerRef.current) return;
+      const focusable = Array.from(
+        drawerRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (!focusable.length) {
+        event.preventDefault();
+        drawerRef.current.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+      previousFocus?.focus();
+    };
+  }, []);
 
   const download = async () => {
     setDownloading(true);
@@ -97,9 +138,12 @@ export function ArtifactDrawer({
   return (
     <div className="drawer-backdrop" onClick={onClose} data-testid="artifact-drawer-backdrop">
       <aside
+        ref={drawerRef}
         className="artifact-drawer"
         role="dialog"
+        aria-modal="true"
         aria-label={`成果物：${artifact.name}`}
+        tabIndex={-1}
         onClick={(event) => event.stopPropagation()}
         data-testid="artifact-drawer"
       >
@@ -120,7 +164,7 @@ export function ArtifactDrawer({
             <button type="button" className="text-button" onClick={() => void download()} disabled={downloading}>
               {downloading ? <Loader2 size={13} className="spin" /> : <Download size={13} />} 下载
             </button>
-            <button type="button" className="app-icon" aria-label="关闭" onClick={onClose} data-testid="artifact-drawer-close">
+            <button ref={closeRef} type="button" className="app-icon" aria-label="关闭" onClick={onClose} data-testid="artifact-drawer-close">
               <X size={15} />
             </button>
           </div>

@@ -134,6 +134,7 @@ def build_chat_command(
     session_key: str | None = None,
     model: str | None = None,
     agent_role: str | None = None,
+    variant: str | None = None,
 ) -> list[str]:
     """把模板变成实际 argv：替换 `{prompt}`，并在它**前面**插入可选的 `--session` / `-m` / `--agent`。
 
@@ -154,6 +155,9 @@ def build_chat_command(
         # 角色（M-6）：opencode 的 `--agent <名>` 选中执行体上的那个角色定义（一个 md 文件）。
         # 名字来自执行体探测（心跳上报），平台只存"选了谁"；名字不存在时 opencode 自己会报错，这里不猜。
         extra += ["--agent", str(agent_role)]
+    if variant:
+        # serve 的 message.model.variant 已实测会静默落回 default；CLI 的 `--variant` 才是当前可证明生效的通道。
+        extra += ["--variant", str(variant)]
     items[index] = items[index].replace("{prompt}", prompt)
     return items[:index] + extra + items[index:]
 
@@ -293,6 +297,7 @@ class ChatLoop:
                 session_key=turn.get("session_key"),
                 model=turn.get("model"),
                 agent_role=turn.get("role"),
+                variant=turn.get("variant"),
             )
         except ValueError as error:
             self._finish(token, agent_id, turn_id, success=False, content="", usage={}, session_key=None, error=str(error))
@@ -300,11 +305,12 @@ class ChatLoop:
 
         self.log(
             f"[chat] 取到轮次 {turn_id[:8]}（{protocol}，模型 {turn.get('model') or '默认'}，"
-            f"角色 {turn.get('role') or '默认'}）"
+            f"角色 {turn.get('role') or '默认'}，强度 {turn.get('variant') or '默认'}）"
         )
         # M-5c S-1：常驻 server 通道（只在执行体是 opencode、且配了端口时启用）。
         # **起得来就走它，起不来如实降级**到下面的 CLI 通道——两条通道的完成口径完全一致。
-        if self._serve_enabled(protocol) and await self._run_via_server(
+        # **非默认强度故意不走 serve**：当前版本会接受 variant 却实际落回 default；CLI `--variant` 已验证生效。
+        if self._serve_enabled(protocol) and not turn.get("variant") and await self._run_via_server(
             token=token,
             agent_id=agent_id,
             turn_id=turn_id,

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowUp, Bot, Brain, Cpu, FileText, MessageSquare, Paperclip, Play, Plus, RefreshCcw, Send, ShieldAlert, Sparkles, Square, Trash2, Wrench, X } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, Bot, Brain, Cpu, FileText, Gauge, History, MessageSquare, Paperclip, Play, Plus, RefreshCcw, Send, ShieldAlert, Sparkles, Square, Trash2, Wrench, X } from "lucide-react";
 import Link from "next/link";
 import { AgentResponse } from "../../components/agent-response";
 import { Markdown } from "../../components/markdown";
@@ -52,11 +52,18 @@ function formatBytes(size: number): string {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 const STATUS_LABEL: Record<string, string> = {
-  PENDING: "排队中",
+  PENDING: "准备中",
   CLAIMED: "执行中",
   DONE: "已完成",
   FAILED: "失败",
-  CANCELLED: "已取消",
+  CANCELLED: "已停止",
+};
+type Variant = "" | "minimal" | "high" | "max";
+const VARIANT_LABEL: Record<Variant, string> = {
+  "": "默认强度",
+  minimal: "精简",
+  high: "深入",
+  max: "最大",
 };
 /** 过程事件的中文名——与 lib/events.ts 的口径一致（执行体那一侧的事件类型）。 */
 const EVENT_LABEL: Record<string, string> = {
@@ -75,6 +82,52 @@ const EVENT_ICON: Record<string, typeof Activity> = {
 };
 
 type Mode = "chat" | "work";
+
+type TurnEventMap = Record<string, MyAgentTurnEvent[]>;
+type TurnApprovalMap = Record<string, MyAgentTurnApproval[]>;
+
+function answerSegments(events: MyAgentTurnEvent[]): string[] {
+  const whole = events
+    .filter((event) => event.event_type === "agent.message")
+    .map((event) => String(event.payload.text ?? "").trim())
+    .filter(Boolean);
+  const streamed = events
+    .filter((event) => event.event_type === "delta")
+    .map((event) => String(event.payload.text ?? ""))
+    .join("");
+  return streamed ? [...whole, streamed] : whole;
+}
+
+function thinkingFrom(events: MyAgentTurnEvent[]): string {
+  return events
+    .filter((event) => event.event_type === "thinking")
+    .map((event) => String(event.payload.text ?? ""))
+    .join("");
+}
+
+function ThinkingDisclosure({ turnId, text, active }: { turnId: string; text: string; active: boolean }) {
+  const [open, setOpen] = useState(false);
+  if (!text) return null;
+  return (
+    <div className="my-agent-thinking" data-testid={`my-agent-thinking-${turnId}`}>
+      <button
+        type="button"
+        className="my-agent-thinking-head"
+        aria-expanded={open}
+        data-testid={`my-agent-thinking-toggle-${turnId}`}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <Brain size={13} /> {active ? "正在思考" : "思考过程"}
+        <span className="my-agent-thinking-hint">{open ? "点一下收起" : `${text.length} 字，点一下展开`}</span>
+      </button>
+      {open ? (
+        <div className="my-agent-thinking-body" data-testid={`my-agent-thinking-body-${turnId}`}>
+          {text}
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 /**
  * 我的智能体（MY-AGENT M-2）：一个**单纯对话**工作页。
@@ -96,13 +149,17 @@ export default function MyAgentPage() {
   const [agentIndex, setAgentIndex] = useState(0);
   const [conversations, setConversations] = useState<MyAgentConversation[]>([]);
   const [selectedId, setSelectedId] = useState("");
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+  const finishingTurn = useRef("");
   const [turns, setTurns] = useState<MyAgentTurn[]>([]);
-  const [events, setEvents] = useState<MyAgentTurnEvent[]>([]);
-  // S-3：这一轮的权限请求（待批准卡片）。执行体会**停在那里等**，所以它要跟事件一起高频刷新。
-  const [approvals, setApprovals] = useState<MyAgentTurnApproval[]>([]);
+  const [eventsByTurn, setEventsByTurn] = useState<TurnEventMap>({});
+  const [approvalsByTurn, setApprovalsByTurn] = useState<TurnApprovalMap>({});
   const [model, setModel] = useState("");
   // M-6：角色（执行体上的 opencode agent）。空串 = 默认（不传 --agent）。选项来自执行体真探测。
   const [role, setRole] = useState("");
+  // S-4：非默认强度使用 opencode CLI 的 `--variant`；serve 会静默忽略该值，所以不能假装仍是真流式。
+  const [variant, setVariant] = useState<Variant>("");
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; title: string } | null>(null);
@@ -112,8 +169,19 @@ export default function MyAgentPage() {
   const [attachments, setAttachments] = useState<{ artifact_id: string; name: string }[]>([]);
   const [uploading, setUploading] = useState(false);
   const fileInput = useRef<HTMLInputElement | null>(null);
+  const messageScroller = useRef<HTMLDivElement | null>(null);
   const streamEnd = useRef<HTMLDivElement | null>(null);
+  const stickToBottom = useRef(true);
+  const lastVisibleLength = useRef(0);
   const inputBox = useRef<HTMLTextAreaElement | null>(null);
+  const sessionDrawerTrigger = useRef<HTMLButtonElement | null>(null);
+  const sessionDrawerClose = useRef<HTMLButtonElement | null>(null);
+  const sessionDrawerPanel = useRef<HTMLElement | null>(null);
+  const detailDrawerTrigger = useRef<HTMLButtonElement | null>(null);
+  const detailDrawerClose = useRef<HTMLButtonElement | null>(null);
+  const detailDrawerPanel = useRef<HTMLElement | null>(null);
+  const [sessionDrawerOpen, setSessionDrawerOpen] = useState(false);
+  const [newReply, setNewReply] = useState(false);
   // 「+」展开的添加面板（仿 zcode 的添加区：附件 / 角色 / 执行体）
   const [addOpen, setAddOpen] = useState(false);
   const composerRef = useRef<HTMLDivElement | null>(null);
@@ -157,12 +225,15 @@ export default function MyAgentPage() {
   const loadTurns = useCallback(async (conversationId: string) => {
     if (!conversationId) {
       setTurns([]);
-      return;
+      return [] as MyAgentTurn[];
     }
     try {
-      setTurns(await listMyAgentTurns(conversationId));
+      const fresh = await listMyAgentTurns(conversationId);
+      if (selectedIdRef.current === conversationId) setTurns(fresh);
+      return fresh;
     } catch {
       /* 轮询失败不打扰用户（下一拍会补上） */
+      return [] as MyAgentTurn[];
     }
   }, []);
 
@@ -176,65 +247,170 @@ export default function MyAgentPage() {
   useEffect(() => {
     if (!selectedId) {
       setTurns([]);
+      setEventsByTurn({});
+      setApprovalsByTurn({});
       return;
     }
-    void loadTurns(selectedId);
+    let cancelled = false;
+    finishingTurn.current = "";
+    setTurns([]);
+    setEventsByTurn({});
+    setApprovalsByTurn({});
+    void loadTurns(selectedId).then(async (freshTurns) => {
+      if (cancelled) return;
+      const realTurns = freshTurns.filter((turn) => !turn.id.startsWith("local-"));
+      for (let index = 0; index < realTurns.length && !cancelled; index += 4) {
+        const batch = await Promise.all(
+          realTurns.slice(index, index + 4).map(async (turn) => {
+            const [turnEvents, turnApprovals] = await Promise.all([
+              listMyAgentTurnEvents(turn.id).catch(() => []),
+              listMyAgentTurnApprovals(turn.id).catch(() => []),
+            ]);
+            return { turnId: turn.id, turnEvents, turnApprovals };
+          }),
+        );
+        if (cancelled) return;
+        setEventsByTurn((current) => ({ ...Object.fromEntries(batch.map((item) => [item.turnId, item.turnEvents])), ...current }));
+        setApprovalsByTurn((current) => ({ ...Object.fromEntries(batch.map((item) => [item.turnId, item.turnApprovals])), ...current }));
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [selectedId, loadTurns]);
 
   // 切会话时把工具条上的角色与模型同步成这条会话的设置：否则下拉显示的是上一条会话的值（看着像"设置丢了"）
   useEffect(() => {
     if (!selected) return;
     setRole(selected.role || "");
+    setVariant((selected.variant || "") as Variant);
     if (selected.model) setModel(selected.model);
     // 只在切换会话时同步（selected 的身份变化），不跟着每次列表刷新跑——否则用户刚改的下拉会被覆盖
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
 
-  // 一轮在跑：每 3 秒看一次轮次与过程事件（M-1 是轮询接口；WS 增量留给后续）
+  // 一轮在跑：每 900ms 刷新当前轮。历史轮次只在切换会话时重放，避免 20+ 轮时放大请求。
   useEffect(() => {
-    if (!selectedId || !activeTurn) {
-      setEvents([]);
-      setApprovals([]);
-      return;
-    }
+    if (!selectedId || !activeTurn || activeTurn.conversation_id !== selectedId) return;
     let cancelled = false;
+    let polling = false;
     const tick = async () => {
+      if (polling) return;
+      polling = true;
       try {
         const [fresh, freshEvents, freshApprovals] = await Promise.all([
           listMyAgentTurns(selectedId),
           listMyAgentTurnEvents(activeTurn.id),
           listMyAgentTurnApprovals(activeTurn.id),
         ]);
-        if (cancelled) return;
+        if (cancelled || selectedIdRef.current !== selectedId) return;
         setTurns(fresh);
-        setEvents(freshEvents);
-        setApprovals(freshApprovals);
+        setEventsByTurn((current) => ({ ...current, [activeTurn.id]: freshEvents }));
+        setApprovalsByTurn((current) => ({ ...current, [activeTurn.id]: freshApprovals }));
       } catch {
         /* 忽略单次失败 */
+      } finally {
+        polling = false;
       }
     };
     void tick();
-    // 执行中拉得勤一点：增量通道（S-2）靠这个节奏把"正在生成的文字"搬进气泡——
-    // 3 秒一次会看起来像"每 3 秒蹦一段"，空转时没必要这么勤（省请求）。
-    const timer = window.setInterval(tick, activeTurn ? 900 : 3000);
+    const timer = window.setInterval(tick, 900);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
     };
   }, [selectedId, activeTurn]);
 
-  // 结束时把最后一轮的事件也拉一次（这样"刚跑完"的过程事件不会缺）
+  // 结束时无条件补拉末尾事件；运行时的缓存可能早于最终持久化。
   useEffect(() => {
-    if (!lastTurn || ACTIVE_STATUSES.has(lastTurn.status) || events.length) return;
+    if (!lastTurn || lastTurn.conversation_id !== selectedId || ACTIVE_STATUSES.has(lastTurn.status) || lastTurn.id.startsWith("local-")) return;
+    if (finishingTurn.current === lastTurn.id) return;
+    finishingTurn.current = lastTurn.id;
+    const turnId = lastTurn.id;
+    const conversationId = selectedId;
     void Promise.all([
-      listMyAgentTurnEvents(lastTurn.id).then(setEvents),
-      listMyAgentTurnApprovals(lastTurn.id).then(setApprovals),
-    ]).catch(() => undefined);
-  }, [lastTurn, events.length]);
+      listMyAgentTurnEvents(turnId),
+      listMyAgentTurnApprovals(turnId),
+    ])
+      .then(([turnEvents, turnApprovals]) => {
+        if (selectedIdRef.current !== conversationId) return;
+        setEventsByTurn((current) => ({ ...current, [turnId]: turnEvents }));
+        setApprovalsByTurn((current) => ({ ...current, [turnId]: turnApprovals }));
+      })
+      .catch(() => {
+        if (selectedIdRef.current === conversationId) finishingTurn.current = "";
+      });
+  }, [lastTurn, selectedId]);
+
+  const activeEvents = activeTurn ? eventsByTurn[activeTurn.id] ?? [] : [];
+  const thinkingLength = useMemo(
+    () => Object.values(eventsByTurn).reduce((sum, turnEvents) => sum + thinkingFrom(turnEvents).length, 0),
+    [eventsByTurn],
+  );
+  const liveAnswerLength = useMemo(
+    () => answerSegments(activeEvents).reduce((sum, segment) => sum + segment.length, 0),
+    [activeEvents],
+  );
 
   useEffect(() => {
-    streamEnd.current?.scrollIntoView({ behavior: "smooth" });
-  }, [turns.length, activeTurn?.status]);
+    const approvalCount = Object.values(approvalsByTurn).reduce((sum, rows) => sum + rows.length, 0);
+    const visibleLength = turns.length + thinkingLength + liveAnswerLength + approvalCount;
+    if (stickToBottom.current) {
+      streamEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+      setNewReply(false);
+    } else if (visibleLength > lastVisibleLength.current) {
+      setNewReply(true);
+    }
+    lastVisibleLength.current = visibleLength;
+  }, [turns.length, thinkingLength, liveAnswerLength, approvalsByTurn]);
+
+  const closeSessionDrawer = useCallback(() => {
+    setSessionDrawerOpen(false);
+    window.requestAnimationFrame(() => sessionDrawerTrigger.current?.focus());
+  }, []);
+  const closeDetailDrawer = useCallback(() => {
+    setDetailOpen(false);
+    window.requestAnimationFrame(() => detailDrawerTrigger.current?.focus());
+  }, []);
+
+  useEffect(() => {
+    if (!sessionDrawerOpen && !detailOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const target = sessionDrawerOpen ? sessionDrawerClose.current : detailDrawerClose.current;
+    target?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (sessionDrawerOpen) closeSessionDrawer();
+        else closeDetailDrawer();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const panel = sessionDrawerOpen ? sessionDrawerPanel.current : detailDrawerPanel.current;
+      if (!panel) return;
+      const focusable = Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [sessionDrawerOpen, detailOpen, closeSessionDrawer, closeDetailDrawer]);
 
   /** 添加面板：点面板外或按 Esc 收起（与 zcode 的添加区一致，不用点空白处找关闭）。 */
   useEffect(() => {
@@ -267,6 +443,7 @@ export default function MyAgentPage() {
         device_id: agent.device_id,
         model,
         role,
+        variant,
       });
       setSelectedId(conversation.id);
       await loadConversations(conversation.id);
@@ -275,7 +452,7 @@ export default function MyAgentPage() {
       notify(error instanceof Error ? error.message : "会话创建失败");
       return null;
     }
-  }, [agent, loadConversations, model, notify, role, selected]);
+  }, [agent, loadConversations, model, notify, role, selected, variant]);
 
   const handleNewChat = async () => {
     setBusy(true);
@@ -293,6 +470,7 @@ export default function MyAgentPage() {
         device_id: agent.device_id,
         model,
         role: "",
+        variant,
       });
       setSelectedId(conversation.id);
       await loadConversations(conversation.id);
@@ -325,6 +503,7 @@ export default function MyAgentPage() {
         content: "",
         model,
         role,
+        variant,
         session_key: conversation.session_key,
         usage: {},
         error: "",
@@ -399,7 +578,10 @@ export default function MyAgentPage() {
   const handleApproval = async (item: MyAgentTurnApproval, decision: "once" | "always" | "reject") => {
     try {
       const updated = await decideMyAgentTurnApproval(item.turn_id, item.id, decision);
-      setApprovals((current) => current.map((one) => (one.id === updated.id ? updated : one)));
+      setApprovalsByTurn((current) => ({
+        ...current,
+        [item.turn_id]: (current[item.turn_id] ?? []).map((one) => (one.id === updated.id ? updated : one)),
+      }));
       notify(
         decision === "reject"
           ? "已拒绝：执行体不会做那件事"
@@ -435,8 +617,7 @@ export default function MyAgentPage() {
     if (!activeTurn) return;
     try {
       await stopMyAgentTurn(activeTurn.id);
-      // 诚实口径：平台还没有到 Agent 的中断通道，执行体仍会把这一轮跑完
-      notify("已请求停止：执行体会在几秒内被中止（内核每 3 秒查一次）");
+      notify("已请求停止：平台会把本轮标记为已停止；执行体收到取消检查后会中止当前执行");
       if (selectedId) await loadTurns(selectedId);
     } catch (error) {
       notify(error instanceof Error ? error.message : "停止失败");
@@ -469,6 +650,22 @@ export default function MyAgentPage() {
       notify(`模型已切到「${next.split("/").pop() || next}」，下一轮生效`);
     } catch (error) {
       notify(error instanceof Error ? error.message : "模型保存失败");
+    }
+  };
+
+  const handleVariantChange = async (next: Variant) => {
+    setVariant(next);
+    if (!selected) return;
+    try {
+      await updateMyAgentConversation(selected.id, { variant: next });
+      await loadConversations(selected.id);
+      notify(
+        next
+          ? `强度已切到「${VARIANT_LABEL[next]}」：下一轮通过 CLI --variant 生效，并如实降级为分段输出`
+          : "已恢复默认强度：下一轮继续使用常驻服务真流式",
+      );
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "强度保存失败");
     }
   };
 
@@ -527,7 +724,62 @@ export default function MyAgentPage() {
   /** 这个角色能不能动手（执行命令/改文件）——来自执行体探测到的角色文件工具开关。 */
   const roleExecutes = (name: string) => Boolean(agent?.roles.find((item) => item.name === name)?.executes);
 
+  const sessionsContent = (
+    <>
+      <button
+        className="ask-new-chat"
+        data-testid="my-agent-new-chat"
+        disabled={busy || !agents.length}
+        onClick={() => {
+          closeSessionDrawer();
+          void handleNewChat();
+        }}
+      >
+        <Plus size={15} /> 新对话
+      </button>
+      <div className="ask-sessions-scroll" data-testid="my-agent-conversations">
+        {grouped.map((group) => (
+          <div className="ask-session-group" key={group.label}>
+            <div className="ask-session-group-label">{group.label}</div>
+            {group.items.map((conversation) => (
+              <div
+                key={conversation.id}
+                className={`ask-session-row${selectedId === conversation.id ? " is-active" : ""}`}
+                onClick={() => {
+                  setSelectedId(conversation.id);
+                  closeSessionDrawer();
+                }}
+                data-testid={`my-agent-session-${conversation.id}`}
+              >
+                <div className="ask-session-main">
+                  <strong>{conversation.title || "新对话"}</strong>
+                  <small className="my-agent-session-meta">
+                    {shortDate(conversation.updated_at || conversation.created_at)}
+                    <span className="my-agent-session-badge">{conversation.turn_count} 轮</span>
+                    {conversation.model ? conversation.model.split("/").pop() : ""}
+                  </small>
+                </div>
+                <button
+                  className="ask-session-delete"
+                  aria-label={`删除 ${conversation.title || "会话"}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setDeleteTarget({ id: conversation.id, title: conversation.title || "会话" });
+                  }}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            ))}
+          </div>
+        ))}
+        {!conversations.length ? <EmptyState>还没有对话：点上面「新对话」或直接在下面输入</EmptyState> : null}
+      </div>
+    </>
+  );
+
   const detailTurn = activeTurn ?? lastTurn;
+  const detailEvents = detailTurn ? eventsByTurn[detailTurn.id] ?? [] : [];
 
   /** 「对话 / 项目工作」不占页面顶端：放到输入框最下面的说明行里（用户指定的位置）。 */
   const modeSwitch = (
@@ -563,34 +815,17 @@ export default function MyAgentPage() {
    * 页面只负责"按到达顺序拼出来"；轮次结束后一律用权威的 `content` 覆盖（两者内容一致，后者是权威值）。
    * 刷新页面也能重建：这两种事件都在轮次事件表里，重新拉一次就等于重放。
    */
-  const liveSegments = useMemo(() => {
-    const whole = events
-      .filter((event) => event.event_type === "agent.message")
-      .map((event) => String(event.payload.text ?? "").trim())
-      .filter(Boolean);
-    const streamed = events
-      .filter((event) => event.event_type === "delta")
-      .map((event) => String(event.payload.text ?? ""))
-      .join("");
-    return streamed ? [...whole, streamed] : whole;
-  }, [events]);
+  const liveSegments = useMemo(() => answerSegments(activeEvents), [activeEvents]);
   /** 抽屉里的"过程事件"：增量与思考都不算过程事件（几百条会把抽屉刷屏），它们在别处显示。 */
   const processEvents = useMemo(
-    () => events.filter((event) => event.event_type !== "delta" && event.event_type !== "thinking"),
-    [events],
+    () => detailEvents.filter((event) => event.event_type !== "delta" && event.event_type !== "thinking"),
+    [detailEvents],
   );
-  /** S-4：思考过程（reasoning 增量拼起来）——默认收起，点开看；与正文严格分开。 */
-  const thinkingText = useMemo(
-    () =>
-      events
-        .filter((event) => event.event_type === "thinking")
-        .map((event) => String(event.payload.text ?? ""))
-        .join(""),
-    [events],
-  );
-  const [thinkingOpen, setThinkingOpen] = useState(false);
+  /** S-4：当前执行细节里的思考过程，与正文严格分开。 */
+  const thinkingText = useMemo(() => thinkingFrom(detailEvents), [detailEvents]);
+  const [eventsOpen, setEventsOpen] = useState(false);
   /** 这一轮有没有走增量通道——决定状态文案（**不假装**：CLI 通道就说"分段"）。 */
-  const hasDeltas = useMemo(() => events.some((event) => event.event_type === "delta"), [events]);
+  const hasDeltas = useMemo(() => activeEvents.some((event) => event.event_type === "delta"), [activeEvents]);
   const liveTurnId = detailTurn?.id ?? "";
   /** 这一轮**实际**用的角色在角色文件上的定义（R-4）：说明 + 硬规则摘要 + 版本 + 是否与部署清单一致。 */
   const roleDefinition = useMemo(() => {
@@ -640,57 +875,25 @@ export default function MyAgentPage() {
       ) : (
         <section className="my-agent-shell">
           <div className="my-agent-layout">
-          {/* 左列：会话 */}
+          {/* 左列：桌面会话列表；窄屏复用同一份内容到抽屉，不另造数据与动作。 */}
           <aside className="ask-sessions" aria-label="会话管理">
-            <button
-              className="ask-new-chat"
-              data-testid="my-agent-new-chat"
-              disabled={busy || !agents.length}
-              onClick={() => void handleNewChat()}
-            >
-              <Plus size={15} /> 新对话
-            </button>
-            <div className="ask-sessions-scroll" data-testid="my-agent-conversations">
-              {grouped.map((group) => (
-                <div className="ask-session-group" key={group.label}>
-                  <div className="ask-session-group-label">{group.label}</div>
-                  {group.items.map((conversation) => (
-                    <div
-                      key={conversation.id}
-                      className={`ask-session-row${selectedId === conversation.id ? " is-active" : ""}`}
-                      onClick={() => setSelectedId(conversation.id)}
-                      data-testid={`my-agent-session-${conversation.id}`}
-                    >
-                      <div className="ask-session-main">
-                        <strong>{conversation.title || "新对话"}</strong>
-                        <small className="my-agent-session-meta">
-                          {shortDate(conversation.updated_at || conversation.created_at)}
-                          <span className="my-agent-session-badge">{conversation.turn_count} 轮</span>
-                          {conversation.model ? conversation.model.split("/").pop() : ""}
-                        </small>
-                      </div>
-                      <button
-                        className="ask-session-delete"
-                        aria-label={`删除 ${conversation.title || "会话"}`}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setDeleteTarget({ id: conversation.id, title: conversation.title || "会话" });
-                        }}
-                      >
-                        <Trash2 size={13} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              ))}
-              {!conversations.length ? <EmptyState>还没有对话：点上面「新对话」或直接在下面输入</EmptyState> : null}
-            </div>
+            {sessionsContent}
           </aside>
 
           {/* 中列：对话流 + 输入 */}
           <div className="my-agent-main">
             <Panel testId="my-agent-chat-panel">
               <div className="my-agent-toolbar">
+                <button
+                  ref={sessionDrawerTrigger}
+                  type="button"
+                  className="button button-secondary my-agent-session-toggle"
+                  data-testid="my-agent-session-toggle"
+                  aria-expanded={sessionDrawerOpen}
+                  onClick={() => setSessionDrawerOpen(true)}
+                >
+                  <History size={14} /> 会话
+                </button>
                 <span className="my-agent-title">{selected?.title || "新对话"}</span>
                 <label className="my-agent-picker">
                   <Cpu size={13} />
@@ -722,19 +925,33 @@ export default function MyAgentPage() {
                 ) : null}
                 <span className="my-agent-meta-line">{agent ? `${agent.executor || "执行体"} · ${agent.project_name}` : ""}</span>
                 <button
+                  ref={detailDrawerTrigger}
                   type="button"
                   className="button button-secondary my-agent-drawer-toggle"
                   data-testid="my-agent-detail-toggle"
                   aria-expanded={detailOpen}
-                  onClick={() => setDetailOpen((open) => !open)}
+                  onClick={() => (detailOpen ? closeDetailDrawer() : setDetailOpen(true))}
                 >
                   <Activity size={14} /> 执行细节
                   {activeTurn ? <span className="my-agent-live-dot" aria-hidden /> : null}
                 </button>
               </div>
 
-              <div className="ask-messages" data-testid="my-agent-stream">
-                {turns.map((turn) => (
+              <div
+                className="ask-messages"
+                ref={messageScroller}
+                data-testid="my-agent-stream"
+                onScroll={(event) => {
+                  const node = event.currentTarget;
+                  stickToBottom.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+                  if (stickToBottom.current) setNewReply(false);
+                }}
+              >
+                {turns.map((turn) => {
+                  const turnEvents = eventsByTurn[turn.id] ?? [];
+                  const turnApprovals = approvalsByTurn[turn.id] ?? [];
+                  const turnThinking = thinkingFrom(turnEvents);
+                  return (
                   <div className="my-agent-turn" key={turn.id}>
                     <div className="ask-row is-user">
                       <div className="ask-bubble">
@@ -755,7 +972,13 @@ export default function MyAgentPage() {
                         <div className="my-agent-answer-head">
                           <Bot size={12} /> {turn.role ? roleLabel(turn.role) : "智能体"}
                           {turn.model ? ` · ${turn.model.split("/").pop()}` : ""}
+                          {turn.variant ? ` · ${VARIANT_LABEL[turn.variant as Variant] || turn.variant}` : ""}
                         </div>
+                        <ThinkingDisclosure
+                          turnId={turn.id}
+                          text={turnThinking}
+                          active={turn.id === activeTurn?.id}
+                        />
                         {turn.content ? (
                           <AgentResponse
                             text={turn.content}
@@ -773,13 +996,15 @@ export default function MyAgentPage() {
                             </div>
                             <div className="my-agent-status">
                               <RefreshCcw size={12} className="spin" />{" "}
-                              {approvals.some((item) => item.status === "PENDING")
-                                ? "等你批准（执行体已停下等你的决定）"
+                              {turnApprovals.some((item) => item.status === "PENDING")
+                                ? "等待授权（执行体已停下等你的决定）"
                                 : hasDeltas
-                                  ? "生成中（增量显示）"
-                                  : thinkingText
+                                  ? "生成中（真实增量）"
+                                  : turnThinking
                                     ? "思考中（还没开始写正文）"
-                                    : "生成中（分段显示，不是逐字流）"}
+                                    : turn.variant
+                                      ? `执行中（${VARIANT_LABEL[turn.variant as Variant] || turn.variant}强度，CLI 分段输出）`
+                                      : "执行中（分段显示，不是逐字流）"}
                             </div>
                           </div>
                         ) : (
@@ -797,14 +1022,14 @@ export default function MyAgentPage() {
                         {turn.id === liveTurnId &&
                         !turn.content &&
                         turn.status === "DONE" &&
-                        approvals.some((item) => item.status === "DENIED" || item.status === "EXPIRED") ? (
+                        turnApprovals.some((item) => item.status === "DENIED" || item.status === "EXPIRED") ? (
                           <span className="my-agent-status">
                             这一轮没有文字回复：执行体想做的事没被批准，它在这一步就结束了。
                           </span>
                         ) : null}
-                        {turn.id === liveTurnId && approvals.length ? (
+                        {turnApprovals.length ? (
                           <div className="my-agent-approvals" data-testid={`my-agent-approvals-${turn.id}`}>
-                            {approvals.map((item) => (
+                            {turnApprovals.map((item) => (
                               <div
                                 className={`my-agent-approval is-${item.status.toLowerCase()}`}
                                 key={item.id}
@@ -902,7 +1127,8 @@ export default function MyAgentPage() {
                       </div>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
                 {!turns.length && !busy ? (
                   <EmptyState>
                     <MessageSquare size={16} /> 说点什么开始——没有选中会话时会自动新建一个
@@ -910,6 +1136,21 @@ export default function MyAgentPage() {
                 ) : null}
                 <div ref={streamEnd} />
               </div>
+
+              {newReply ? (
+                <button
+                  type="button"
+                  className="my-agent-new-reply"
+                  data-testid="my-agent-new-reply"
+                  onClick={() => {
+                    stickToBottom.current = true;
+                    setNewReply(false);
+                    streamEnd.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+                  }}
+                >
+                  <ArrowDown size={14} /> 有新回复 · 回到底部
+                </button>
+              ) : null}
 
               {attachments.length ? (
                 <div className="my-agent-attach-list">
@@ -1068,6 +1309,22 @@ export default function MyAgentPage() {
                       ))}
                     </select>
                   </label>
+                  <label
+                    className="composer-picker"
+                    title={variant ? "非默认强度通过 CLI --variant 生效；当前会从真流式降级为分段输出" : "默认强度使用常驻服务真流式"}
+                  >
+                    <Gauge size={14} />
+                    <select
+                      value={variant}
+                      onChange={(event) => void handleVariantChange(event.target.value as Variant)}
+                      data-testid="my-agent-variant"
+                      aria-label="推理强度"
+                    >
+                      {(Object.keys(VARIANT_LABEL) as Variant[]).map((item) => (
+                        <option key={item || "default"} value={item}>{VARIANT_LABEL[item]}</option>
+                      ))}
+                    </select>
+                  </label>
                   <span className="composer-count" title="这一轮带的附件数">
                     {attachments.length ? `附件 ${attachments.length}` : "无附件"}
                   </span>
@@ -1112,7 +1369,9 @@ export default function MyAgentPage() {
               </div>
               <div className="my-agent-mode-footer">
                 <span className="hint">
-                  对话不建任务、不进任务板；上下文由执行体维持；附件会落到工作目录的 inputs/ 下。
+                  {variant
+                    ? `${VARIANT_LABEL[variant]}强度会真实传给 CLI --variant；当前通道如实显示为分段输出。`
+                    : "默认强度使用常驻服务真流式；对话不建任务，附件落到工作目录 inputs/。"}
                 </span>
                 {modeSwitch}
               </div>
@@ -1121,6 +1380,7 @@ export default function MyAgentPage() {
 
           {/* 右列：本轮执行细节 */}
           <aside
+            ref={detailDrawerPanel}
             className={`my-agent-drawer${detailOpen ? " is-open" : ""}`}
             aria-label="执行细节"
             aria-hidden={!detailOpen}
@@ -1129,11 +1389,12 @@ export default function MyAgentPage() {
             <div className="my-agent-drawer-head">
               <strong>本轮执行</strong>
               <button
+                ref={detailDrawerClose}
                 type="button"
                 className="icon-button"
                 aria-label="收起执行细节"
                 data-testid="my-agent-drawer-close"
-                onClick={() => setDetailOpen(false)}
+                onClick={closeDetailDrawer}
               >
                 <X size={14} />
               </button>
@@ -1156,6 +1417,8 @@ export default function MyAgentPage() {
                         ? `${roleLabel(detailTurn.role)}（${detailTurn.role}${roleExecutes(detailTurn.role) ? " · 可执行命令" : " · 只读"}）`
                         : "默认（无角色）"}
                     </dd>
+                    <dt>强度</dt>
+                    <dd>{detailTurn.variant ? `${VARIANT_LABEL[detailTurn.variant as Variant] || detailTurn.variant}（CLI --variant）` : "默认（serve 真流式）"}</dd>
                     <dt>会话句柄</dt>
                     <dd title={detailTurn.session_key ?? ""}>{detailTurn.session_key ? `${detailTurn.session_key.slice(0, 10)}…` : "—"}</dd>
                     <dt>用量</dt>
@@ -1194,29 +1457,18 @@ export default function MyAgentPage() {
                     </div>
                   ) : null}
                   <div className="my-agent-events" data-testid="my-agent-events">
-                    {thinkingText ? (
-                      <div className="my-agent-thinking" data-testid="my-agent-thinking">
-                        <button
-                          type="button"
-                          className="my-agent-thinking-head"
-                          aria-expanded={thinkingOpen}
-                          data-testid="my-agent-thinking-toggle"
-                          onClick={() => setThinkingOpen((open) => !open)}
-                        >
-                          <Brain size={13} /> 思考过程
-                          <span className="my-agent-thinking-hint">
-                            {thinkingOpen ? "点一下收起" : `${thinkingText.length} 字，点一下展开`}
-                          </span>
-                        </button>
-                        {thinkingOpen ? (
-                          <div className="my-agent-thinking-body" data-testid="my-agent-thinking-body">
-                            {thinkingText}
-                          </div>
-                        ) : null}
-                      </div>
+                    {processEvents.length ? (
+                      <button
+                        type="button"
+                        className="my-agent-process-toggle"
+                        aria-expanded={eventsOpen}
+                        onClick={() => setEventsOpen((open) => !open)}
+                      >
+                        <Activity size={13} /> 过程事件 · {processEvents.length} 条
+                        <span>{eventsOpen ? "收起" : "展开"}</span>
+                      </button>
                     ) : null}
-                    {processEvents.length ? <div className="my-agent-events-label">过程事件</div> : null}
-                    {processEvents.map((event) => {
+                    {(eventsOpen ? processEvents : processEvents.slice(-3)).map((event) => {
                       const Icon = EVENT_ICON[event.event_type] ?? Activity;
                       const detail = String(
                         event.payload.text ?? event.payload.tool ?? event.payload.path ?? event.payload.executor ?? "",
@@ -1233,6 +1485,9 @@ export default function MyAgentPage() {
                       );
                     })}
                     {!processEvents.length ? <div className="hint">还没有过程事件（执行体一开始跑就会出现）</div> : null}
+                    {!eventsOpen && processEvents.length > 3 ? (
+                      <div className="hint">已显示最近 3 条，其余 {processEvents.length - 3} 条已折叠</div>
+                    ) : null}
                   </div>
                 </>
               ) : (
@@ -1241,7 +1496,34 @@ export default function MyAgentPage() {
             </Panel>
           </aside>
           </div>
-          {detailOpen ? <div className="my-agent-backdrop" onClick={() => setDetailOpen(false)} aria-hidden /> : null}
+          {detailOpen ? <div className="my-agent-backdrop" onClick={closeDetailDrawer} aria-hidden /> : null}
+          {sessionDrawerOpen ? (
+            <>
+              <div className="my-agent-session-backdrop" onClick={closeSessionDrawer} aria-hidden />
+              <aside
+                ref={sessionDrawerPanel}
+                className="my-agent-session-drawer"
+                role="dialog"
+                aria-modal="true"
+                aria-label="历史会话"
+                data-testid="my-agent-session-drawer"
+              >
+                <div className="my-agent-drawer-head">
+                  <strong>历史会话</strong>
+                  <button
+                    ref={sessionDrawerClose}
+                    type="button"
+                    className="icon-button"
+                    aria-label="关闭会话列表"
+                    onClick={closeSessionDrawer}
+                  >
+                    <X size={16} />
+                  </button>
+                </div>
+                {sessionsContent}
+              </aside>
+            </>
+          ) : null}
         </section>
       )}
 

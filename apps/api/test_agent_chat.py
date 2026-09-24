@@ -297,6 +297,7 @@ class AgentChatTests(unittest.TestCase):
         agent_chat.delete_conversation(self.store, conversation.id, MEMBER)
         with self.assertRaisesRegex(agent_chat.AgentChatError, "conversation_not_found"):
             agent_chat.get_conversation(self.store, conversation.id, MEMBER)
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM agent_turns").fetchone()[0], 0)
 
     def test_claim_is_scoped_to_the_device_project(self) -> None:
         other = self.store.create_project(ProjectCreate(name="另一个项目", created_by=MEMBER))
@@ -363,6 +364,27 @@ class AgentChatTests(unittest.TestCase):
         self.assertEqual(agent_chat.get_turn(self.store, turn.id).role, "mm-review")
         self.assertEqual(agent_chat.get_conversation(self.store, conversation.id, MEMBER).role, "mm-paper-zh")
         self.assertEqual(self.say(conversation, "再写一段").role, "mm-paper-zh")
+
+    def test_variant_is_frozen_on_each_turn_and_reaches_the_agent(self) -> None:
+        conversation = agent_chat.create_conversation(
+            self.store,
+            MEMBER,
+            AgentChatConversationCreate(
+                project_id=self.project.id,
+                device_id=self.device.device_id,
+                model="m",
+                variant="high",
+            ),
+        )
+        first = self.say(conversation, "仔细想")
+        self.assertEqual(first.variant, "high")
+        self.assertEqual(self.claim().turn.variant, "high")
+        agent_chat.update_conversation(
+            self.store, conversation.id, MEMBER, AgentChatConversationUpdate(variant="minimal")
+        )
+        self.finish(first.id)
+        self.assertEqual(agent_chat.get_turn(self.store, first.id).variant, "high")
+        self.assertEqual(self.say(conversation, "简短想").variant, "minimal")
 
     def test_empty_role_means_default_and_is_not_invented(self) -> None:
         """没选角色就是空串——**不能凭空塞一个角色名**（否则每一轮都会带 `--agent`）。"""
@@ -477,10 +499,12 @@ class AgentChatTests(unittest.TestCase):
         event = main.report_chat_turn_event(
             self.agent.agent_id,
             turn.id,
-            AgentChatTurnEventReport(event_type="agent.message", sequence=1, payload={"text": "在看"}),
+            AgentChatTurnEventReport(event_type="thinking", sequence=1, payload={"text": "先核对假设"}),
             request,
         )
-        self.assertEqual(event.event_type, "agent.message")
+        self.assertEqual(event.event_type, "thinking")
+        history = agent_chat.list_turn_events(self.store, turn.id, MEMBER)
+        self.assertEqual([(item.event_type, item.payload["text"]) for item in history], [("thinking", "先核对假设")])
         done = main.complete_chat_turn(
             self.agent.agent_id,
             turn.id,

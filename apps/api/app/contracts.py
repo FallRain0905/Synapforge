@@ -989,6 +989,147 @@ class DriveImportRequest(APIModel):
     task_id: UUID | None = None
 
 
+class DriveDirectoryCreate(APIModel):
+    """新建目录（FM-1）。`parent_id` 为空 = 建在根目录下。"""
+
+    parent_id: str | None = None
+    name: str = Field(min_length=1, max_length=240)
+
+
+class DriveNodePatch(APIModel):
+    """改名。`expected_revision` 给了就做并发校验（对不上返回冲突，不盲目覆盖）。"""
+
+    name: str = Field(min_length=1, max_length=240)
+    expected_revision: int | None = None
+
+
+class DriveNodeMove(APIModel):
+    parent_id: str | None = None
+    expected_revision: int | None = None
+
+
+class FileTransferDriveToWorkspace(APIModel):
+    """云盘 → Agent 工作区（显式复制）。"""
+
+    node_id: str = Field(min_length=4, max_length=80)
+    workspace_id: str = Field(min_length=4, max_length=80)
+    relative_path: str | None = None
+    overwrite: bool = False
+
+
+class FileTransferWorkspaceToDrive(APIModel):
+    """Agent 工作区 → 云盘（Agent 先传到传输会话，再由人存进云盘）。"""
+
+    workspace_id: str = Field(min_length=4, max_length=80)
+    relative_path: str = Field(min_length=1, max_length=1024)
+
+
+class FileTransferSave(APIModel):
+    transfer_id: str = Field(min_length=4, max_length=80)
+    parent_id: str | None = None
+    name: str | None = Field(default=None, max_length=240)
+
+
+class FileAccessGrantCreate(APIModel):
+    """给一个 Agent 授权云盘里的某些文件（FM-5）。默认只读 + 可导入项目。"""
+
+    agent_id: str = Field(min_length=2, max_length=80)
+    device_id: str | None = None
+    project_id: UUID
+    node_id: str | None = None
+    scope_type: Literal["file", "folder", "drive"] = "file"
+    capabilities: list[str] = Field(default_factory=list)
+    include_future_nodes: bool = False
+    task_id: str | None = None
+    run_id: str | None = None
+    conversation_id: str | None = None
+    turn_id: str | None = None
+    expires_in_seconds: int = Field(default=7 * 24 * 3600, ge=300, le=30 * 24 * 3600)
+
+
+class FileAccessGrantDecision(APIModel):
+    """撤销/续期共用的请求体。"""
+
+    reason: str = Field(default="revoked_by_member", max_length=200)
+    expires_in_seconds: int = Field(default=7 * 24 * 3600, ge=300, le=30 * 24 * 3600)
+
+
+class FileLeaseExchange(APIModel):
+    """Agent 用项目令牌换一个短期 lease（明文只在这次响应里出现一次）。"""
+
+    grant_id: str = Field(min_length=4, max_length=80)
+    run_id: str | None = None
+    ttl_seconds: int = Field(default=900, ge=60, le=3600)
+
+
+class WorkspaceRegisterRequest(APIModel):
+    """Agent 上报自己的工作区（心跳时带；`workspace_identity` 是**路径的哈希**，不是路径本身）。"""
+
+    display_name: str = Field(min_length=1, max_length=120)
+    workspace_identity: str = Field(min_length=4, max_length=80)
+    device_id: str | None = None
+    project_id: UUID | None = None
+    kind: Literal["cloud", "desktop"] = "desktop"
+    protected_paths: list[str] = Field(default_factory=list)
+    policy_version: str = "1"
+
+
+class WorkspaceOperationCreate(APIModel):
+    """浏览器入队一个工作区操作（Agent 领取后执行）。"""
+
+    operation_type: Literal["list", "stat", "mkdir", "upload", "download", "rename", "move", "copy", "delete", "extract"]
+    relative_path: str = ""
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str = Field(min_length=6, max_length=160)
+    expected_revision: str | None = None
+    fail_when_offline: bool = False
+
+
+class WorkspaceOperationClaim(APIModel):
+    workspace_id: str | None = None
+    limit: int = Field(default=4, ge=1, le=16)
+    lease_seconds: int = Field(default=120, ge=10, le=3600)
+
+
+class WorkspaceOperationProgress(APIModel):
+    progress: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceOperationComplete(APIModel):
+    success: bool
+    result: dict[str, Any] | None = None
+    error_code: str | None = Field(default=None, max_length=120)
+    error_message: str | None = Field(default=None, max_length=500)
+
+
+class WorkspaceTransferCreate(APIModel):
+    source_type: Literal["drive", "workspace", "temp"]
+    target_type: Literal["drive", "workspace", "temp"]
+    operation_id: str | None = None
+    workspace_id: str | None = None
+    source_id: str | None = None
+    source_hash: str | None = None
+    target_id: str | None = None
+    expected_size: int = Field(default=0, ge=0)
+    expected_hash: str | None = None
+    ttl_seconds: int = Field(default=3600, ge=60, le=86400)
+
+
+class DriveExtractionCreate(APIModel):
+    """解压：把云盘里的归档解成一个新目录（FM-2）。"""
+
+    node_id: str = Field(min_length=1, max_length=64)
+    target_parent_id: str | None = None
+    directory_name: str | None = Field(default=None, max_length=240)
+
+
+class DriveNodeCopy(APIModel):
+    """复制到某目录；`name` 不填就沿用原名（同名时自动加「-副本」后缀，不覆盖）。"""
+
+    parent_id: str | None = None
+    name: str | None = Field(default=None, max_length=240)
+
+
 class KbCreate(APIModel):
     """创建知识库：project_id 为空即个人知识库。"""
 
@@ -1399,7 +1540,10 @@ class Agent(APIModel):
     supported_tools: list[str]
     supported_languages: list[str]
     max_concurrency: int
+    # 注册与心跳的响应里是执行体自报的**绝对路径**（设备侧要回读对账）；成员列表里恒为 None，
+    # 只给 `workspace_identity`（路径的 sha256 前 12 位）。见 `app/path_privacy.py`。
     local_workspace: str | None
+    workspace_identity: str | None = None
     network_policy: str
     status: Literal["online", "idle", "offline"]
     last_seen: datetime
@@ -1576,6 +1720,11 @@ class DeviceProjectGrantCreate(APIModel):
         "handoff.accept",
         "handoff.reject",
         "review.submit",
+        # 工作区文件服务（FM-3）：读/写/领取分开授权。**旧授权串里没有这三项**，
+        # 已配对设备的授权需要重新签发才会拿到（见 FM-3 交接的部署注意事项）。
+        "workspace.files.read",
+        "workspace.files.write",
+        "workspace.files.claim",
     ])
     expires_in_seconds: int = Field(default=86400, ge=60, le=2592000)
 
@@ -1945,6 +2094,7 @@ class AgentChatConversationCreate(APIModel):
     device_id: str = Field(min_length=2, max_length=80)
     model: str = Field(default="", max_length=160)
     role: str = Field(default="", max_length=80)
+    variant: Literal["", "minimal", "high", "max"] = ""
     command_template: list[str] = Field(default_factory=list, max_length=24)
 
 
@@ -1953,6 +2103,7 @@ class AgentChatConversationUpdate(APIModel):
 
     role: str | None = Field(default=None, max_length=80)
     model: str | None = Field(default=None, max_length=160)
+    variant: Literal["", "minimal", "high", "max"] | None = None
     title: str | None = Field(default=None, max_length=120)
 
 
@@ -1966,6 +2117,8 @@ class AgentChatConversation(APIModel):
     model: str = ""
     # 会话上选的角色（空 = 默认）。执行体按它插 `--agent`；探不到角色时这里只会是空。
     role: str = ""
+    # 推理强度：非空时内核走已验证支持 `--variant` 的 CLI 通道；serve 端目前会静默忽略它。
+    variant: str = ""
     session_key: str | None = None
     turn_count: int = 0
     created_at: datetime
@@ -1985,6 +2138,8 @@ class AgentChatTurn(APIModel):
     model: str = ""
     # 这一轮**实际**用的角色（建轮次时从会话抄下来）：中途换角色时，历史里"这轮谁跑的"仍然如实
     role: str = ""
+    # 这一轮实际使用的 `--variant`，与角色一样在建轮次时冻结，避免改会话后污染历史。
+    variant: str = ""
     session_key: str | None = None
     usage: dict[str, Any] = Field(default_factory=dict)
     error: str = ""

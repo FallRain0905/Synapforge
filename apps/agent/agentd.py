@@ -40,6 +40,8 @@ try:
     from .output_collector import CollectorConfig, OutputCollector
     from .codex_executor import build_codex_command, detect_codex_cli, parse_codex_jsonl, summarize_codex_result
     from .chat_loop import ChatLoop, ChatLoopConfig
+    from .drive_materializer import DriveMaterializeConfig, DriveMaterializer
+    from .file_worker import FileWorkerConfig, WorkspaceFileWorker
     from .input_fetcher import materialize_inputs, prompt_with_inputs
     from .opencode_executor import parse_opencode_jsonl, summarize_opencode_result
     from .sidecar_api import CONTRACT_VERSION, SIDECAR_VERSION, SidecarService, default_state_dir, read_platform_info, write_platform_info
@@ -72,9 +74,11 @@ except ImportError:  # Support direct script execution on Windows.
     from output_collector import CollectorConfig, OutputCollector
     from codex_executor import build_codex_command, detect_codex_cli, parse_codex_jsonl, summarize_codex_result
     from chat_loop import ChatLoop, ChatLoopConfig
+    from drive_materializer import DriveMaterializeConfig, DriveMaterializer
+    from file_worker import FileWorkerConfig, WorkspaceFileWorker
     from input_fetcher import materialize_inputs, prompt_with_inputs  # type: ignore
     from opencode_executor import parse_opencode_jsonl, summarize_opencode_result
-    from sidecar_api import CONTRACT_VERSION, SIDECAR_VERSION, SidecarService, default_state_dir, read_platform_info, write_platform_info
+    from sidecar_api import CONTRACT_VERSION, SIDECAR_VERSION, SidecarService, default_state_dir, read_platform_info, remember_workspace, write_platform_info
     from gateway_client import DurableGatewayClient, GatewayIdentity
     from local_state import LocalAgentState
     from machine_service import LocalProcessSupervisor, MachineAgentService, MachineServiceConfig
@@ -161,7 +165,7 @@ def capability_cards_from_args(args: argparse.Namespace) -> list[dict]:
 
 
 def register(args: argparse.Namespace) -> None:
-    payload = {"agent_id": args.agent_id, "display_name": args.display_name, "owner_member_id": args.owner, "model_provider": args.provider, "model_name": args.model, "supported_tools": args.tools, "supported_languages": args.languages, "local_workspace": str(Path(args.workspace).resolve()), "network_policy": "deny-by-default"}
+    payload = {"agent_id": args.agent_id, "display_name": args.display_name, "owner_member_id": args.owner, "model_provider": args.provider, "model_name": args.model, "supported_tools": args.tools, "supported_languages": args.languages, "local_workspace": str(_workspace_root(args.workspace)), "network_policy": "deny-by-default"}
     cards = capability_cards_from_args(args)
     if cards:
         payload["capability_cards"] = cards
@@ -541,7 +545,10 @@ async def _execute_task(
     input_note = ""
     input_ids = [str(item) for item in (task.get("input_artifacts") or [])]
     if input_ids:
-        identity_for_inputs = loop_identity or {}
+        # 身份取**这次执行传进来的** identity（以前这里写的是一个从未定义的名字 `loop_identity`）：
+        # 名字错会被下面"取不到输入也要照常跑"的兜底 except 吃掉，于是每次带输入的任务都在提示词里
+        # 写"输入文件处理失败"、inputs/ 永远空着——兜底掩盖了 bug，这是最坏的一种"跑通了"。
+        identity_for_inputs = identity or {}
         try:
             written, failed = materialize_inputs(
                 AgentArtifactClient(
@@ -550,7 +557,7 @@ async def _execute_task(
                     str(identity_for_inputs.get("agent_id") or ""),
                 ),
                 [{"artifact_id": item, "name": ""} for item in input_ids],
-                workspace=Path(args.workspace).expanduser().resolve(),
+                workspace=_workspace_root(args.workspace),
                 log=print,
             )
             input_note = prompt_with_inputs("", written, failed)
@@ -594,7 +601,7 @@ async def _execute_task(
     run_id = f"run-{uuid4().hex[:12]}"
     if reporter is not None:
         reporter.started(command, kind if kind in {"codex", "cli"} else "command", protocol=protocol)
-    workspace = Path(args.workspace).expanduser().resolve()
+    workspace = _workspace_root(args.workspace)
     state = LocalAgentState(args.state_path)
     process_output = None
     if reporter is not None:
@@ -733,7 +740,7 @@ def _build_output_collector(identity: dict, args: argparse.Namespace) -> Any | N
     state_path = Path(args.state_path).expanduser().parent / "uploads.db"
     return OutputCollector(
         CollectorConfig(
-            workspace=Path(args.workspace).expanduser(),
+            workspace=_workspace_root(args.workspace),
             url=args.url,
             project_id=project_id,
             agent_id=agent_id,
@@ -1033,7 +1040,7 @@ def service_control(args: argparse.Namespace) -> None:
 
 def service_host(args: argparse.Namespace) -> None:
     backend = WindowsSessionProcessBackend()
-    workspace = str(Path(args.workspace).resolve())
+    workspace = str(_workspace_root(args.workspace))
     state_path = str(Path(args.state_path).resolve())
 
     def pipe_name(session: object) -> str:
@@ -1072,7 +1079,7 @@ def service_host(args: argparse.Namespace) -> None:
 
 
 def session_worker_run(args: argparse.Namespace) -> None:
-    workspace = Path(args.workspace).resolve()
+    workspace = _workspace_root(args.workspace)
     workspace.mkdir(parents=True, exist_ok=True)
     state = LocalAgentState(args.state_path)
     runtime = None
@@ -1211,6 +1218,33 @@ def _resolve_platform_url(args: argparse.Namespace, platform_info: dict, fallbac
     if cli_url == DEV_PLATFORM_URL:
         cli_url = None  # 等于全局默认值 = 用户没指定
     return str(cli_url or platform_info.get("url") or fallback)
+
+
+def _workspace_root(value: str | Path | None) -> Path:
+    """工作区根目录的**唯一**解析口径（FM-0）。
+
+    注册上报的 `local_workspace`、输入文件的落点、Runner 的 cwd、产出扫描的根必须是同一个目录。
+    以前这几处各写一遍 `Path(...).resolve()`（有的还漏了 `expanduser`），迟早会算出两个路径——
+    于是"平台以为这台 Agent 的工作区"和它真正跑在哪儿不是一回事，文件管理页再怎么画也对不上。
+    """
+
+    raw = str(value or "").strip()
+    return Path(raw or ".").expanduser().resolve()
+
+
+def _resolve_daemon_workspace(args: argparse.Namespace, platform_info: dict, state_dir: Path) -> str:
+    """常驻体的工作区：命令行 > 上次选定并落盘的 platform.json > 进程当前目录。
+
+    命令行给了就**记下来**：下次开机（自启、Windows 服务、手工 daemon-run 都不带 `--workspace`）
+    要回到同一个目录，否则会退回进程当前目录——打包后的桌面端那正好是安装目录
+    （只读、也根本不是用户的工作区）。
+    """
+
+    cli_workspace = getattr(args, "workspace", None)
+    resolved = str(_workspace_root(cli_workspace or platform_info.get("workspace") or os.getcwd()))
+    if cli_workspace:
+        remember_workspace(state_dir, resolved)
+    return resolved
 
 
 def _gateway_uri(url: str, device_id: str, session_id: str, connection_id: str) -> str:
@@ -1375,8 +1409,13 @@ def daemon_run(args: argparse.Namespace) -> None:
         args.device_id = platform_info.get("device_id")
     if not getattr(args, "agent_id", None):
         args.agent_id = platform_info.get("agent_id")
-    if not getattr(args, "workspace", None):
-        args.workspace = platform_info.get("workspace") or os.getcwd()
+    # 工作区优先级：命令行 > 上次选定并落盘的 platform.json > 进程当前目录（见 `_resolve_daemon_workspace`）
+    args.workspace = _resolve_daemon_workspace(args, platform_info, state_dir)
+    try:
+        Path(args.workspace).mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        # 目录建不出来不在这里退出：如实报出来，任务真跑的时候再以 Runner 的失败为准
+        print(json.dumps({"daemon": "workspace_unavailable", "workspace": args.workspace, "error": str(error)}, ensure_ascii=False))
 
     inventory = AgentInventory(ttl_seconds=args.inventory_ttl)
     # 后台预热清单（含 opencode models）：别让第一次心跳等在探测上
@@ -1503,7 +1542,7 @@ def daemon_run(args: argparse.Namespace) -> None:
         chat_loop = ChatLoop(
             ChatLoopConfig(
                 url=args.url,
-                workspace=Path(args.workspace).expanduser().resolve(),
+                workspace=_workspace_root(args.workspace),
                 state_path=state_path,
                 device_id=device_id,
                 idle_seconds=float(getattr(args, "chat_idle_seconds", 3.0)),
@@ -1520,6 +1559,51 @@ def daemon_run(args: argparse.Namespace) -> None:
             environment_provider=_executor_environment,
             log=chat_log,
             slot=executor_slot,
+        )
+
+    # 「工作区文件」：Agent 主动领取平台入队的文件操作（FM-3）。
+    # **默认关**：它需要项目授权里有 workspace.files.* 这三项新能力——旧授权串没有，
+    # 打开只会每轮 403 刷日志。等执行体的授权重新签发了再用 --workspace-files 开。
+    file_worker_state: dict[str, Any] = {"worker": None, "backoff": 0.0}
+
+    def file_log(message: str) -> None:
+        print(message)
+        sidecar.logs.append(f"[{datetime.now(UTC).isoformat()}] {message}")
+
+    # 「被授权的云盘文件」物化到 <workspace>/inputs/（FM-5）：给了 grant id 就在启动时做一次。
+    # 撤销/过期由平台判：这里失败只如实记日志，不影响别的循环。
+    if getattr(args, "drive_grant", None):
+        try:
+            outcome = DriveMaterializer(
+                DriveMaterializeConfig(
+                    url=args.url,
+                    project_token=str((holder["identity"] or {}).get("project_token") or ""),
+                    agent_id=str((holder["identity"] or {}).get("agent_id") or args.agent_id or ""),
+                    project_id=str((holder["identity"] or {}).get("project_id") or ""),
+                    grant_id=str(args.drive_grant),
+                    workspace=_workspace_root(args.workspace),
+                    device_id=device_id,
+                ),
+                log=file_log,
+            ).materialize()
+            print(json.dumps({"drive_grant": "materialized", **outcome}, ensure_ascii=False))
+        except Exception as error:  # noqa: BLE001 - 物化失败要如实说，但不拦住内核启动
+            print(json.dumps({"drive_grant": "failed", "error": f"{type(error).__name__}:{error}"[:300]}, ensure_ascii=False))
+
+    if getattr(args, "workspace_files", False):
+        file_worker_state["worker"] = WorkspaceFileWorker(
+            FileWorkerConfig(
+                url=args.url,
+                project_token=str((holder["identity"] or {}).get("project_token") or ""),
+                agent_id=str((holder["identity"] or {}).get("agent_id") or args.agent_id or ""),
+                project_id=str((holder["identity"] or {}).get("project_id") or ""),
+                workspace=_workspace_root(args.workspace),
+                workspace_id=getattr(args, "workspace_id", None),
+                protected_paths=[str(item) for item in (getattr(args, "workspace_protected", None) or [])],
+                idle_seconds=float(getattr(args, "workspace_files_idle_seconds", 3.0)),
+                limit=int(getattr(args, "workspace_files_batch", 4) or 4),
+            ),
+            log=file_log,
         )
 
     def current_loop_snapshot() -> dict[str, Any]:
@@ -1553,6 +1637,11 @@ def daemon_run(args: argparse.Namespace) -> None:
                 "os": platform.system(),
                 "cpu_count": os.cpu_count(),
                 **(chat_loop.snapshot() if chat_loop is not None else {}),
+                **(
+                    {"workspace_files": dict(file_worker_state["worker"].stats)}
+                    if file_worker_state["worker"] is not None
+                    else {}
+                ),
             },
             sent_at=datetime.now(UTC),
         )
@@ -1664,6 +1753,28 @@ def daemon_run(args: argparse.Namespace) -> None:
             if chat_loop is not None
             else None
         )
+
+        async def file_loop() -> None:
+            """工作区文件操作轮询：空转退避；授权缺失/不支持时**退避**而不是刷屏。"""
+
+            worker = file_worker_state["worker"]
+            while sidecar.running:
+                if worker is None or sidecar_state.paused or local_state.is_emergency_stopped():
+                    await asyncio.sleep(1.0)
+                    continue
+                try:
+                    processed = await asyncio.to_thread(worker.poll_once)
+                except Exception as error:  # noqa: BLE001 - 这一轮的失败不能让循环退出
+                    processed = 0
+                    file_log(f"[files] 轮询异常：{type(error).__name__}: {error}")
+                last_error = str(worker.stats.get("last_error") or "")
+                if processed == 0 and ("claim_failed:403" in last_error or "claim_failed:401" in last_error):
+                    # 授权里没有 workspace.files.*（旧授权串）：退避 5 分钟，别刷日志
+                    file_worker_state["backoff"] = 300.0
+                    file_log("[files] 平台拒绝领取（授权里可能没有 workspace.files.*）：退避 5 分钟")
+                await asyncio.sleep(file_worker_state["backoff"] or max(1.0, float(getattr(args, "workspace_files_idle_seconds", 3.0))))
+
+        file_task = asyncio.create_task(file_loop()) if file_worker_state["worker"] is not None else None
         try:
             while True:
                 status = await service.run_forever()
@@ -1679,10 +1790,17 @@ def daemon_run(args: argparse.Namespace) -> None:
             mirror_task.cancel()
             if chat_task is not None:
                 chat_task.cancel()
+            if file_task is not None:
+                file_task.cancel()
             if chat_loop is not None:
                 # 常驻 serve 是内核拉起来的子进程：内核退场要把它收掉，别留孤儿进程在机器上
                 chat_loop.close()
-            await asyncio.gather(mirror_task, *([chat_task] if chat_task is not None else []), return_exceptions=True)
+            await asyncio.gather(
+                mirror_task,
+                *([chat_task] if chat_task is not None else []),
+                *([file_task] if file_task is not None else []),
+                return_exceptions=True,
+            )
 
     try:
         status = asyncio.run(run_daemon())
@@ -1922,6 +2040,20 @@ def main() -> None:
         help="also poll 「对话」turns (MY-AGENT); --no-chat-turns disables it",
     )
     daemon_parser.add_argument("--chat-idle-seconds", type=float, default=3.0, help="chat turn poll interval")
+    daemon_parser.add_argument(
+        "--drive-grant",
+        help="FM-5: on startup materialize the files granted by this 云盘授权 into <workspace>/inputs/",
+    )
+    daemon_parser.add_argument(
+        "--workspace-files",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="FM-3: also poll 「工作区文件」operations (needs workspace.files.* in the project grant)",
+    )
+    daemon_parser.add_argument("--workspace-id", help="bind to one workspace row on the platform (optional)")
+    daemon_parser.add_argument("--workspace-protected", nargs="*", default=[], help="extra protected relative paths")
+    daemon_parser.add_argument("--workspace-files-idle-seconds", type=float, default=3.0)
+    daemon_parser.add_argument("--workspace-files-batch", type=int, default=4)
     daemon_parser.add_argument(
         "--chat-server-port",
         type=int,

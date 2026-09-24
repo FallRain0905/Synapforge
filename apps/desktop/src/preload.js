@@ -12,6 +12,8 @@ const bridge = {
   config: () => ipcRenderer.invoke("config"),
   saveConfig: (patch) => ipcRenderer.invoke("save-config", patch),
   version: () => ipcRenderer.invoke("config").then((value) => value.app_version),
+  // Agent 工作区（FM-0）：选目录 → 壳落盘并重启内核；当前值见 snapshot().shell.workspace
+  chooseWorkspace: () => ipcRenderer.invoke("choose-workspace"),
   // 内核动作（本地页与工作台面板共用）
   pair: (platformUrl, pairingBlob) => ipcRenderer.invoke("pair", { platformUrl, pairingBlob }),
   grant: (platformUrl, grantBlob) => ipcRenderer.invoke("grant", { platformUrl, grantBlob }),

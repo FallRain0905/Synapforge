@@ -686,7 +686,7 @@ export default function WorkspacePage() {
         }
       />
 
-      <div className="tabs" role="tablist" aria-label="工作区视图">
+      <div className="tabs workspace-tabs" role="tablist" aria-label="工作区视图">
         {TABS.map((item) => {
           const Icon = item.icon;
           const active = tab === item.id;

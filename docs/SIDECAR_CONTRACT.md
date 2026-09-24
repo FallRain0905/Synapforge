@@ -194,7 +194,7 @@
 | 文件 | 内容 | 说明 |
 | --- | --- | --- |
 | `sidecar.json` | 端口 + 启动令牌 + pid | 每次启动重写，退出即删除 |
-| `platform.json` | `{ "url", "device_id", "agent_id", "paired_at" }` | 配对成功后写入；内核重启后据此连回同一平台（**不含任何 Token**） |
+| `platform.json` | `{ "url", "device_id", "agent_id", "paired_at" }`，可追加 `workspace` | 配对成功后写入；内核重启后据此连回同一平台（**不含任何 Token**）。`workspace`（FM-0，新增可选键）是用户选定的 Agent 工作目录：内核收到显式 `--workspace` 时**合并写**入（不动其它键），下次不带参数启动时用它——否则会退回进程当前目录，而打包后的桌面端那正是安装目录 |
 | `worker.json` | 项目身份（`project_id`/`agent_id`/`device_id`/能力/过期时间） | 项目 Token 不在这里，在凭据管理器 |
 | `agentd.db` | 本地 outbox、Run 状态、上传队列 | 设备/项目 Token 永不入内 |
 

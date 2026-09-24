@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -16,7 +17,15 @@ for candidate in (str(REPOSITORY_ROOT), str(AGENT_ROOT)):
     if candidate not in sys.path:
         sys.path.insert(0, candidate)
 
-from input_fetcher import INPUT_DIR_NAME, InputFetchError, materialize_inputs, prompt_with_inputs  # noqa: E402
+import input_fetcher  # noqa: E402
+from input_fetcher import (  # noqa: E402
+    INPUT_DIR_NAME,
+    InputFetchError,
+    manifest_path,
+    materialize_inputs,
+    prompt_with_inputs,
+    read_inputs_manifest,
+)
 
 
 class FakeClient:
@@ -111,6 +120,81 @@ class MaterializeInputsTests(unittest.TestCase):
         self.assertIn("没有取到", text)
         self.assertTrue(text.endswith("把错别字改掉"))
         self.assertEqual(prompt_with_inputs("原样", [], []), "原样")
+
+
+class InputsManifestTests(unittest.TestCase):
+    """FM-0：落盘要留台账——`artifact id → inputs/<文件名> → sha256 → 字节数`。
+
+    平台只发 id、磁盘上只有文件名，中间不留证，事后就答不了"这次 Run 读到的到底是不是那个成果物"。
+    """
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.workspace = Path(self.temp_dir.name)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def test_entries_carry_id_hash_size_and_relative_path(self) -> None:
+        client = FakeClient({"a1": (b"hello", "report.md")})
+        materialize_inputs(client, [{"artifact_id": "a1", "name": ""}], workspace=self.workspace, log=lambda _m: None)
+
+        manifest = read_inputs_manifest(self.workspace)
+        self.assertEqual(manifest["schema"], "inputs-manifest/1")
+        self.assertEqual(manifest["directory"], INPUT_DIR_NAME)
+        self.assertEqual(
+            manifest["entries"],
+            [
+                {
+                    "artifact_id": "a1",
+                    "name": "report.md",
+                    "relative_path": "inputs/report.md",
+                    "sha256": hashlib.sha256(b"hello").hexdigest(),
+                    "size_bytes": 5,
+                    "source": "input_artifacts",
+                    "materialized_at": manifest["entries"][0]["materialized_at"],
+                }
+            ],
+        )
+        self.assertTrue(manifest["entries"][0]["materialized_at"])
+
+    def test_manifest_lives_in_the_platform_metadata_dir(self) -> None:
+        self.assertEqual(manifest_path(self.workspace).parent.name, ".math-agent-platform")
+
+    def test_broken_manifest_is_ignored_and_rewritten(self) -> None:
+        """清单是台账：坏掉/换过 schema 都当没有，不能因此拦住这一轮的文件落地。"""
+
+        path = manifest_path(self.workspace)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{ not json", encoding="utf-8")
+        self.assertEqual(read_inputs_manifest(self.workspace), {})
+
+        client = FakeClient({"a1": (b"x", "a.txt")})
+        written, failed = materialize_inputs(
+            client, [{"artifact_id": "a1", "name": ""}], workspace=self.workspace, log=lambda _m: None
+        )
+        self.assertEqual((written, failed), (["a.txt"], []))
+        self.assertEqual(len(read_inputs_manifest(self.workspace)["entries"]), 1)
+
+    def test_write_failure_does_not_break_materialization(self) -> None:
+        """清单写不进去只记日志：文件已经落地了，台账失败不该把这一轮判成没拿到输入。"""
+
+        blocked = self.workspace / "blocked"
+        blocked.write_text("我是一个文件，不是目录", encoding="utf-8")
+        original = input_fetcher.manifest_path
+        input_fetcher.manifest_path = lambda workspace: blocked / "inputs-manifest.json"  # type: ignore[assignment]
+        try:
+            logs: list[str] = []
+            client = FakeClient({"a1": (b"x", "a.txt")})
+            written, failed = materialize_inputs(
+                client, [{"artifact_id": "a1", "name": ""}], workspace=self.workspace, log=logs.append
+            )
+        finally:
+            input_fetcher.manifest_path = original  # type: ignore[assignment]
+
+        self.assertEqual((written, failed), (["a.txt"], []))
+        self.assertTrue((self.workspace / "inputs" / "a.txt").is_file())
+        self.assertTrue(any("清单写入失败" in line for line in logs), logs)
 
 
 if __name__ == "__main__":
