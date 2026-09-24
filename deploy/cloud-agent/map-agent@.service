@@ -1,0 +1,57 @@
+[Unit]
+Description=synapforge cloud executor agent (instance %i)
+Documentation=file:/opt/synapforge-agent/docs/CLOUD_1_CLOUD_AGENT_PLAN.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=synapforge
+Group=synapforge
+WorkingDirectory=/srv/synapforge/%i
+# opencode 装在该用户家目录（官方安装器），靠 PATH 找到；TEMP/TMP 显式给出，
+# 因为内核给执行体传环境变量是按白名单的（HOME/PATH/TMP/TEMP…），缺了子进程就看不到。
+Environment=PATH=/home/synapforge/.opencode/bin:/usr/local/bin:/usr/bin:/bin
+Environment=TEMP=/tmp
+Environment=TMP=/tmp
+ExecStart=/opt/synapforge-agent/venv/bin/python /opt/synapforge-agent/apps/agent/agentd.py daemon-run \
+    --url https://synapforge.top \
+    --state-dir /var/lib/synapforge-agent/%i \
+    --workspace /srv/synapforge/%i \
+    --credential-backend file \
+    --task-timeout 600 \
+    --idle-seconds 5 \
+    --chat-server-port 4199
+# --chat-server-port（M-5c S-1）：对话轮次复用一个常驻 `opencode serve`（起停/保活由内核管，
+# 口令随机生成、只在内存里；服务只监听回环）。起不来时内核**自动降级**回 `opencode run` CLI 通道。
+# 端口选 4199：落在高位段，且这台机器上只有内核会用它（多实例时按 %i 各自换端口）。
+# 平台地址显式写在这里：虽然配对时也会落盘 platform.json，但单元里写死能避免
+# "daemon 读到一个过期/错误的落盘地址"这类沉默故障（内核侧也已修子命令遮蔽全局 --url 的坑）。
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+# 实测 opencode 在坏配置/异常 stdin 下会**挂住不返回**，所以必须留得住"打死它"的窗口
+TimeoutStopSec=30
+KillMode=mixed
+# 不交互：stdin 给 /dev/null（内核自己对非交互进程也用 DEVNULL，这里是第二道保险）
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+
+# 加固：非 root、无新权限、系统只读；只有状态目录与 workspace 可写。
+# ProtectHome=no 是**刻意**的：opencode 与它的状态就在 synapforge 家目录里；
+# 真正起隔离作用的是"专用非 root 用户 + 系统只读 + 仅两处可写 + MemoryMax/CPUQuota"。
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=no
+ReadWritePaths=/var/lib/synapforge-agent/%i /srv/synapforge/%i
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+MemoryMax=1500M
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target

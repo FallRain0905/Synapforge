@@ -1,0 +1,190 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cumcm/data_profile.schema.json",
+  "title": "CUMCM 数据画像与字段审计",
+  "description": "附件数据的时间范围、字段类型与质量画像。用于信息边界的数据截止时间判定和结果表口径核对。",
+  "type": "object",
+  "required": [
+    "datasets"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "problem_id": {
+      "type": "string"
+    },
+    "datasets": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "path"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "rows": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "dtype"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "dtype": {
+                  "type": "string",
+                  "examples": [
+                    "float",
+                    "int",
+                    "datetime",
+                    "string",
+                    "category"
+                  ]
+                },
+                "unit": {
+                  "type": "string"
+                },
+                "missing": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "missing_ratio": {
+                  "type": [
+                    "number",
+                    "null"
+                  ],
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "min": {
+                  "type": [
+                    "number",
+                    "string",
+                    "null"
+                  ]
+                },
+                "max": {
+                  "type": [
+                    "number",
+                    "string",
+                    "null"
+                  ]
+                },
+                "outliers": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 0
+                },
+                "notes": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "time_range": {
+            "type": "object",
+            "properties": {
+              "start": {
+                "type": "string"
+              },
+              "end": {
+                "type": "string"
+              },
+              "timezone": {
+                "type": "string"
+              }
+            }
+          },
+          "grain": {
+            "type": "string",
+            "description": "数据颗粒度，例如 10min / 1h / 1d。"
+          }
+        }
+      }
+    },
+    "quality_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "code",
+          "description"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "examples": [
+              "missing_block",
+              "unit_mismatch",
+              "duplicate_rows",
+              "outlier"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "info",
+              "minor",
+              "major",
+              "fatal"
+            ]
+          }
+        }
+      }
+    },
+    "information_boundary": {
+      "type": "object",
+      "properties": {
+        "decision_time": {
+          "type": "string"
+        },
+        "data_cutoff": {
+          "type": "string"
+        },
+        "declared_inputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "future_data": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://math-agent-platform.local/contracts/agent-session-ipc.schema.json",
+  "title": "Math Agent Platform User Session Worker IPC",
+  "$defs": {
+    "SessionPeer": {
+      "type": "object",
+      "required": ["peer_id", "peer_kind"],
+      "properties": {
+        "peer_id": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "peer_kind": { "type": "string", "enum": ["machine_service", "user_session_worker", "desktop_ui"] },
+        "process_id": { "type": ["integer", "null"], "minimum": 1 },
+        "windows_session_id": { "type": ["integer", "null"], "minimum": 0 },
+        "user_sid": { "type": ["string", "null"], "minLength": 2, "maxLength": 256 }
+      },
+      "additionalProperties": false
+    },
+    "SessionRunContext": {
+      "type": "object",
+      "required": ["project_id", "run_id", "agent_id", "device_id", "workspace_id", "workspace_path", "execution_mode", "allow_remote_terminal", "allow_desktop_control"],
+      "properties": {
+        "project_id": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "task_id": { "type": ["string", "null"], "minLength": 2, "maxLength": 160 },
+        "run_id": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "agent_id": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "device_id": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "workspace_id": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "workspace_path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "execution_mode": { "type": "string", "enum": ["HEADLESS", "USER_SESSION", "INTERACTIVE_DESKTOP"] },
+        "allow_remote_terminal": { "type": "boolean" },
+        "allow_desktop_control": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "SessionRunStartPayload": {
+      "type": "object",
+      "required": ["adapter_id", "command"],
+      "properties": {
+        "adapter_id": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "command": { "type": "array", "minItems": 1, "maxItems": 256, "items": { "type": "string", "minLength": 1 } },
+        "environment": { "type": "object", "additionalProperties": { "type": "string" } },
+        "input_paths": { "type": "array", "maxItems": 256, "items": { "type": "string" } },
+        "output_paths": { "type": "array", "maxItems": 256, "items": { "type": "string" } },
+        "timeout_seconds": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+        "max_output_bytes": { "type": "integer", "minimum": 1, "maximum": 67108864 },
+        "network_policy": { "type": "string", "enum": ["deny-by-default", "allow-listed", "unrestricted"] },
+        "terminal_size": { "$ref": "#/$defs/TerminalSize" },
+        "terminal_backend": { "type": "string", "enum": ["PIPE", "CONPTY"] },
+        "execution_backend": { "type": "string", "enum": ["host", "container"] },
+        "container_runtime": { "type": ["string", "null"], "enum": ["docker", "podman", null] },
+        "container_image": { "type": ["string", "null"], "minLength": 1, "maxLength": 512 },
+        "source_commit": { "type": ["string", "null"] },
+        "environment_image_digest": { "type": ["string", "null"] },
+        "dependency_lock": { "type": ["string", "null"] },
+        "parameters": { "type": "object" },
+        "random_seed": { "type": ["integer", "null"] },
+        "model_provider": { "type": ["string", "null"] },
+        "model_name": { "type": ["string", "null"] },
+        "tool_versions": { "type": "object", "additionalProperties": { "type": "string" } },
+        "data_access_policy": { "type": "object" },
+        "observed_input_files": { "type": "array", "maxItems": 256, "items": { "type": "string" } },
+        "observed_network_connections": { "type": "array", "maxItems": 256, "items": { "type": "object" } }
+      },
+      "additionalProperties": false
+    },
+    "TerminalSize": {
+      "type": "object",
+      "required": ["columns", "rows"],
+      "properties": {
+        "columns": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "rows": { "type": "integer", "minimum": 1, "maximum": 1000 },
+        "pixel_width": { "type": ["integer", "null"], "minimum": 0, "maximum": 100000 },
+        "pixel_height": { "type": ["integer", "null"], "minimum": 0, "maximum": 100000 }
+      },
+      "additionalProperties": false
+    },
+    "SessionLifecycleTransition": {
+      "type": "object",
+      "required": ["transition_id", "worker_id", "user_session_id", "event_type", "to_state", "session_state", "active_run_ids", "cleanup_run_ids", "reason", "occurred_at", "metadata"],
+      "properties": {
+        "transition_id": { "type": "string", "minLength": 8, "maxLength": 160 },
+        "worker_id": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "user_session_id": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "event_type": { "type": "string", "enum": ["service.start.requested", "worker.registered", "worker.ready", "worker.exited", "session.status.changed", "run.started", "run.stopped", "service.stop.requested", "worker.stopped", "worker.failed", "emergency.stop", "recovery.requested"] },
+        "from_state": { "type": ["string", "null"] },
+        "to_state": { "type": "string" },
+        "session_state": { "type": "string", "enum": ["unknown", "logged_in", "locked", "logged_out"] },
+        "active_run_ids": { "type": "array", "items": { "type": "string" } },
+        "cleanup_run_ids": { "type": "array", "items": { "type": "string" } },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "occurred_at": { "type": "string", "format": "date-time" },
+        "metadata": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "SessionIpcRequest": {
+      "type": "object",
+      "required": ["request_id", "idempotency_key", "message_type", "peer", "worker_id", "sent_at", "payload"],
+      "properties": {
+        "schema_version": { "type": "string" },
+        "request_id": { "type": "string", "minLength": 8, "maxLength": 160 },
+        "idempotency_key": { "type": "string", "minLength": 8, "maxLength": 160 },
+        "message_type": { "type": "string", "enum": ["session.hello", "session.status", "session.run.start", "session.run.stop", "session.terminal.input", "session.terminal.resize", "session.approval.respond", "session.desktop.control", "session.worker.shutdown"] },
+        "peer": { "$ref": "#/$defs/SessionPeer" },
+        "worker_id": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "user_session_id": { "type": ["string", "null"], "minLength": 2, "maxLength": 160 },
+        "context": { "anyOf": [{ "$ref": "#/$defs/SessionRunContext" }, { "type": "null" }] },
+        "approval_id": { "type": ["string", "null"], "minLength": 2, "maxLength": 160 },
+        "sent_at": { "type": "string", "format": "date-time" },
+        "payload": { "type": "object" }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "required": ["message_type"],
+            "properties": { "message_type": { "const": "session.run.start" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/SessionRunStartPayload" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["message_type"],
+            "properties": { "message_type": { "const": "session.terminal.resize" } }
+          },
+          "then": {
+            "properties": { "payload": { "$ref": "#/$defs/TerminalSize" } }
+          }
+        },
+        {
+          "if": {
+            "required": ["message_type"],
+            "properties": { "message_type": { "const": "session.run.start" } }
+          },
+          "then": {
+            "properties": {
+              "payload": {
+                "allOf": [
+                  {
+                    "if": {
+                      "required": ["execution_backend"],
+                      "properties": { "execution_backend": { "const": "container" } }
+                    },
+                    "then": {
+                      "required": ["container_runtime", "container_image"]
+                    }
+                  },
+                  {
+                    "if": {
+                      "required": ["execution_backend"],
+                      "properties": { "execution_backend": { "const": "host" } }
+                    },
+                    "then": {
+                      "not": {
+                        "anyOf": [
+                          { "required": ["container_runtime"] },
+                          { "required": ["container_image"] }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "SessionIpcResponse": {
+      "type": "object",
+      "required": ["request_id", "idempotency_key", "worker_id", "status", "responded_at", "payload"],
+      "properties": {
+        "schema_version": { "type": "string" },
+        "request_id": { "type": "string", "minLength": 8, "maxLength": 160 },
+        "idempotency_key": { "type": "string", "minLength": 8, "maxLength": 160 },
+        "worker_id": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "status": { "type": "string", "enum": ["ACCEPTED", "COMPLETED", "REJECTED", "FAILED", "DUPLICATE"] },
+        "error_code": { "type": ["string", "null"] },
+        "responded_at": { "type": "string", "format": "date-time" },
+        "payload": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "SessionIpcEvent": {
+      "type": "object",
+      "required": ["event_id", "worker_id", "event_type", "sequence", "project_id", "occurred_at", "payload"],
+      "properties": {
+        "schema_version": { "type": "string" },
+        "event_id": { "type": "string", "minLength": 8, "maxLength": 160 },
+        "worker_id": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "event_type": { "type": "string", "enum": ["process.started", "process.stdout", "process.stderr", "terminal.resized", "run.started", "terminal.prompt", "agent.message", "approval.requested", "tool.started", "tool.completed", "file.changed", "artifact.created", "process.exited", "run.completed", "run.failed"] },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "project_id": { "type": "string", "minLength": 2, "maxLength": 160 },
+        "run_id": { "type": ["string", "null"], "minLength": 2, "maxLength": 160 },
+        "occurred_at": { "type": "string", "format": "date-time" },
+        "payload": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/SessionIpcRequest" },
+    { "$ref": "#/$defs/SessionIpcResponse" },
+    { "$ref": "#/$defs/SessionIpcEvent" },
+    { "$ref": "#/$defs/SessionLifecycleTransition" }
+  ]
+}

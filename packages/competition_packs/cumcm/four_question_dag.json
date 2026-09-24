@@ -1,0 +1,172 @@
+[
+  {
+    "task_id": "intake-problem-facts",
+    "title": "题面事实台账与数据画像",
+    "stage": "problem_intake",
+    "question": null,
+    "depends_on": [],
+    "produces": ["problem_facts", "data_profile"],
+    "role": "agent",
+    "description": "从题面与附件提取参数、实体、时间口径与字段画像，登记来源页码与文件哈希，不写入推测值。"
+  },
+  {
+    "task_id": "analysis-four-questions",
+    "title": "赛题分析与四问拆解",
+    "stage": "problem_analysis",
+    "question": null,
+    "depends_on": ["intake-problem-facts"],
+    "produces": ["problem_analysis", "capability_checklist"],
+    "role": "agent",
+    "description": "识别顶层子问题数量，逐问定义变量、候选方法与图表清单，并产出可判定的能力清单。"
+  },
+  {
+    "task_id": "q1-modeling",
+    "title": "问题一建模",
+    "stage": "modeling",
+    "question": 1,
+    "depends_on": ["analysis-four-questions"],
+    "produces": ["model_spec"],
+    "role": "agent",
+    "description": "给出问题一的数学模型、公式推导、约束与求解思路。"
+  },
+  {
+    "task_id": "q1-code",
+    "title": "问题一代码与计算",
+    "stage": "coding",
+    "question": 1,
+    "depends_on": ["q1-modeling"],
+    "produces": ["code", "result_table"],
+    "role": "agent",
+    "description": "实现问题一求解脚本，输出官方要求的结果文件并登记输出路径与随机种子。"
+  },
+  {
+    "task_id": "q1-experiment",
+    "title": "问题一实验与灵敏度",
+    "stage": "experiment",
+    "question": 1,
+    "depends_on": ["q1-code"],
+    "produces": ["audit_report"],
+    "role": "agent",
+    "description": "对问题一关键参数做灵敏度与鲁棒性实验，记录成功判据与失败解释。"
+  },
+  {
+    "task_id": "q2-modeling",
+    "title": "问题二建模",
+    "stage": "modeling",
+    "question": 2,
+    "depends_on": ["analysis-four-questions"],
+    "produces": ["model_spec"],
+    "role": "agent",
+    "description": "给出问题二的数学模型、公式推导、约束与求解思路。"
+  },
+  {
+    "task_id": "q2-code",
+    "title": "问题二代码与计算",
+    "stage": "coding",
+    "question": 2,
+    "depends_on": ["q2-modeling"],
+    "produces": ["code", "result_table"],
+    "role": "agent",
+    "description": "实现问题二求解脚本，输出官方要求的结果文件并登记输出路径与随机种子。"
+  },
+  {
+    "task_id": "q2-experiment",
+    "title": "问题二实验与灵敏度",
+    "stage": "experiment",
+    "question": 2,
+    "depends_on": ["q2-code"],
+    "produces": ["audit_report"],
+    "role": "agent",
+    "description": "对问题二关键参数做灵敏度与鲁棒性实验，记录成功判据与失败解释。"
+  },
+  {
+    "task_id": "q3-modeling",
+    "title": "问题三建模",
+    "stage": "modeling",
+    "question": 3,
+    "depends_on": ["analysis-four-questions"],
+    "produces": ["model_spec"],
+    "role": "agent",
+    "description": "给出问题三的数学模型、公式推导、约束与求解思路。"
+  },
+  {
+    "task_id": "q3-code",
+    "title": "问题三代码与计算",
+    "stage": "coding",
+    "question": 3,
+    "depends_on": ["q3-modeling"],
+    "produces": ["code", "result_table"],
+    "role": "agent",
+    "description": "实现问题三求解脚本，输出官方要求的结果文件并登记输出路径与随机种子。"
+  },
+  {
+    "task_id": "q3-experiment",
+    "title": "问题三实验与灵敏度",
+    "stage": "experiment",
+    "question": 3,
+    "depends_on": ["q3-code"],
+    "produces": ["audit_report"],
+    "role": "agent",
+    "description": "对问题三关键参数做灵敏度与鲁棒性实验，记录成功判据与失败解释。"
+  },
+  {
+    "task_id": "q4-modeling",
+    "title": "问题四建模",
+    "stage": "modeling",
+    "question": 4,
+    "depends_on": ["analysis-four-questions"],
+    "produces": ["model_spec"],
+    "role": "agent",
+    "description": "给出问题四的数学模型、公式推导、约束与求解思路。"
+  },
+  {
+    "task_id": "q4-code",
+    "title": "问题四代码与计算",
+    "stage": "coding",
+    "question": 4,
+    "depends_on": ["q4-modeling"],
+    "produces": ["code", "result_table"],
+    "role": "agent",
+    "description": "实现问题四求解脚本，输出官方要求的结果文件并登记输出路径与随机种子。"
+  },
+  {
+    "task_id": "q4-experiment",
+    "title": "问题四实验与灵敏度",
+    "stage": "experiment",
+    "question": 4,
+    "depends_on": ["q4-code"],
+    "produces": ["audit_report"],
+    "role": "agent",
+    "description": "对问题四关键参数做灵敏度与鲁棒性实验，记录成功判据与失败解释。"
+  },
+  {
+    "task_id": "review-independent",
+    "title": "独立复核与一致性检查",
+    "stage": "review",
+    "question": null,
+    "depends_on": ["q1-experiment", "q2-experiment", "q3-experiment", "q4-experiment"],
+    "produces": ["review_report"],
+    "role": "agent",
+    "description": "独立复算关键数值、检查量纲与边界，给出结论与限制；不得由被复核方自审。"
+  },
+  {
+    "task_id": "paper-assembly",
+    "title": "论文撰写与装配",
+    "stage": "paper",
+    "question": null,
+    "depends_on": ["review-independent"],
+    "produces": ["paper_source", "compiled_pdf"],
+    "role": "agent",
+    "description": "按竞赛论文结构与合规要求装配摘要、模型、求解、检验与推广章节。"
+  },
+  {
+    "task_id": "delivery-freeze",
+    "title": "交付冻结与校验清单",
+    "stage": "delivery",
+    "question": null,
+    "depends_on": ["paper-assembly"],
+    "produces": ["submission_bundle"],
+    "role": "member",
+    "description": "核对官方结果表、支撑材料与匿名要求，冻结提交包并登记人工批准。"
+  }
+]

@@ -1,0 +1,2722 @@
+export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+
+/* ---------- 会话令牌（AUTH-1） ----------
+   令牌由 lib/auth.tsx 在登录/恢复会话时写入这里；本模块所有请求与 WS 地址都从这里取，
+   这样"哪一处忘了带令牌"不会成为漏网的 bug。 */
+
+const TOKEN_STORAGE_KEY = "map.sessionToken";
+let sessionTokenValue: string | null = null;
+let unauthorizedHandler: (() => void) | null = null;
+
+/** auth.tsx 在挂载后调用：从 localStorage 恢复令牌（首帧不读，保证静态 HTML 一致）。 */
+export function restoreSessionToken(): string | null {
+  if (typeof window === "undefined") return null;
+  sessionTokenValue = window.localStorage.getItem(TOKEN_STORAGE_KEY);
+  return sessionTokenValue;
+}
+
+export function getSessionToken(): string | null {
+  return sessionTokenValue;
+}
+
+export function setSessionToken(token: string | null): void {
+  sessionTokenValue = token;
+  if (typeof window === "undefined") return;
+  if (token) window.localStorage.setItem(TOKEN_STORAGE_KEY, token);
+  else window.localStorage.removeItem(TOKEN_STORAGE_KEY);
+}
+
+/** 401 的统一出口：auth.tsx 注册回调（清会话 + 跳登录），避免每个页面各写一遍。 */
+export function onUnauthorized(handler: (() => void) | null): void {
+  unauthorizedHandler = handler;
+}
+
+/** 带会话令牌的 fetch。所有 API 调用都应走它（含流式响应）。 */
+export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers ?? {});
+  const token = getSessionToken();
+  if (token && !headers.has("Authorization")) headers.set("Authorization", `Bearer ${token}`);
+  const response = await fetch(input, { ...init, headers });
+  if (response.status === 401) {
+    setSessionToken(null);
+    unauthorizedHandler?.();
+  }
+  return response;
+}
+
+/** WebSocket 地址：浏览器无法给 WS 设请求头，令牌只能走查询参数（nginx 对该路径关访问日志）。 */
+export function projectSocketUrl(projectId: string): string {
+  const base = API_URL.replace(/^http/, "ws");
+  const token = getSessionToken();
+  return `${base}/ws/projects/${projectId}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+}
+
+/** 服务端稳定错误码形态（如 ai_credentials_missing、hyper_rag_unavailable）。 */
+const ERROR_CODE_PATTERN = /^[a-z][a-z0-9_]{2,}$/;
+
+/** 统一的 API 失败：带上 HTTP 状态、稳定错误码与服务端原始 detail。 */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly detail: string;
+
+  constructor(status: number, message: string, code = "", detail = "") {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
+/** 把响应体解析成一句人话：优先 detail，其次按错误码映射，最后退回调用方给的兜底文案。 */
+export async function apiError(
+  response: Response,
+  fallback: string,
+  codeMessages: Record<string, string> = {},
+): Promise<ApiError> {
+  let raw = "";
+  try {
+    raw = await response.text();
+  } catch {
+    return new ApiError(response.status, fallback);
+  }
+  let detail = raw.trim();
+  try {
+    const parsed = JSON.parse(raw) as { detail?: unknown };
+    if (typeof parsed?.detail === "string") {
+      detail = parsed.detail;
+    } else if (Array.isArray(parsed?.detail)) {
+      // FastAPI 参数校验失败：detail 是 [{loc, msg}] 列表，取字段名 + 原因才有意义。
+      detail = parsed.detail
+        .map((item) => {
+          if (item && typeof item === "object" && "msg" in item) {
+            const entry = item as { msg?: unknown; loc?: unknown };
+            const path = Array.isArray(entry.loc) ? entry.loc.slice(1).join(".") : "";
+            return path ? `${path}：${String(entry.msg)}` : String(entry.msg);
+          }
+          return JSON.stringify(item);
+        })
+        .join("；");
+    } else if (parsed?.detail !== undefined) {
+      detail = JSON.stringify(parsed.detail);
+    }
+  } catch {
+    // 非 JSON 响应体按原文处理
+  }
+  const code = extractErrorCode(detail);
+  return new ApiError(response.status, (code && codeMessages[code]) || detail || fallback, code, detail);
+}
+
+/** 从 detail 取稳定错误码：整体匹配优先，否则取冒号前首段（如 drive_quota_exceeded:123/456）。 */
+function extractErrorCode(detail: string): string {
+  if (ERROR_CODE_PATTERN.test(detail)) return detail;
+  const head = detail.split(":", 1)[0].trim();
+  return ERROR_CODE_PATTERN.test(head) ? head : "";
+}
+
+export type TaskStatus = "DRAFT" | "READY" | "CLAIMED" | "RUNNING" | "WAITING_REVIEW" | "APPROVED" | "BLOCKED" | "NEEDS_REVISION" | "FAILED" | "CANCELLED";
+
+export type Project = {
+  id: string;
+  organization_id?: string;
+  /** 归属团队（null = 未归属）；团队成员会自动加入该团队的项目 */
+  team_id?: string | null;
+  name: string;
+  competition_pack: string;
+  problem_code: string | null;
+  description: string;
+  /** 立项目标（工作区，W-1） */
+  goal?: string | null;
+  /** 目标人数：只作建队参考，不做加入拦截 */
+  target_member_count?: number | null;
+  /** 任务推进模式：manual=队长派单（默认）/ hybrid=允许成员认领 / auto=模板全自动（opt-in） */
+  task_mode?: TaskMode;
+  stage: string;
+  progress: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TaskMode = "manual" | "hybrid" | "auto";
+
+export type Task = {
+  id: string;
+  project_id: string;
+  title: string;
+  description: string;
+  stage: string;
+  status: TaskStatus;
+  /** 执行者标注：领取时平台写成 agent_id */
+  assignee: string;
+  /** 派单目标成员（null = 未指派，谁先轮到谁跑） */
+  assignee_member_id?: string | null;
+  priority: string;
+  requires_review: boolean;
+  allow_future_data: boolean;
+  input_artifacts: string[];
+  output_types: string[];
+  blocked_reason: string | null;
+  updated_at: string;
+  /** 执行方式（worker_executor=codex / worker_command）：任务能否被 Agent 跑起来的依据。 */
+  resource_policy?: Record<string, unknown>;
+  /** 意图对象（AIP-1d）：预算与显式证据要求（默认空 = 不设限）。 */
+  budget?: TaskBudget | null;
+  evidence_requirements?: EvidenceRequirement[];
+  // 后端 Task 契约里已有、此前前端类型漏掉的字段（任务详情要用）。
+  parent_task_id?: string | null;
+  dependency_task_ids?: string[];
+  acceptance_criteria?: string[];
+  required_capabilities?: string[];
+  input_handoff_ids?: string[];
+  requires_human_approval?: boolean;
+  deadline?: string | null;
+};
+
+export type Handoff = {
+  id: string;
+  project_id: string;
+  task_id: string;
+  sender_agent_id: string;
+  receiver: string | Record<string, unknown> | Array<Record<string, unknown>>;
+  status: "PASS" | "PASS_WITH_ASSUMPTIONS" | "NEEDS_REVISION" | "BLOCKED";
+  objective: string;
+  completed: string[];
+  input_artifacts: string[];
+  output_artifacts: string[];
+  key_conclusions: string[];
+  assumptions: string[];
+  evidence_refs: string[];
+  open_questions: string[];
+  risks: { severity: string; text: string }[];
+  next_actions: string[];
+  requires_human_approval: boolean;
+  handoff_type: "RELAY" | "FANOUT" | "AGGREGATE";
+  input_handoff_ids: string[];
+  revision_number: number;
+  receipt_status: "PENDING" | "ACCEPTED" | "REJECTED";
+  decision_reason: string | null;
+  decision_findings: Array<Record<string, unknown>>;
+  receipts: HandoffReceipt[];
+  created_at: string;
+};
+
+export type HandoffReceipt = {
+  id: string;
+  handoff_id: string;
+  receiver_type: "agent" | "member" | "team" | "agent_group";
+  receiver_id: string;
+  status: "PENDING" | "ACCEPTED" | "REJECTED";
+  received_by: string | null;
+  received_at: string | null;
+  decision_reason: string | null;
+  decision_findings: Array<Record<string, unknown>>;
+  created_at: string;
+};
+
+export type Artifact = {
+  id: string;
+  project_id: string;
+  name: string;
+  artifact_type: string;
+  description: string;
+  content_hash: string;
+  version: number;
+  // ARCHIVED 是回收态（CL-4 起有归档入口）：保留审计与引用，但不再作为新任务输入
+  status: "DRAFT" | "PENDING_REVIEW" | "APPROVED" | "REJECTED" | "ARCHIVED";
+  source_path: string | null;
+  task_id: string | null;
+  run_id: string | null;
+  created_by: string;
+  /** 创建者身份：`agent` 表示由内核执行产出自动入库。 */
+  created_by_kind?: string;
+  created_at: string;
+  data_policy: Record<string, string>;
+  /** 是否允许下游任务引用（领取校验会检查）。 */
+  downstream_allowed?: boolean;
+  /** 修订谱系：新版本的父版本 id（非修订版本为 null）。 */
+  parent_artifact_id?: string | null;
+};
+
+export type Agent = {
+  agent_id: string;
+  display_name: string;
+  owner_member_id: string;
+  model_provider: string;
+  model_name: string;
+  supported_tools: string[];
+  supported_languages: string[];
+  max_concurrency: number;
+  local_workspace: string | null;
+  network_policy: string;
+  status: "online" | "idle" | "offline";
+  last_seen: string;
+};
+
+export type Event = {
+  id: string;
+  project_id: string;
+  sequence: number;
+  event_type: string;
+  actor: string;
+  /** 事件载荷：形态随事件类型不同（执行体过程事件是 payload.event.payload）。 */
+  payload: Record<string, any>;
+  created_at: string;
+  actor_kind?: string;
+  object_type?: string | null;
+  object_id?: string | null;
+};
+
+export type Run = {
+  id: string;
+  project_id: string;
+  task_id: string | null;
+  agent_id: string;
+  /** 执行归属（迁移 019）：哪台设备、谁的机器；member_id 由平台推导 */
+  device_id?: string | null;
+  member_id?: string | null;
+  status: "CREATED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "BLOCKED";
+  source_commit: string | null;
+  input_artifact_ids: string[];
+  environment_image_digest: string | null;
+  dependency_lock: string | null;
+  parameters: Record<string, unknown>;
+  random_seed: number | null;
+  model_provider: string | null;
+  model_name: string | null;
+  tool_versions: Record<string, string>;
+  network_policy: string;
+  data_access_policy: Record<string, unknown>;
+  observed_input_files: string[];
+  output_artifact_ids: string[];
+  stdout: string;
+  stderr: string;
+  summary: string;
+  information_boundary: { allowed?: boolean; violations?: { severity: string; code: string }[] };
+  /** 执行用量（COST-1）：空对象 = 未回报（通用 CLI 执行体没有用量可报） */
+  usage?: RunUsage;
+  started_at: string;
+  completed_at: string | null;
+};
+
+export type GateStatus = "OPEN" | "PASSED" | "FAILED" | "BLOCKED" | "INVALIDATED";
+
+export type Gate = {
+  id: string;
+  project_id: string;
+  target_type: "task" | "artifact" | "handoff" | "project";
+  target_id: string | null;
+  status: GateStatus;
+  required_human_approval: boolean;
+  blocking_findings: Array<Record<string, unknown>>;
+  rules: string[];
+  review_ids: string[];
+  evidence_ids: string[];
+  risk_summary: Record<string, unknown>;
+  input_snapshot: Record<string, unknown>;
+  invalidated_at: string | null;
+  invalidation_reason: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+};
+
+export type Review = {
+  id: string;
+  project_id: string;
+  target_type: string;
+  target_id: string;
+  verdict: "APPROVED" | "NEEDS_REVISION" | "BLOCKED" | string;
+  summary: string;
+  findings: Array<Record<string, unknown>>;
+  evidence_ids: string[];
+  risk_summary: Record<string, unknown>;
+  reviewer: string;
+  reviewer_kind: "member" | "agent" | "system";
+  created_at: string;
+};
+
+export type Evidence = {
+  id: string;
+  project_id: string;
+  claim: string;
+  evidence_type: "artifact" | "run" | "event" | "external_source";
+  artifact_id: string | null;
+  run_id: string | null;
+  source_ref: string | null;
+  created_by: string;
+  created_at: string;
+};
+
+export type RiskRegistryEntry = {
+  id: string;
+  project_id: string;
+  review_id: string;
+  target_type: string;
+  target_id: string;
+  code: string;
+  severity: "fatal" | "major" | "minor" | string;
+  message: string;
+  resolved: boolean;
+  evidence_refs: string[];
+  owner: string | null;
+  resolution_reason: string | null;
+  resolved_by: string | null;
+  resolved_at: string | null;
+  closure_evidence_ids: string[];
+  created_at: string;
+};
+
+export type ReviewCenter = {
+  gates: Gate[];
+  reviews: Review[];
+  evidence: Evidence[];
+  risks: RiskRegistryEntry[];
+  handoffs: Handoff[];
+};
+
+export type Dashboard = {
+  project: Project;
+  tasks: Task[];
+  handoffs: Handoff[];
+  artifacts: Artifact[];
+  agents: Agent[];
+  events: Event[];
+  runs: Run[];
+  metrics: Record<string, number>;
+};
+
+export type ImportSummary = {
+  project_id: string;
+  source_path: string;
+  discovered_files: number;
+  imported_artifacts: number;
+  skipped_artifacts: number;
+  created_tasks: number;
+  artifact_ids: string[];
+  warnings: string[];
+};
+
+export async function getProjects(): Promise<Project[]> {
+  const response = await apiFetch(`${API_URL}/api/projects`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "项目列表读取失败");
+  return response.json();
+}
+
+export type ProjectCreateInput = {
+  name: string;
+  competition_pack?: string;
+  problem_code?: string | null;
+  description?: string;
+  /** 立项目标：工作区右侧概览与项目叙事的第一句 */
+  goal?: string;
+  /** 目标人数（建队参考） */
+  target_member_count?: number | null;
+  /** 任务推进模式：默认 manual（队长派单） */
+  task_mode?: TaskMode;
+  /** 归属团队（可选）：团队成员会自动加入该团队的项目 */
+  team_id?: string | null;
+};
+
+export async function createProject(data: ProjectCreateInput): Promise<Project> {
+  const response = await apiFetch(`${API_URL}/api/projects`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!response.ok) throw await apiError(response, "项目创建失败");
+  return response.json();
+}
+
+/** 页面侧统一取错误文案：ApiError 用服务端 detail，其余退回兜底，避免只弹"…失败"。 */
+export function errorMessage(error: unknown, fallback: string): string {
+  if (error instanceof ApiError && error.message) return error.message;
+  if (error instanceof Error && error.message) return error.message;
+  return fallback;
+}
+
+export async function getDashboard(projectId: string): Promise<Dashboard> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/dashboard`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "项目数据读取失败");
+  return response.json();
+}
+
+/**
+ * 提交人工复核（门禁批准的**唯一**入口）。
+ *
+ * 门禁状态由 Review 派生：verdict=APPROVED → PascalCase 的 PASSED，
+ * NEEDS_REVISION → FAILED，BLOCKED → BLOCKED（见 store.create_review）。
+ * 服务端守卫：存在未关闭的 fatal/major 风险会拒绝、任务必须处于可复核状态、
+ * APPROVED 必须是 member 身份——这些都会以稳定错误码回传，界面要如实展示。
+ */
+export async function submitReview(
+  projectId: string,
+  payload: {
+    target_type: "task" | "artifact" | "handoff";
+    target_id: string;
+    verdict: "APPROVED" | "NEEDS_REVISION" | "BLOCKED";
+    summary: string;
+    findings?: { severity: string; code: string; message: string }[];
+    reviewer?: string;
+  },
+): Promise<unknown> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/reviews`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      reviewer: payload.reviewer ?? "member-001",
+      reviewer_kind: "member",
+      findings: payload.findings ?? [],
+      ...payload,
+    }),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "复核提交失败", {
+      review_blocked_by_open_risks: "存在未关闭的严重风险，先关闭或降级后才能批准",
+      task_not_waiting_for_review: "任务不在待复核状态（需先提交复核或标记返工）",
+      approved_task_is_immutable: "该任务已批准，不能再改结论",
+      human_approval_required: "批准必须由人工成员提交（Agent 不能代批）",
+      rejected_handoff_requires_revision: "该交接已被拒绝，需要先修订再批准",
+      review_target_not_found: "审批目标不存在",
+    });
+  }
+  return response.json();
+}
+
+/**
+ * 交接收据：接受/拒绝由**接收方**提交（服务端按收据行校验身份）。
+ *
+ * 稳定错误码含义：
+ *   handoff_receiver_mismatch        —— 这份交接不是发给当前成员的
+ *   handoff_rejected_requires_revision —— 已被拒绝，必须先修订
+ *   handoff_not_acceptible           —— 交接状态不是 PASS/PASS_WITH_ASSUMPTIONS
+ */
+const HANDOFF_ERROR_MESSAGES: Record<string, string> = {
+  handoff_receiver_mismatch: "这份交接不是发给你的（接收方不匹配）",
+  handoff_rejected_requires_revision: "该交接已被拒绝，需要先修订再接受",
+  handoff_not_acceptible: "交接尚未通过（需为 PASS 或 PASS_WITH_ASSUMPTIONS）",
+  handoff_not_found: "交接不存在",
+};
+
+export async function acceptHandoff(handoffId: string): Promise<Handoff> {
+  const response = await apiFetch(`${API_URL}/api/handoffs/${handoffId}/accept`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ idempotency_key: `handoff-accept:${handoffId}:${crypto.randomUUID()}` }),
+  });
+  if (!response.ok) throw await apiError(response, "交接接受失败", HANDOFF_ERROR_MESSAGES);
+  return response.json();
+}
+
+export async function rejectHandoff(handoffId: string, reason: string): Promise<Handoff> {
+  const response = await apiFetch(`${API_URL}/api/handoffs/${handoffId}/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      reason,
+      findings: [],
+      idempotency_key: `handoff-reject:${handoffId}:${crypto.randomUUID()}`,
+    }),
+  });
+  if (!response.ok) throw await apiError(response, "交接拒绝失败", HANDOFF_ERROR_MESSAGES);
+  return response.json();
+}
+
+export async function getReviewCenter(projectId: string): Promise<ReviewCenter> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/review-center`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "审核中心读取失败");
+  return response.json();
+}
+
+export async function updateRisk(projectId: string, riskId: string, payload: { action: "ASSIGN" | "RESOLVE" | "REOPEN"; owner?: string; reason?: string; evidence_ids?: string[] }): Promise<RiskRegistryEntry> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/risks/${riskId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...payload, idempotency_key: crypto.randomUUID() }),
+  });
+  if (!response.ok) throw await apiError(response, "风险状态更新失败");
+  return response.json();
+}
+
+export type TaskBudget = {
+  /** 单次执行墙钟上限（秒）——领取时把租约压到这个值以内，强制。 */
+  max_seconds?: number | null;
+  /** 整条任务允许的领取次数——用尽后不再接受领取，强制。 */
+  max_attempts?: number | null;
+  /** 只记录不强制（平台没有 token 计量），界面会标注"未强制"。 */
+  max_tokens?: number | null;
+};
+
+export type EvidenceRequirement = {
+  evidence_type: "artifact" | "run" | "event" | "external_source";
+  min_count: number;
+  note?: string;
+};
+
+/** 执行用量（COST-1）：token 只有执行体回报过才有数；seconds 优先自报、缺省平台观测。 */
+export type RunUsage = {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  total_tokens?: number | null;
+  turns?: number | null;
+  seconds?: number | null;
+  /** token 的出处：codex-jsonl / agent-reported / platform-observed */
+  source?: string;
+  /** 耗时的出处：agent（自报）或 platform（平台观测） */
+  seconds_source?: string;
+};
+
+export type TaskBudgetState = {
+  attempts: number;
+  max_attempts: number | null;
+  exhausted: boolean;
+  max_seconds: number | null;
+  max_tokens: number | null;
+  /** 已回报的累计 token；`usage_reported_runs = 0` 时它不代表"没花"，而是"平台不知道" */
+  tokens_used: number;
+  usage_reported_runs: number;
+};
+
+export type TaskEvidenceGap = {
+  evidence_type: string;
+  required: number;
+  present: number;
+  missing: number;
+  note: string;
+};
+
+export type TaskFlags = {
+  task_id: string;
+  evidence_missing: number;
+  usage_overrun: boolean;
+  usage_reported: boolean;
+};
+
+/** 项目内任务的轻量标记（缺口/超预算），一次取回给列表画角标。 */
+export async function getProjectTaskFlags(projectId: string): Promise<TaskFlags[]> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/task-flags`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "任务标记读取失败");
+  return response.json();
+}
+
+export type TaskDetail = {
+  task: Task;
+  budget_state: TaskBudgetState;
+  evidence_gaps: TaskEvidenceGap[];
+};
+
+export type TaskPatch = {
+  status?: TaskStatus;
+  assignee?: string;
+  blocked_reason?: string;
+  /** 执行方式（codex 或声明式命令）：走请求体，是"把任务变成 Agent 能真正跑的"唯一入口。 */
+  resource_policy?: Record<string, unknown>;
+  /** 派单：成员 id（改派）或空串（取消指派）；不传则不动 */
+  assignee_member_id?: string;
+  /** 截止时间（ISO 字符串）；空串 = 清除 */
+  deadline?: string;
+  /** 意图对象（AIP-1d）：预算；不传则不动，null = 清除 */
+  budget?: TaskBudget | null;
+  /** 意图对象（AIP-1d）：显式证据要求；不传则不动，[] = 清除 */
+  evidence_requirements?: EvidenceRequirement[];
+};
+
+export async function updateTask(taskId: string, patch: TaskPatch): Promise<Task> {
+  // 后端 PATCH /api/tasks/{id}：状态/负责人走查询参数（既有契约），执行方式与派单走 JSON 体。
+  const query = new URLSearchParams();
+  if (patch.status) query.set("status", patch.status);
+  if (patch.assignee !== undefined) query.set("assignee", patch.assignee);
+  if (patch.blocked_reason !== undefined) query.set("blocked_reason", patch.blocked_reason);
+  const init: RequestInit = { method: "PATCH" };
+  if (
+    patch.resource_policy !== undefined ||
+    patch.assignee_member_id !== undefined ||
+    patch.deadline !== undefined ||
+    patch.budget !== undefined ||
+    patch.evidence_requirements !== undefined
+  ) {
+    init.headers = { "Content-Type": "application/json" };
+    const body: Record<string, unknown> = {};
+    if (patch.resource_policy !== undefined) body.resource_policy = patch.resource_policy;
+    // 空串 = 取消指派 / 清除截止时间；只要字段出现在 body 里服务端就会处理
+    if (patch.assignee_member_id !== undefined) body.assignee_member_id = patch.assignee_member_id;
+    if (patch.deadline !== undefined) body.deadline = patch.deadline;
+    // 意图对象（AIP-1d）：null / [] = 清除；"出现才生效"是服务端约定
+    if (patch.budget !== undefined) body.budget = patch.budget;
+    if (patch.evidence_requirements !== undefined) body.evidence_requirements = patch.evidence_requirements;
+    init.body = JSON.stringify(body);
+  }
+  const response = await apiFetch(`${API_URL}/api/tasks/${taskId}?${query.toString()}`, init);
+  if (!response.ok) throw await apiError(response, "任务更新失败");
+  return response.json();
+}
+
+export async function createTask(
+  projectId: string,
+  payload: {
+    title: string;
+    description: string;
+    stage: string;
+    assignee: string;
+    priority: string;
+    requires_review: boolean;
+    allow_future_data: boolean;
+    /** 输入成果物：只有已批准且允许下游的成果物能通过领取校验（服务端 `_task_dependencies_ready`）。 */
+    input_artifacts?: string[];
+    /** 派单：指派给某个项目成员，只有其名下设备能领取；不填 = 谁先轮到谁跑 */
+    assignee_member_id?: string | null;
+    /** 截止时间（ISO）：过期后不再被自动领取，队列里优先级更高 */
+    deadline?: string | null;
+  },
+): Promise<Task> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw await apiError(response, "任务创建失败");
+  return response.json();
+}
+
+
+// ---- 竞赛领域包（阶段 6 数学建模模板） ----------------------------------
+
+export type CompetitionPackSummary = {
+  pack_id: string;
+  display_name: string;
+  version: string;
+  description: string;
+  competition_aliases: string[];
+  problem_codes: string[];
+  default_problem_code: string;
+  questions: number[];
+  template_count: number;
+  dag_task_count: number;
+  required_artifacts: string[];
+};
+
+export type CompetitionPackTemplate = {
+  template_id: string;
+  name: string;
+  artifact_type: string;
+  filename: string;
+  stage: string;
+  description: string;
+  questions: number[];
+  official_format: boolean;
+  placeholders: string[];
+};
+
+export type CompetitionPackDetail = CompetitionPackSummary & {
+  schema_version: string;
+  stage_sequence: string[];
+  optional_artifacts: string[];
+  templates: CompetitionPackTemplate[];
+  dag: { task_id: string; title: string; stage: string; question: number | null; depends_on: string[]; produces: string[]; role: string }[];
+  validation_rules: Record<string, unknown>;
+  boundary_rules: Record<string, unknown>;
+  upgrade_rules: { from_version: string; to_version: string; compatibility: string; added_artifacts: string[]; renamed_artifacts: Record<string, string> }[];
+};
+
+export type PackMaterializationStatus = {
+  pack_id: string;
+  pack_version: string;
+  materialized: boolean;
+  task_total: number;
+  task_present: number;
+  artifact_total: number;
+  artifact_present: number;
+  planned_total: number;
+  planned_present: number;
+  progress: number;
+  missing_tasks: string[];
+  missing_artifacts: string[];
+};
+
+export type ProjectCompetitionPack = {
+  project_id: string;
+  competition_pack: string;
+  pack: CompetitionPackDetail;
+  materialization: PackMaterializationStatus;
+};
+
+export type PackValidationFinding = {
+  severity: "fatal" | "major" | "minor" | "info";
+  code: string;
+  subject: string;
+  message: string;
+};
+
+export type PackValidationReport = {
+  project_id: string;
+  pack_id: string;
+  pack_version: string;
+  status: "PASS" | "PASS_WITH_ASSUMPTIONS" | "NEEDS_REVISION" | "BLOCKED";
+  allowed: boolean;
+  worst_severity: string | null;
+  missing_artifacts: string[];
+  checked_artifacts: string[];
+  coverage: { expected_questions?: number[]; questions_covered?: number[]; per_artifact?: Record<string, number[]> };
+  findings: PackValidationFinding[];
+};
+
+export type PackApplyResult = {
+  project_id: string;
+  pack_id: string;
+  pack_version: string;
+  problem_code: string;
+  questions: number[];
+  created_task_count: number;
+  created_artifact_count: number;
+  tasks: { dag_task_id: string; task_id: string; title: string; stage: string; question: number | null; created: boolean }[];
+  artifacts: { template_id: string; artifact_type: string; name: string; created: boolean; content_hash: string }[];
+  warnings: string[];
+};
+
+export async function getCompetitionPacks(): Promise<CompetitionPackSummary[]> {
+  const response = await apiFetch(`${API_URL}/api/competition-packs`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "竞赛模板包列表读取失败");
+  return response.json();
+}
+
+export async function getProjectCompetitionPack(projectId: string): Promise<ProjectCompetitionPack> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/competition-pack`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "项目模板包状态读取失败");
+  return response.json();
+}
+
+export async function applyProjectCompetitionPack(
+  projectId: string,
+  payload: { problem_code?: string; questions?: number[] } = {},
+): Promise<PackApplyResult> {
+  const idempotencyKey = crypto.randomUUID();
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/competition-pack/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify({ ...payload, created_by: "web-materializer", idempotency_key: idempotencyKey }),
+  });
+  if (!response.ok) throw await apiError(response, "模板包应用失败");
+  return response.json();
+}
+
+export async function validateProjectCompetitionPack(projectId: string): Promise<PackValidationReport> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/competition-pack/validate`, { method: "POST" });
+  if (!response.ok) throw await apiError(response, "模板包校验失败");
+  return response.json();
+}
+
+export async function fetchProjectPackTemplate(
+  projectId: string,
+  templateId: string,
+  questions?: number[],
+): Promise<string> {
+  const query = questions?.length ? `?questions=${questions.join(",")}` : "";
+  const response = await apiFetch(
+    `${API_URL}/api/projects/${projectId}/competition-pack/templates/${templateId}${query}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) throw await apiError(response, "模板渲染失败");
+  return response.text();
+}
+
+
+// ---- 文档三层版本与证据链（阶段 7 最小切片） ---------------------------
+
+export type DocumentLayer = "draft" | "submitted" | "approved";
+
+export type DocumentLayerDefinition = {
+  layer: DocumentLayer;
+  artifact_status: string;
+  editable: boolean;
+  downstream_allowed: boolean;
+};
+
+export type DocumentLayers = {
+  layers: DocumentLayerDefinition[];
+  rules: {
+    submit_requires_evidence: boolean;
+    approval_requires_human_review: boolean;
+    draft_cannot_be_downstream_input: boolean;
+    revision_creates_new_draft_version: boolean;
+  };
+  status_to_layer: Record<string, DocumentLayer>;
+};
+
+export type DocumentEvidenceEntry = {
+  id: string;
+  claim: string;
+  evidence_type: string;
+  run_id: string | null;
+  source_ref: string | null;
+  created_by: string;
+  artifact_id?: string;
+  layer?: DocumentLayer;
+};
+
+export type DocumentRevision = {
+  revision: number;
+  artifact_id: string;
+  layer: DocumentLayer;
+  status: string;
+  version: number;
+  content_hash: string;
+  editable: boolean;
+  downstream_allowed: boolean;
+  immutable: boolean;
+  parent_artifact_id: string | null;
+  traceability: {
+    created_by: string;
+    created_by_kind: string;
+    created_at: string | null;
+    task_id: string | null;
+    run_id: string | null;
+    git_commit: string | null;
+    snapshot_ref: string | null;
+    approved_by: string | null;
+    approved_at: string | null;
+  };
+  evidence: DocumentEvidenceEntry[];
+};
+
+export type DocumentTimeline = {
+  project_id: string;
+  artifact_id: string;
+  root_artifact_id: string;
+  current_layer: DocumentLayer;
+  current_revision: number;
+  revision_count: number;
+  revisions: DocumentRevision[];
+  layers: DocumentLayers;
+};
+
+export type DocumentEvidenceChain = {
+  project_id: string;
+  artifact_id: string;
+  evidence: DocumentEvidenceEntry[];
+  evidence_count: number;
+  runs: string[];
+  traceable_to: DocumentRevision["traceability"][];
+};
+
+
+export async function getDocumentTimeline(projectId: string, artifactId: string): Promise<DocumentTimeline> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/documents/${artifactId}/timeline`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "文档版本时间线读取失败");
+  return response.json();
+}
+
+
+export async function submitDocument(projectId: string, artifactId: string): Promise<{ layer: DocumentLayer; changed: boolean }> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/documents/${artifactId}/submit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ actor_kind: "member" }),
+  });
+  if (!response.ok) throw await apiError(response, "文档提交失败", { document_evidence_required: "提交需要先关联证据" });
+  return response.json();
+}
+
+export async function reviseDocument(projectId: string, artifactId: string, description?: string): Promise<{ artifact_id: string; layer: DocumentLayer; changed: boolean }> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/documents/${artifactId}/revise`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ actor_kind: "member", description }),
+  });
+  if (!response.ok) throw await apiError(response, "文档修订失败");
+  return response.json();
+}
+
+// ---- 版本 Diff / 合并 / 评论 / 快照 / 关系（阶段 7） -------------------
+
+export type DocumentDiff = {
+  from_revision: number;
+  to_revision: number;
+  content_changed: boolean;
+  identical: boolean;
+  stats: { added_lines: number; removed_lines: number; hunks: number };
+  unified_diff: string[];
+  layer_change: { from: DocumentLayer; to: DocumentLayer; changed: boolean };
+  git_commit: { from: string | null; to: string | null; changed: boolean };
+  task_id: { from: string | null; to: string | null; changed: boolean };
+  author: { from: string | null; to: string | null; changed: boolean };
+  approver: { from: string | null; to: string | null; changed: boolean };
+};
+
+export type DocumentComment = {
+  id: string;
+  body: string;
+  kind: "comment" | "suggestion";
+  anchor: string | null;
+  actor: string;
+  actor_kind: string;
+  layer: DocumentLayer;
+  created_at: string | null;
+};
+
+export type DocumentSnapshot = {
+  id: string;
+  revision: number;
+  content_hash: string;
+  label: string;
+  actor: string;
+  created_at: string | null;
+};
+
+export type DocumentRelation = {
+  id: string;
+  target_type: string;
+  target_id: string;
+  paragraph: string;
+  note: string;
+  actor: string;
+  created_at: string | null;
+};
+
+export type ImpactLookup = {
+  target_type: string;
+  target_id: string;
+  affected: { artifact_id: string; paragraph: string; note: string; linked_by: string }[];
+  affected_count: number;
+  affected_artifacts: string[];
+  paragraphs: string[];
+};
+
+export async function getDocumentDiff(
+  projectId: string,
+  artifactId: string,
+  fromRevision?: number,
+  toRevision?: number,
+): Promise<DocumentDiff> {
+  const query = new URLSearchParams();
+  if (fromRevision) query.set("from_revision", String(fromRevision));
+  if (toRevision) query.set("to_revision", String(toRevision));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/documents/${artifactId}/diff${suffix}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "版本差异读取失败");
+  return response.json();
+}
+
+export async function mergeDocument(
+  projectId: string,
+  artifactId: string,
+  sourceRevision: number,
+  note?: string,
+  gitCommit?: string,
+): Promise<{ artifact_id: string; layer: DocumentLayer; content_hash: string; git_commit: string | null }> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/documents/${artifactId}/merge`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source_revision: sourceRevision, note: note ?? "", git_commit: gitCommit ?? null, actor_kind: "member" }),
+  });
+  if (!response.ok) throw await apiError(response, "合并确认失败（已批准版本不可合并）");
+  return response.json();
+}
+
+export async function addDocumentComment(
+  projectId: string,
+  artifactId: string,
+  body: string,
+  kind: "comment" | "suggestion" = "comment",
+  anchor?: string,
+): Promise<DocumentComment> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/documents/${artifactId}/comments`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ body, kind, anchor: anchor ?? null, actor_kind: "member" }),
+  });
+  if (!response.ok) throw await apiError(response, "评论提交失败");
+  return response.json();
+}
+
+export async function getDocumentComments(projectId: string, artifactId: string): Promise<{ comments: DocumentComment[]; comment_count: number; suggestion_count: number }> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/documents/${artifactId}/comments`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "评论读取失败");
+  return response.json();
+}
+
+export async function createDocumentSnapshot(projectId: string, artifactId: string, label = ""): Promise<DocumentSnapshot> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/documents/${artifactId}/snapshots`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label, actor_kind: "member" }),
+  });
+  if (!response.ok) throw await apiError(response, "快照创建失败");
+  return response.json();
+}
+
+export async function getDocumentSnapshots(projectId: string, artifactId: string): Promise<{ snapshots: DocumentSnapshot[]; snapshot_count: number }> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/documents/${artifactId}/snapshots`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "快照读取失败");
+  return response.json();
+}
+
+export async function linkDocumentRelation(
+  projectId: string,
+  artifactId: string,
+  payload: { target_type: string; target_id: string; paragraph: string; note?: string },
+): Promise<DocumentRelation> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/documents/${artifactId}/relations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...payload, note: payload.note ?? "", actor_kind: "member" }),
+  });
+  if (!response.ok) throw await apiError(response, "关系关联失败");
+  return response.json();
+}
+
+export async function getDocumentRelations(projectId: string, artifactId: string): Promise<{ relations: DocumentRelation[]; relation_count: number }> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/documents/${artifactId}/relations`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "关系读取失败");
+  return response.json();
+}
+
+export async function getImpactLookup(projectId: string, targetType: string, targetId: string): Promise<ImpactLookup> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/impact?target_type=${targetType}&target_id=${targetId}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "影响面查询失败");
+  return response.json();
+}
+/** 保存文档内容：覆盖当前草稿内容（不产生新版本），版本由「提交待审」产生。 */
+export async function saveArtifactText(artifactId: string, text: string): Promise<Artifact> {
+  const form = new FormData();
+  form.append("file", new Blob([text], { type: "text/markdown; charset=utf-8" }), `${artifactId}.md`);
+  const response = await apiFetch(`${API_URL}/api/artifacts/${artifactId}/content`, {
+    method: "POST",
+    headers: { "Idempotency-Key": crypto.randomUUID() },
+    body: form,
+  });
+  if (!response.ok) {
+    throw await apiError(response, "文档保存失败", {
+      approved_artifact_is_immutable: "文档已批准，内容不可再修改；请先派生新草稿",
+      artifact_not_found: "文档不存在",
+    });
+  }
+  return response.json();
+}
+
+/** 成果物详情/修订需要的字段（后端契约里已有，前端类型此前只声明了一部分）。 */
+export type ArtifactVersionInput = {
+  name: string;
+  artifact_type: string;
+  description?: string;
+  status?: "DRAFT" | "PENDING_REVIEW";
+  task_id?: string;
+  run_id?: string;
+  content_hash?: string;
+};
+
+/** 以既有成果物为父版本创建新版本（名称与类型必须与父版本一致，服务端会校验）。 */
+export async function createArtifactVersion(projectId: string, artifactId: string, payload: ArtifactVersionInput): Promise<Artifact> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/artifacts/${artifactId}/versions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "提交新版本失败", {
+      artifact_version_identity_mismatch: "新版本的名称与类型必须与旧版本一致",
+      parent_artifact_not_found: "旧版本不存在",
+    });
+  }
+  return response.json();
+}
+
+/** 成果物全貌（CL-3）：来源、谱系、引用、复核与事件。 */
+export type ArtifactDetail = {
+  artifact: Artifact;
+  lineage: { artifact_id: string; version: number; status: string; content_hash: string | null; created_at: string; is_current: boolean }[];
+  consumers: { task_id: string; title: string; status: string }[];
+  reviews: { id: string; verdict: string; reviewer: string; reviewer_kind: string; summary: string; created_at: string }[];
+  gate: { id: string; status: string; required_human_approval: boolean } | null;
+  source_task: { id: string; title: string; status: string } | null;
+  source_run: { id: string; status: string; agent_id: string; started_at: string } | null;
+  events: Event[];
+  orphan: boolean;
+  orphan_reason: string | null;
+};
+
+export async function getArtifactDetail(projectId: string, artifactId: string): Promise<ArtifactDetail> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/artifacts/${artifactId}/detail`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "成果物详情读取失败");
+  return response.json();
+}
+
+/** 归档：内容退休但保留审计与引用（D-CL-7，不做硬删）。 */
+export async function archiveArtifact(artifactId: string): Promise<Artifact> {
+  const response = await apiFetch(`${API_URL}/api/artifacts/${artifactId}/archive`, { method: "POST" });
+  if (!response.ok) {
+    throw await apiError(response, "归档失败", { artifact_not_found: "成果物不存在" });
+  }
+  return response.json();
+}
+
+/** 协作草稿（CL-6）：未保存的编辑在刷新/换设备后仍在。 */
+export type DocumentDraft = {
+  artifact_id: string;
+  project_id: string;
+  content: string;
+  revision: number;
+  updated_by: string;
+  updated_at: string;
+  created_at: string;
+};
+
+export async function getDocumentDraft(projectId: string, artifactId: string): Promise<DocumentDraft | null> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/documents/${artifactId}/draft`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "协作草稿读取失败");
+  return response.json();
+}
+
+/** 保存协作草稿：`baseRevision` 落后于服务端时抛 409（错误码 `document_draft_conflict`），不静默覆盖。 */
+export async function saveDocumentDraft(
+  projectId: string,
+  artifactId: string,
+  content: string,
+  baseRevision: number,
+): Promise<DocumentDraft> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/documents/${artifactId}/draft`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, base_revision: baseRevision }),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "协作草稿保存失败", {
+      document_draft_conflict: "这份文档已被他人修改：请选择以谁为准",
+      approved_artifact_is_immutable: "文档已批准，不能再存草稿",
+    });
+  }
+  return response.json();
+}
+
+export async function getArtifactText(artifactId: string): Promise<string> {
+  const response = await apiFetch(`${API_URL}/api/artifacts/${artifactId}/content`, { cache: "no-store" });
+  if (!response.ok) return "";
+  return response.text();
+}
+
+// ---- 信息边界审计与交付链路 ---------------------------------------------
+
+export type BoundaryAudit = {
+  project_id: string;
+  task_id: string | null;
+  pack_id: string;
+  pack_version: string;
+  rules: Record<string, unknown>;
+  run_count: number;
+  findings: { severity: string; code: string; subject: string; message: string }[];
+  verdict: string | null;
+  allowed: boolean;
+  created?: boolean;
+  reason?: string;
+  review_id?: string;
+  gate_status?: string | null;
+};
+
+export type DeliveryAssembly = {
+  project_id: string;
+  pack_id: string;
+  pack_version: string;
+  sections: { title: string; source_name: string; artifact_type: string; content_hash: string; approved_by: string | null; content: string; traceability: Record<string, unknown> }[];
+  section_count: number;
+  sources: { name: string; artifact_type: string; content_hash: string; approved_by: string | null }[];
+  excluded_unapproved: { name: string; artifact_type: string; status: string }[];
+  excluded_count: number;
+  blocked: boolean;
+  blocked_reasons: string[];
+  generatable: boolean;
+};
+
+export type DeliveryChecklist = {
+  project_id: string;
+  checks: { code: string; status: "pass" | "warn" | "fail"; detail: string }[];
+  blocking_count: number;
+  warn_count: number;
+  passed: boolean;
+  approved_artifact_count: number;
+  paper_text_hash: string;
+};
+
+export type DeliveryCompileReport = {
+  status: string;
+  engine?: string | null;
+  pages?: number | null;
+  artifact_id?: string;
+  artifact_name?: string;
+  pdf_sha256?: string;
+  pdf_bytes?: number;
+  reason?: string | null;
+  log_tail?: string;
+};
+
+export type SubmissionBundleReport = {
+  artifact_id: string;
+  content_hash: string;
+  manifest_hash: string;
+  layer: string;
+  status: string;
+  section_count: number;
+  source_count: number;
+  excluded_unapproved_count: number;
+  blocking_count: number;
+  checks: DeliveryChecklist["checks"];
+};
+
+export type BundleVerification = {
+  artifact_id: string;
+  manifest_hash: string | null;
+  checked_sources: number;
+  expected_sources: number;
+  mismatches: string[];
+  verified: boolean;
+  restore: { restored_project_id: string; restored_artifact_count: number; checked: number; mismatches: string[]; restored: boolean } | null;
+};
+
+export async function getBoundaryAudit(projectId: string, taskId?: string): Promise<BoundaryAudit> {
+  const query = taskId ? `?task_id=${taskId}` : "";
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/competition-pack/boundary-audit${query}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "边界审计读取失败");
+  return response.json();
+}
+
+export async function createBoundaryGate(projectId: string, taskId?: string): Promise<BoundaryAudit> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/competition-pack/boundary-gate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task_id: taskId ?? null, actor_kind: "agent", idempotency_key: crypto.randomUUID() }),
+  });
+  if (!response.ok) throw await apiError(response, "边界审计落库失败");
+  return response.json();
+}
+
+export async function getDeliveryAssembly(projectId: string): Promise<DeliveryAssembly> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/delivery/assembly`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "装配读取失败");
+  return response.json();
+}
+
+export async function getDeliverySlides(projectId: string): Promise<string> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/delivery/slides`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "提纲生成失败");
+  return response.text();
+}
+
+export async function runDeliveryChecklist(projectId: string, paperText?: string): Promise<DeliveryChecklist> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/delivery/checklist`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ paper_text: paperText ?? null }),
+  });
+  if (!response.ok) throw await apiError(response, "交付检查失败");
+  return response.json();
+}
+
+export async function compileDeliveryPaper(projectId: string, source?: string, artifactName = "main.pdf"): Promise<DeliveryCompileReport> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/delivery/compile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source: source ?? null, artifact_name: artifactName }),
+  });
+  if (!response.ok) throw await apiError(response, "论文编译失败");
+  return response.json();
+}
+
+export async function createSubmissionBundle(projectId: string, label = ""): Promise<SubmissionBundleReport> {
+  const idempotencyKey = crypto.randomUUID();
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/delivery/submission-bundle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify({ label, actor_kind: "member", idempotency_key: idempotencyKey }),
+  });
+  if (!response.ok) throw await apiError(response, "提交包生成失败（需先有已批准素材）");
+  return response.json();
+}
+
+export async function verifySubmissionBundle(projectId: string, artifactId: string, restoreCheck = false): Promise<BundleVerification> {
+  const response = await apiFetch(
+    `${API_URL}/api/projects/${projectId}/delivery/submission-bundle/${artifactId}/verify?restore_check=${restoreCheck}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) throw await apiError(response, "提交包校验失败");
+  return response.json();
+}
+
+// ---- 个人云盘 -----------------------------------------------------------
+
+export type DriveFile = {
+  id: string;
+  name: string;
+  size_bytes: number;
+  content_hash: string;
+  is_archive: boolean;
+  mime_type: string | null;
+  project_ids: string[];
+  created_at: string;
+};
+
+export type DriveUsage = {
+  owner: string;
+  quota_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+  file_count: number;
+  used_percent: number;
+};
+
+export type DriveListing = { usage: DriveUsage; files: DriveFile[] };
+
+export async function listDriveFiles(): Promise<DriveListing> {
+  const response = await apiFetch(`${API_URL}/api/drive`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "个人云盘读取失败");
+  return response.json();
+}
+
+export async function uploadDriveFile(file: globalThis.File): Promise<{ file: DriveFile; usage: DriveUsage }> {
+  const form = new FormData();
+  form.append("file", file);
+  const response = await apiFetch(`${API_URL}/api/drive/upload`, { method: "POST", body: form });
+  if (!response.ok) throw await apiError(response, "上传失败", { drive_quota_exceeded: "云盘空间不足（200MB 上限）", drive_upload_too_large: "单文件超过上限" });
+  return response.json();
+}
+
+export async function deleteDriveFile(fileId: string): Promise<{ id: string; deleted: boolean }> {
+  const response = await apiFetch(`${API_URL}/api/drive/${fileId}`, { method: "DELETE" });
+  if (!response.ok) throw await apiError(response, "删除失败", { drive_file_referenced_by_project: "文件已被项目引用，不能删除" });
+  return response.json();
+}
+
+export async function importDriveFile(
+  projectId: string,
+  fileId: string,
+  taskId?: string,
+): Promise<{ artifact_id: string; artifact_type: string; name: string; is_archive: boolean }> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/drive/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file_id: fileId, task_id: taskId ?? null }),
+  });
+  if (!response.ok) throw await apiError(response, "导入项目失败");
+  return response.json();
+}
+
+// ---- 知识库与 AI 凭据 -----------------------------------------------------
+
+export type KnowledgeBase = {
+  id: string;
+  name: string;
+  description: string;
+  project_id: string | null;
+  owner_member_id: string;
+  visibility: string;
+  document_count: number;
+  shares: { member_id: string; permission: string }[];
+  created_at: string;
+};
+
+export type KbDocument = {
+  id: string;
+  kb_id: string;
+  title: string;
+  content_md: string;
+  content_md_bytes?: number;
+  content_hash: string;
+  source_type: string;
+  index_status: string;
+  indexed_at: string | null;
+  index_error: string | null;
+  created_at: string;
+};
+
+export type AiSettings = {
+  member_id: string;
+  llm_api_key: string;
+  llm_base_url: string;
+  llm_model: string;
+  embedding_api_key: string;
+  embedding_base_url: string;
+  embedding_model: string;
+  embedding_dimensions: number;
+  mineru_api_key: string;
+};
+
+export type Conversation = {
+  id: string;
+  member_id: string;
+  kb_id: string | null;
+  title: string;
+  mode: "chat" | "rag";
+  created_at: string;
+  updated_at: string;
+  messages?: { id: string; role: string; content: string; sources: Record<string, unknown>[]; created_at: string }[];
+};
+
+export async function listKbs(): Promise<KnowledgeBase[]> {
+  const response = await apiFetch(`${API_URL}/api/kb`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "知识库列表读取失败");
+  return response.json();
+}
+
+export async function createKb(data: { name: string; description?: string; project_id?: string | null }): Promise<KnowledgeBase> {
+  const response = await apiFetch(`${API_URL}/api/kb`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
+  });
+  if (!response.ok) throw await apiError(response, "知识库创建失败");
+  return response.json();
+}
+
+export async function listKbDocuments(kbId: string, includeContent = false): Promise<KbDocument[]> {
+  const response = await apiFetch(`${API_URL}/api/kb/${kbId}/documents?include_content=${includeContent}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "文档列表读取失败");
+  return response.json();
+}
+
+export async function addKbDocument(kbId: string, data: { title: string; content_md: string; source_type?: string }): Promise<KbDocument> {
+  const response = await apiFetch(`${API_URL}/api/kb/${kbId}/documents`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
+  });
+  if (!response.ok) throw await apiError(response, "文档登记失败");
+  return response.json();
+}
+
+export async function indexKbDocuments(kbId: string, docIds: string[]): Promise<{ indexed: number; failed: number }> {
+  const response = await apiFetch(`${API_URL}/api/kb/${kbId}/index`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ doc_ids: docIds }),
+  });
+  if (!response.ok) throw await apiError(response, "索引失败", { ai_credentials_missing: "请先在设置中配置 Embedding 凭据", hyper_rag_unavailable: "检索服务未启动" });
+  return response.json();
+}
+
+export async function queryKb(kbId: string, question: string, mode = "hyper"): Promise<{ response: string; entities: unknown[]; text_units: unknown[] }> {
+  const response = await apiFetch(`${API_URL}/api/kb/${kbId}/query`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question, mode }),
+  });
+  if (!response.ok) throw await apiError(response, "检索失败", { ai_credentials_missing: "请先在设置中配置 AI 凭据", hyper_rag_unavailable: "检索服务未启动" });
+  return response.json();
+}
+
+export type AiProbeResult = { ok: boolean; detail: string; model?: string; dimensions?: number; verified?: boolean };
+export type AiProbeReport = Record<"llm" | "embedding" | "mineru", AiProbeResult>;
+
+/** 测试连接：由服务端用已保存的凭据各发一次最小请求（浏览器不持有密钥）。 */
+export async function testAiConnections(): Promise<AiProbeReport> {
+  const response = await apiFetch(`${API_URL}/api/settings/ai/test`, { method: "POST" });
+  if (!response.ok) throw await apiError(response, "测试连接失败");
+  return response.json();
+}
+
+export async function getAiSettings(): Promise<AiSettings> {
+  const response = await apiFetch(`${API_URL}/api/settings/ai`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "AI 设置读取失败");
+  return response.json();
+}
+
+export async function saveAiSettings(data: Partial<AiSettings>): Promise<AiSettings> {
+  const response = await apiFetch(`${API_URL}/api/settings/ai`, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
+  });
+  if (!response.ok) throw await apiError(response, "AI 设置保存失败");
+  return response.json();
+}
+
+export async function listConversations(): Promise<Conversation[]> {
+  const response = await apiFetch(`${API_URL}/api/ai/conversations`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "会话列表读取失败");
+  return response.json();
+}
+
+export async function createConversation(data: { title: string; mode: "chat" | "rag"; kb_id?: string | null }): Promise<Conversation> {
+  const response = await apiFetch(`${API_URL}/api/ai/conversations`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data),
+  });
+  if (!response.ok) throw await apiError(response, "会话创建失败");
+  return response.json();
+}
+
+export async function deleteConversation(conversationId: string): Promise<void> {
+  const response = await apiFetch(`${API_URL}/api/ai/conversations/${conversationId}`, { method: "DELETE" });
+  if (!response.ok) throw await apiError(response, "会话删除失败");
+}
+
+export async function appendMessage(conversationId: string, role: "user" | "assistant", content: string, sources: Record<string, unknown>[] = []): Promise<void> {
+  const response = await apiFetch(`${API_URL}/api/ai/conversations/${conversationId}/messages`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role, content, sources }),
+  });
+  if (!response.ok) throw await apiError(response, "消息写入失败");
+}
+
+// ---- 图谱数据（代理 hyper-rag-service） ------------------------------------
+
+export type HyperEntity = {
+  id: string;
+  entity_name: string;
+  entity_type: string;
+  description: string;
+};
+
+export type HyperNeighborData = {
+  vertices: Record<string, { entity_name?: string; entity_type?: string; description?: string; [key: string]: unknown }>;
+  edges: Record<string, { keywords?: string; summary?: string; [key: string]: unknown }>;
+};
+
+export async function getKbEntities(kbId: string, page = 1, pageSize = 20): Promise<{ entities: HyperEntity[]; total: number }> {
+  const response = await apiFetch(`${API_URL}/api/kb/${kbId}/graph/entities?page=${page}&page_size=${pageSize}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "图实体读取失败");
+  return response.json();
+}
+
+export async function getKbEntityNames(kbId: string, page = 1, pageSize = 200): Promise<{ names: string[]; total: number }> {
+  const response = await apiFetch(`${API_URL}/api/kb/${kbId}/graph/entity-names?page=${page}&page_size=${pageSize}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "实体名读取失败");
+  return response.json();
+}
+
+export async function getKbVertexNeighbor(kbId: string, vertexId: string): Promise<HyperNeighborData> {
+  const response = await apiFetch(`${API_URL}/api/kb/${kbId}/graph/vertex-neighbor/${encodeURIComponent(vertexId)}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "邻居子图读取失败");
+  return response.json();
+}
+
+export async function getKbRelationships(kbId: string, page = 1, pageSize = 20): Promise<{ relationships: { id: string; entity_set: string; keywords: string; summary: string }[]; total: number }> {
+  const response = await apiFetch(`${API_URL}/api/kb/${kbId}/graph/relationships?page=${page}&page_size=${pageSize}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "图关系读取失败");
+  return response.json();
+}
+
+// ---- 设备与接入（UX-4） --------------------------------------------------
+
+export type DeviceRuntimeState = {
+  device_id: string;
+  connection_id: string | null;
+  agent_version: string | null;
+  adapter_versions: Record<string, string>;
+  capabilities: string[];
+  running_run_ids: string[];
+  local_queue_length: number;
+  user_session_state: string;
+  resource_summary: Record<string, unknown>;
+  reported_at: string;
+};
+
+export type Device = {
+  device_id: string;
+  organization_id: string;
+  agent_id: string;
+  owner_member_id: string;
+  device_name: string;
+  public_key_fingerprint: string;
+  platform: string;
+  agent_version: string;
+  capabilities: string[];
+  status: "active" | "revoked";
+  token_version?: number;
+  created_at: string;
+  last_seen: string;
+  revoked_at: string | null;
+  /** B4：最近一次心跳上报的运行态；设备从未上报过心跳时为 null。 */
+  runtime?: DeviceRuntimeState | null;
+};
+
+export type DevicePairing = {
+  id: string;
+  organization_id: string;
+  created_by: string;
+  status: "PENDING" | "CONSUMED" | "EXPIRED" | "REVOKED";
+  expires_at: string;
+  device_id: string | null;
+  consumed_at: string | null;
+  created_at: string;
+  pairing_code: string;
+  challenge: string;
+};
+
+export type DeviceCredential = { device: Device; device_token: string };
+
+export type Organization = { id: string; name: string };
+
+export async function listOrganizations(): Promise<Organization[]> {
+  const response = await apiFetch(`${API_URL}/api/organizations`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "组织列表读取失败");
+  return response.json();
+}
+
+/** 事件流一次取多少：看板只带最近 20 条，时间线/日志类页面需要更多。 */
+export async function listProjectEvents(projectId: string, limit = 200, latest = false): Promise<Event[]> {
+  // latest=true 取"最近 N 条"：时间线与成员审计要的是最近发生的事，而不是最早的那批
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/events?limit=${limit}${latest ? "&latest=true" : ""}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "事件流读取失败");
+  return response.json();
+}
+
+/** 单次执行详情：回答、原始输出与边界结论（列表里的 summary 是压缩过的）。 */
+export async function getRun(runId: string): Promise<Run> {
+  const response = await apiFetch(`${API_URL}/api/runs/${runId}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "执行详情读取失败");
+  return response.json();
+}
+
+export async function listDevices(): Promise<Device[]> {
+  const response = await apiFetch(`${API_URL}/api/devices`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "设备列表读取失败");
+  return response.json();
+}
+
+export async function createDevicePairing(organizationId: string, expiresInSeconds = 900): Promise<DevicePairing> {
+  const response = await apiFetch(`${API_URL}/api/devices/pairings`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ organization_id: organizationId, expires_in_seconds: expiresInSeconds }),
+  });
+  if (!response.ok) throw await apiError(response, "配对创建失败");
+  return response.json();
+}
+
+export async function revokeDevice(deviceId: string): Promise<Device> {
+  const response = await apiFetch(`${API_URL}/api/devices/${deviceId}/revoke`, { method: "POST" });
+  if (!response.ok) throw await apiError(response, "设备撤销失败");
+  return response.json();
+}
+
+export async function rotateDeviceToken(deviceId: string): Promise<DeviceCredential> {
+  const response = await apiFetch(`${API_URL}/api/devices/${deviceId}/rotate-token`, { method: "POST" });
+  if (!response.ok) throw await apiError(response, "Token 轮换失败");
+  return response.json();
+}
+
+/** 配对串：base64url(JSON)，与 scripts/connect-agent.ps1 的解码格式一致。 */
+export function pairingBlob(pairing: DevicePairing): string {
+  const payload = JSON.stringify({
+    pairing_id: pairing.id,
+    pairing_code: pairing.pairing_code,
+    challenge: pairing.challenge,
+    expires_at: pairing.expires_at,
+  });
+  const bytes = new TextEncoder().encode(payload);
+  let binary = "";
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** 项目能力默认清单：与后端 DeviceProjectGrantCreate 的默认值一致。 */
+export const DEFAULT_DEVICE_PROJECT_CAPABILITIES = [
+  // 「对话」（我的智能体）：单纯对话轮次的领取/回传
+  "chat.run",
+  "task.claim",
+  "task.lease",
+  "task.progress",
+  "task.result",
+  "artifact.read",
+  "artifact.write",
+  "run.create",
+  "run.complete",
+  "run.event",
+  "handoff.create",
+  "handoff.accept",
+  "handoff.reject",
+  "review.submit",
+] as const;
+
+export type DeviceProjectGrant = {
+  id: string;
+  device_id: string;
+  agent_id: string;
+  project_id: string;
+  capabilities: string[];
+  granted_by: string;
+  expires_at: string;
+  revoked_at: string | null;
+  created_at: string;
+};
+
+export type DeviceProjectCredential = { grant: DeviceProjectGrant; project_token: string };
+
+export async function createDeviceProjectGrant(
+  projectId: string,
+  payload: { device_id: string; capabilities?: string[]; expires_in_seconds?: number },
+): Promise<DeviceProjectCredential> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/device-grants`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw await apiError(response, "项目授权失败");
+  return response.json();
+}
+
+export async function listDeviceProjectGrants(projectId: string): Promise<DeviceProjectGrant[]> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/device-grants`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "项目授权读取失败");
+  return response.json();
+}
+
+/**
+ * 授权串：base64url(JSON)，与 scripts/connect-agent.ps1 的 -Grant 解码格式一致。
+ *
+ * project_token 只在授权响应里出现一次，串里带着它，等价于一次短期凭证，
+ * 因此向导页要提示用户不要外传、用完即弃。
+ */
+export function projectGrantBlob(credential: DeviceProjectCredential): string {
+  const payload = JSON.stringify({
+    project_id: credential.grant.project_id,
+    project_token: credential.project_token,
+    capabilities: credential.grant.capabilities,
+    agent_id: credential.grant.agent_id,
+    device_id: credential.grant.device_id,
+    expires_at: credential.grant.expires_at,
+  });
+  const bytes = new TextEncoder().encode(payload);
+  let binary = "";
+  bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/* ================= 账号系统（AUTH-1） ================= */
+
+export type AccountMember = {
+  id: string;
+  organization_id: string;
+  team_id: string | null;
+  email: string;
+  display_name: string;
+  status: "active" | "invited" | "suspended";
+  created_at: string;
+};
+
+export type AccountView = {
+  member: AccountMember;
+  has_password: boolean;
+  is_admin: boolean;
+  last_login_at: string | null;
+};
+
+export type AuthSession = {
+  token: string;
+  expires_at: string;
+  account: AccountView;
+};
+
+export type InvitationRecord = {
+  id: string;
+  organization_id: string;
+  team_id: string | null;
+  email: string;
+  role: string;
+  token: string;
+  status: "PENDING" | "ACCEPTED" | "EXPIRED" | "REVOKED";
+  expires_at: string;
+  created_at: string;
+};
+
+/** 账号相关的稳定错误码 → 人话。未覆盖的码回落到服务端 detail。 */
+const ACCOUNT_ERROR_MESSAGES: Record<string, string> = {
+  invalid_credentials: "邮箱或密码不正确",
+  authentication_required: "请先登录",
+  invalid_session: "登录状态已失效，请重新登录",
+  session_expired: "登录已过期，请重新登录",
+  account_suspended: "该账号已被停用，请联系管理员",
+  admin_required: "需要管理员权限",
+  invite_code_required: "注册需要邀请码",
+  invite_code_invalid: "邀请码无效",
+  invite_code_used: "邀请码已被使用",
+  invite_code_expired: "邀请码已过期",
+  invite_code_email_mismatch: "邀请码与这个邮箱不匹配",
+  email_invalid: "邮箱格式不正确",
+  email_already_registered: "这个邮箱已经注册过了",
+  password_too_short: "密码至少 10 位",
+  password_too_long: "密码过长",
+  password_all_digits: "密码不能全是数字",
+  password_all_letters: "密码不能全是字母",
+  current_password_invalid: "当前密码不正确",
+  display_name_too_short: "显示名至少 2 个字符",
+  too_many_attempts: "尝试次数过多，请稍后再试",
+  cannot_suspend_self: "不能停用自己的账号",
+  cannot_demote_self: "不能取消自己的管理员权限",
+  last_admin_cannot_be_demoted: "系统里至少要保留一个管理员",
+  use_password_change_for_self: "改自己的密码请用「修改密码」",
+  dev_session_disabled_in_required_mode: "开发会话入口在正式环境下已关闭",
+};
+
+export async function registerAccount(payload: {
+  email: string;
+  password: string;
+  display_name: string;
+  invite_code?: string;
+}): Promise<AuthSession> {
+  const response = await apiFetch(`${API_URL}/api/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw await apiError(response, "注册失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+export async function loginAccount(payload: { email: string; password: string }): Promise<AuthSession> {
+  const response = await apiFetch(`${API_URL}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw await apiError(response, "登录失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+export async function logoutAccount(): Promise<void> {
+  const response = await apiFetch(`${API_URL}/api/auth/logout`, { method: "POST" });
+  // 会话可能已经失效：登出永远不该失败到阻塞用户
+  if (!response.ok && response.status !== 401) throw await apiError(response, "退出登录失败", ACCOUNT_ERROR_MESSAGES);
+}
+
+export async function getCurrentAccount(): Promise<AccountView> {
+  const response = await apiFetch(`${API_URL}/api/auth/me`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "读取账号信息失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+export async function changeAccountPassword(payload: { current_password: string; new_password: string }): Promise<AccountView> {
+  const response = await apiFetch(`${API_URL}/api/auth/password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw await apiError(response, "修改密码失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+export async function listAccounts(): Promise<AccountView[]> {
+  const response = await apiFetch(`${API_URL}/api/accounts`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "读取账号列表失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+export async function updateAccount(
+  memberId: string,
+  payload: { status?: "active" | "suspended"; is_admin?: boolean },
+): Promise<AccountView> {
+  const response = await apiFetch(`${API_URL}/api/accounts/${memberId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw await apiError(response, "更新账号失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+export async function resetAccountPassword(memberId: string): Promise<{ temporary_password: string; account: AccountView }> {
+  const response = await apiFetch(`${API_URL}/api/accounts/${memberId}/reset-password`, { method: "POST" });
+  if (!response.ok) throw await apiError(response, "重置密码失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+export async function createInvitation(payload: {
+  organization_id: string;
+  email: string;
+  role?: string;
+  team_id?: string;
+  expires_in_seconds?: number;
+}): Promise<InvitationRecord> {
+  const response = await apiFetch(`${API_URL}/api/invitations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw await apiError(response, "生成邀请码失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+export async function listInvitations(): Promise<InvitationRecord[]> {
+  const response = await apiFetch(`${API_URL}/api/invitations?limit=50`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "读取邀请码失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+/* ---------- 从页面里收敛进来的直连调用（原先各自 fetch，登录后会缺令牌） ---------- */
+
+export async function getPlatformMetrics<T = Record<string, any>>(): Promise<T> {
+  const response = await apiFetch(`${API_URL}/api/platform/metrics`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "平台指标读取失败");
+  return response.json();
+}
+
+export async function getPlatformQuota<T = Record<string, any>>(): Promise<T> {
+  const response = await apiFetch(`${API_URL}/api/platform/quota`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "配额读取失败");
+  return response.json();
+}
+
+export async function getProjectUsage<T = Record<string, any>>(projectId: string): Promise<T> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/usage`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "项目用量读取失败");
+  return response.json();
+}
+
+/** 云盘文件转 Markdown 并入知识库（MinerU 队列，入队即返回）。 */
+export async function enqueueDriveConversion(file: { id: string; name: string }, kbId?: string): Promise<Record<string, any>> {
+  const response = await apiFetch(`${API_URL}/api/convert`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      source_type: "drive_file",
+      source_id: file.id,
+      file_name: file.name,
+      ...(kbId ? { kb_id: kbId } : {}),
+    }),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "入队失败", {
+      mineru_credentials_missing: "请先在设置中配置 MinerU API Token",
+    });
+  }
+  return response.json();
+}
+
+/** 内置 AI 普通对话（非流式）。 */
+export async function askAiChat(messages: { role: string; content: string }[]): Promise<{ content?: string; reply?: string }> {
+  const response = await apiFetch(`${API_URL}/api/ai/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, stream: false }),
+  });
+  if (!response.ok) throw await apiError(response, "AI 对话失败", { ai_credentials_missing: "请先在设置中配置 LLM 凭据" });
+  return response.json();
+}
+
+/**
+ * 下载成果物内容。
+ *
+ * 不能直接用 <a href>：普通跳转不带 Authorization，强制鉴权下会 401。
+ * 这里带令牌取回后交给浏览器保存，令牌不出现在 URL / 历史记录 / 服务器访问日志里。
+ */
+export async function downloadArtifactContent(artifactId: string, fileName: string): Promise<void> {
+  const response = await apiFetch(`${API_URL}/api/artifacts/${artifactId}/content`);
+  if (!response.ok) throw await apiError(response, "下载失败");
+  const blob = await response.blob();
+  const url = window.URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName || "artifact";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.URL.revokeObjectURL(url);
+}
+
+
+/* ---------- 派单与个人任务中心（P1-1） ---------- */
+
+export type ProjectMemberView = {
+  member_id: string;
+  role: string;
+  display_name: string;
+  email: string;
+  status: string;
+};
+
+export type TaskBoardItem = {
+  task: Task;
+  project_name: string;
+  assignee_member_name: string | null;
+  executor_agent_id: string | null;
+  lease_active: boolean;
+};
+
+export type MyTasks = {
+  assigned: TaskBoardItem[];
+  running: TaskBoardItem[];
+  recent: TaskBoardItem[];
+};
+
+export async function listProjectMembers(projectId: string): Promise<ProjectMemberView[]> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/members`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "项目成员读取失败");
+  return response.json();
+}
+
+export async function getMyTasks(): Promise<MyTasks> {
+  const response = await apiFetch(`${API_URL}/api/tasks/mine`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "个人任务读取失败");
+  return response.json();
+}
+
+
+/* ---------- 团队：工作量、项目成员管理、多团队（P2） ---------- */
+
+export type MemberWorkload = {
+  member_id: string;
+  display_name: string;
+  email: string;
+  status: string;
+  is_admin: boolean;
+  assigned_open: number;
+  running: number;
+  completed: number;
+  agents: number;
+  devices: number;
+  devices_active: number;
+  projects: number;
+  teams: string[];
+};
+
+export type Team = { id: string; organization_id: string; name: string; created_at: string };
+
+export type TeamMemberRow = { member_id: string; role: string; display_name: string; email: string; status: string };
+
+export type ProjectMemberRemoval = { member_id: string; released_tasks: number; revoked_grants: number; revoked_devices: string[] };
+
+export async function getTeamWorkload(): Promise<MemberWorkload[]> {
+  const response = await apiFetch(`${API_URL}/api/team/workload`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "成员工作量读取失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+export async function updateProjectMember(projectId: string, memberId: string, role: string): Promise<ProjectMemberView> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/members/${memberId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role }),
+  });
+  if (!response.ok) throw await apiError(response, "改项目角色失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+export async function removeProjectMember(projectId: string, memberId: string): Promise<ProjectMemberRemoval> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/members/${memberId}`, { method: "DELETE" });
+  if (!response.ok) throw await apiError(response, "移出项目失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+export async function listTeams(organizationId: string): Promise<Team[]> {
+  const response = await apiFetch(`${API_URL}/api/organizations/${organizationId}/teams`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "团队列表读取失败");
+  return response.json();
+}
+
+export async function createTeam(organizationId: string, name: string): Promise<Team> {
+  const response = await apiFetch(`${API_URL}/api/teams`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ organization_id: organizationId, name }),
+  });
+  if (!response.ok) throw await apiError(response, "建团队失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+export async function listTeamMembers(teamId: string): Promise<TeamMemberRow[]> {
+  const response = await apiFetch(`${API_URL}/api/teams/${teamId}/members`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "团队成员读取失败");
+  return response.json();
+}
+
+export async function addTeamMember(teamId: string, memberId: string, role = "contributor"): Promise<{ joined_projects: number }> {
+  const response = await apiFetch(`${API_URL}/api/teams/${teamId}/members/${memberId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role }),
+  });
+  if (!response.ok) throw await apiError(response, "加入团队失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+export async function removeTeamMember(teamId: string, memberId: string): Promise<{ left_projects: number }> {
+  const response = await apiFetch(`${API_URL}/api/teams/${teamId}/members/${memberId}`, { method: "DELETE" });
+  if (!response.ok) throw await apiError(response, "移出团队失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+
+/* ---------- P3：能力目录 / 吞吐 / 项目归队 ---------- */
+
+export type CapabilityCard = {
+  skill: string;
+  version: string;
+  inputs: string[];
+  outputs: string[];
+  description: string;
+};
+
+export type CapabilityAgent = {
+  agent_id: string;
+  display_name: string;
+  owner_member_id: string | null;
+  owner_name: string;
+  agent_status: string;
+  last_seen: string | null;
+  /** 技能名（归一化后）。版本见 skill_versions；授权范围见 scope_capabilities。 */
+  capabilities: string[];
+  skill_versions: Record<string, string>;
+  cards: CapabilityCard[];
+  scope_capabilities: string[];
+  package_id: string | null;
+  instance_id: string | null;
+  /** reported = 内核上报；inferred = 平台按设备探测值推断（界面要标出来，别把猜测当事实）。 */
+  package_source: string;
+  runs_total: number;
+  success_rate: number | null;
+  devices: { device_id: string; status: string; last_seen: string | null }[];
+  devices_online: number;
+};
+
+export type TaskCandidate = {
+  agent_id: string;
+  display_name: string;
+  member_id: string;
+  online: boolean;
+  load: number;
+  runs_total: number;
+  succeeded: number;
+  failed: number;
+  success_rate: number;
+  matched_skills: string[];
+  missing_skills: string[];
+  reason: string;
+};
+
+export type TaskCandidates = {
+  task_id: string;
+  required_capabilities: string[];
+  satisfied: TaskCandidate[];
+  partial: TaskCandidate[];
+  satisfied_total: number;
+  partial_total: number;
+};
+
+export type CapabilityPackage = {
+  package_id: string;
+  source: string;
+  instances: number;
+  instances_online: number;
+  skills: string[];
+  succeeded: number;
+  failed: number;
+  total: number;
+  success_rate: number | null;
+  members: string[];
+};
+
+export type UnmetCapabilityTask = {
+  task_id: string;
+  title: string;
+  project_id: string;
+  project_name: string;
+  required_capabilities: string[];
+  missing_capabilities: string[];
+  /** AIP-1b：不再只给"没人能跑"，带上"这几台差哪一项" */
+  candidates: TaskCandidate[];
+};
+
+export type CapabilityCatalog = {
+  agents: CapabilityAgent[];
+  packages: CapabilityPackage[];
+  unmet_tasks: UnmetCapabilityTask[];
+};
+export type ThroughputDay = { day: string; total: number; succeeded: number; failed: number };
+export type ThroughputMember = { member_id: string; display_name: string; total: number; succeeded: number; failed: number };
+export type TeamThroughput = { days: number; daily: ThroughputDay[]; members: ThroughputMember[] };
+
+export async function getCapabilityCatalog(): Promise<CapabilityCatalog> {
+  const response = await apiFetch(`${API_URL}/api/team/capabilities`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "能力目录读取失败");
+  return response.json();
+}
+
+/** 一条任务的候选执行体（AIP-1b）：与 auto 调度器共用同一套排序，推荐即派单结果。 */
+export async function getTaskCandidates(taskId: string): Promise<TaskCandidates> {
+  const response = await apiFetch(`${API_URL}/api/tasks/${taskId}/candidates`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "候选执行体读取失败");
+  return response.json();
+}
+
+export async function getTeamThroughput(days = 14): Promise<TeamThroughput> {
+  const response = await apiFetch(`${API_URL}/api/team/throughput?days=${days}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "吞吐统计读取失败");
+  return response.json();
+}
+
+export async function updateProjectTeam(projectId: string, teamId: string | null): Promise<Project> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ team_id: teamId }),
+  });
+  if (!response.ok) throw await apiError(response, "改项目团队失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+
+/** 把成员加入项目（或改其项目内角色）。用于"恢复被移出的成员"。 */
+export async function addProjectMember(projectId: string, memberId: string, role = "contributor"): Promise<ProjectMemberView> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/members/${memberId}?role=${encodeURIComponent(role)}`, { method: "POST" });
+  if (!response.ok) throw await apiError(response, "加入项目失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+
+/* ---------- W-1 项目工作区：聊天流、成员概览、成果摘要 ---------- */
+
+export type ProjectMessage = {
+  id: string;
+  project_id: string;
+  /** 项目内单调递增序号：聊天流的排序与分页游标 */
+  seq: number;
+  sender_kind: "human" | "agent" | "system";
+  sender_member_id: string | null;
+  sender_agent_id: string | null;
+  sender_name: string;
+  content: string;
+  /** text = 人类发言；card = 从事件派生的 Agent/系统卡片（ref_* 可跳转） */
+  message_type: "text" | "card";
+  ref_event_id: number | null;
+  ref_artifact_id: string | null;
+  ref_task_id: string | null;
+  created_at: string;
+};
+
+export type WorkspaceMember = {
+  member_id: string;
+  display_name: string;
+  email: string;
+  role: string;
+  status: string;
+  open_tasks: number;
+  running_tasks: number;
+  agents: number;
+  agents_online: number;
+  last_activity: string | null;
+};
+
+export type WorkspaceAgent = {
+  agent_id: string;
+  display_name: string;
+  owner_member_id: string;
+  owner_name: string;
+  status: string;
+  connected: boolean;
+  last_seen: string | null;
+  current_task_id: string | null;
+  current_task_title: string | null;
+};
+
+export type WorkspaceTaskBrief = {
+  id: string;
+  title: string;
+  status: string;
+  stage: string;
+  priority: string;
+  assignee_member_id: string | null;
+  assignee_name: string | null;
+  deadline: string | null;
+};
+
+export type WorkspaceArtifactBrief = {
+  id: string;
+  name: string;
+  status: string;
+  version: number;
+  kind: string;
+  created_at: string;
+};
+
+export type WorkspaceViewer = {
+  member_id: string | null;
+  role: string | null;
+  can_chat: boolean;
+  can_manage: boolean;
+};
+
+export type ProjectWorkspaceOverview = {
+  project: Project;
+  /** 我在这个项目里的身份：界面据此隐藏发言框与模式开关 */
+  viewer: WorkspaceViewer;
+  members: WorkspaceMember[];
+  agents: WorkspaceAgent[];
+  tasks: { total: number; by_status: Record<string, number>; open_items: WorkspaceTaskBrief[] };
+  artifacts: { total: number; approved: number; pending_review: number; recent: WorkspaceArtifactBrief[] };
+  messages: ProjectMessage[];
+};
+
+/** 工作区首屏聚合：一个请求拿到成员概览 + 任务/成果摘要 + 最近聊天。 */
+export async function getProjectWorkspace(projectId: string): Promise<ProjectWorkspaceOverview> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/workspace`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "工作区数据读取失败");
+  return response.json();
+}
+
+/** 聊天流：before 向后翻历史页，after 向前增量补齐，都不给则取最近 limit 条。 */
+export async function getProjectMessages(
+  projectId: string,
+  options: { before?: number; after?: number; limit?: number } = {},
+): Promise<ProjectMessage[]> {
+  const params = new URLSearchParams();
+  if (options.before !== undefined) params.set("before", String(options.before));
+  if (options.after !== undefined) params.set("after", String(options.after));
+  if (options.limit !== undefined) params.set("limit", String(options.limit));
+  const query = params.toString();
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/messages${query ? `?${query}` : ""}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "聊天记录读取失败");
+  return response.json();
+}
+
+export async function postProjectMessage(
+  projectId: string,
+  content: string,
+  refArtifactId?: string,
+  refTaskId?: string,
+): Promise<ProjectMessage> {
+  const body: Record<string, string> = { content };
+  if (refArtifactId) body.ref_artifact_id = refArtifactId;
+  if (refTaskId) body.ref_task_id = refTaskId;
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw await apiError(response, "发送失败", { project_chat_denied: "当前角色只能查看，不能发言" });
+  return response.json();
+}
+
+/** 项目设置更新（PATCH 语义：只发要改的字段）。 */
+export async function updateProjectSettings(
+  projectId: string,
+  patch: { team_id?: string | null; goal?: string; target_member_count?: number; task_mode?: TaskMode },
+): Promise<Project> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!response.ok) throw await apiError(response, "项目设置更新失败", ACCOUNT_ERROR_MESSAGES);
+  return response.json();
+}
+
+
+/* ---------- W-2 成果空间与批量派单 ---------- */
+
+export type DeliverableArtifact = {
+  id: string;
+  name: string;
+  artifact_type: string;
+  version: number;
+  status: string;
+  downstream_allowed: boolean;
+  task_id: string | null;
+  run_id: string | null;
+  created_by: string;
+  created_by_kind: string;
+  created_at: string;
+};
+
+export type DeliverableDocument = DeliverableArtifact & {
+  /** 草稿 / 提交 / 批准三层版本 */
+  layer: "draft" | "submitted" | "approved";
+  has_draft: boolean;
+};
+
+export type DeliverableHandoff = {
+  id: string;
+  task_id: string | null;
+  sender_agent_id: string;
+  status: string;
+  objective: string;
+  key_conclusions: string[];
+  open_questions: string[];
+  created_at: string;
+};
+
+export type DeliverableGate = {
+  id: string;
+  target_type: string;
+  target_id: string;
+  status: string;
+  blocking_count: number;
+  approved_by: string | null;
+  approved_at: string | null;
+};
+
+export type DeliverableReview = {
+  id: string;
+  target_type: string;
+  target_id: string;
+  verdict: string;
+  reviewer: string;
+  reviewer_kind: string;
+  summary: string;
+  created_at: string;
+};
+
+export type ProjectDeliverables = {
+  artifacts: { total: number; by_status: Record<string, number>; recent: DeliverableArtifact[] };
+  handoffs: { total: number; by_status: Record<string, number>; recent: DeliverableHandoff[] };
+  documents: { total: number; by_layer: Record<string, number>; recent: DeliverableDocument[] };
+  gates: { total: number; open: number; items: DeliverableGate[] };
+  reviews: { total: number; recent: DeliverableReview[] };
+  risks: { total: number; open: number };
+};
+
+/** 成果空间聚合：成果物 / 交接 / 文档 / 门禁与复核 / 风险。 */
+export async function getProjectDeliverables(projectId: string): Promise<ProjectDeliverables> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/deliverables`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "成果空间读取失败");
+  return response.json();
+}
+
+export type TaskBulkAssignResult = {
+  updated: number;
+  task_ids: string[];
+  failures: { task_id: string; reason: string }[];
+};
+
+/** 批量派单（队长）：assignee 传空串 = 全部收回未指派；逐条返回失败原因。 */
+export async function bulkAssignTasks(
+  projectId: string,
+  taskIds: string[],
+  assigneeMemberId: string,
+): Promise<TaskBulkAssignResult> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/tasks/assign`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task_ids: taskIds, assignee_member_id: assigneeMemberId }),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "批量派单失败", {
+      task_self_claim_disabled_in_manual_mode: "当前是「队长派单」模式：成员不能自己认领任务",
+      task_dispatch_requires_lead: "只有队长能把任务派给别人",
+      assignee_not_project_member: "目标成员不在这个项目里",
+    });
+  }
+  return response.json();
+}
+
+/** 单条派单（走既有 PATCH）：成员认领 = 把自己设为负责人。 */
+/** 任务详情（AIP-1d）：任务本体 + 预算执行态 + 证据缺口（后两者服务端读时算）。 */
+export async function getTaskDetail(taskId: string): Promise<TaskDetail> {
+  const response = await apiFetch(`${API_URL}/api/tasks/${taskId}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "任务详情读取失败");
+  return response.json();
+}
+
+export async function assignTask(taskId: string, assigneeMemberId: string): Promise<Task> {
+  return updateTask(taskId, { assignee_member_id: assigneeMemberId });
+}
+
+/* ================= 「我的智能体」（MY-AGENT）：单纯对话 ================= */
+/*
+ * 与「项目工作」（任务体系）分开：这些接口不建 Task、不进任务板、不走复核。
+ * 执行体侧另有 /api/agents/{id}/chat-turns/*（能力令牌），浏览器这边不碰。
+ */
+
+export type MyAgentRole = {
+  /** 执行体上真实存在的角色名（`opencode agent list` 探测得到）；空串表示「默认（无角色）」。 */
+  name: string;
+  /** 角色说明，取自角色定义文件自己的 frontmatter（页面直接显示它，不另起一套文案）。 */
+  description: string;
+  /** 这个角色**能执行命令或写文件**（来自角色文件的 tools 开关）：页面要如实标注"会改动工作目录"。 */
+  executes: boolean;
+};
+
+export type MyAgentEndpoint = {
+  device_id: string;
+  device_name: string;
+  agent_id: string | null;
+  platform: string;
+  status: string;
+  online: boolean;
+  project_id: string;
+  project_name: string;
+  executor: string;
+  models: string[];
+  default_model: string;
+  /** 可选角色；空数组 = 这台执行体没有角色可选（页面只显示「默认」，不显示空下拉）。 */
+  roles: MyAgentRole[];
+  conversation_count: number;
+};
+
+export type MyAgentConversation = {
+  id: string;
+  title: string;
+  model: string;
+  /** 会话上选的角色（空 = 默认）。中途可改，**只影响下一轮**。 */
+  role: string;
+  session_key: string | null;
+  turn_count: number;
+  project_id: string;
+  device_id: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type MyAgentTurn = {
+  id: string;
+  conversation_id: string;
+  seq: number;
+  status: "PENDING" | "CLAIMED" | "DONE" | "FAILED" | "CANCELLED";
+  prompt: string;
+  content: string;
+  model: string;
+  /** 这一轮**实际**用的角色（建轮次时从会话抄下来）：历史里"这轮谁跑的"不会被后来的设置改写。 */
+  role: string;
+  session_key: string | null;
+  usage: Record<string, unknown>;
+  error: string;
+  /** 这一轮带的输入文件（名子供气泡显示；执行体会把它们下到工作目录）。 */
+  artifacts: { artifact_id: string; name: string }[];
+  /** 这一轮**产出**的文件（成果物，待审）：页面据此给出「下载 / 转入云盘」。 */
+  outputs: MyAgentTurnOutput[];
+  created_at: string;
+  completed_at: string | null;
+};
+
+export type MyAgentTurnOutput = {
+  artifact_id: string;
+  name: string;
+  size_bytes: number;
+  artifact_type: string;
+  mime_type: string;
+  relative_path: string;
+};
+
+/** 一轮里的权限请求（S-3 的"待批准卡片"）。`status` 四态：待批 / 已批 / 已拒 / 过期（= 没人批）。 */
+export type MyAgentTurnApproval = {
+  id: string;
+  turn_id: string;
+  conversation_id: string;
+  status: "PENDING" | "APPROVED" | "DENIED" | "EXPIRED";
+  permission: string;
+  patterns: string[];
+  summary: string;
+  tool: string;
+  call_id: string;
+  decision: string;
+  decided_by: string | null;
+  created_at: string;
+  decided_at: string | null;
+};
+
+export async function listMyAgentTurnApprovals(turnId: string): Promise<MyAgentTurnApproval[]> {
+  const response = await apiFetch(`${API_URL}/api/my-agent/turns/${turnId}/approvals`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "读取权限请求失败");
+  return response.json();
+}
+
+/** 对一张待批准卡片做决定：`once` 批准这一次 / `always` 本次会话都允许 / `reject` 拒绝（实测拒绝真的不执行）。 */
+export async function decideMyAgentTurnApproval(
+  turnId: string,
+  requestId: string,
+  decision: "once" | "always" | "reject",
+): Promise<MyAgentTurnApproval> {
+  const response = await apiFetch(`${API_URL}/api/my-agent/turns/${turnId}/approvals/${requestId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision }),
+  });
+  if (!response.ok)
+    throw await apiError(response, "提交决定失败", {
+      approval_not_found: "这条请求已经不在了",
+      turn_not_found: "这一轮已经不在了",
+    });
+  return response.json();
+}
+
+/** 把一份成果物**复制**进个人云盘（对话产出的「转入云盘」；成果物本身留在项目里）。 */
+export async function copyArtifactToDrive(artifactId: string): Promise<{ id: string; name: string }> {
+  const response = await apiFetch(`${API_URL}/api/drive/from-artifact/${artifactId}`, { method: "POST" });
+  if (!response.ok)
+    throw await apiError(response, "转入云盘失败", {
+      artifact_not_found: "这份成果物已经取不到了",
+      drive_quota_exceeded: "云盘空间不足（200MB 上限）",
+      project_membership_required: "你不是这个项目的成员，取不了这份产出",
+    });
+  return response.json();
+}
+
+export type MyAgentTurnEvent = {
+  id: string;
+  turn_id: string;
+  sequence: number;
+  event_type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+};
+
+export async function listMyAgents(): Promise<MyAgentEndpoint[]> {
+  const response = await apiFetch(`${API_URL}/api/my-agent/agents`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "执行体列表读取失败");
+  return response.json();
+}
+
+export async function listMyAgentConversations(): Promise<MyAgentConversation[]> {
+  const response = await apiFetch(`${API_URL}/api/my-agent/conversations`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "会话列表读取失败");
+  return response.json();
+}
+
+export async function createMyAgentConversation(body: {
+  project_id: string;
+  device_id: string;
+  model?: string;
+  role?: string;
+  title?: string;
+}): Promise<MyAgentConversation> {
+  const response = await apiFetch(`${API_URL}/api/my-agent/conversations`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "会话创建失败", {
+      device_grant_missing_chat_capability: "这台设备没有「对话」权限：去设备页重新授权（勾上 chat.run）",
+      device_not_active: "设备不在线或已撤销",
+    });
+  }
+  return response.json();
+}
+
+export async function deleteMyAgentConversation(conversationId: string): Promise<void> {
+  const response = await apiFetch(`${API_URL}/api/my-agent/conversations/${conversationId}`, { method: "DELETE" });
+  if (!response.ok) throw await apiError(response, "会话删除失败");
+}
+
+/** 改会话设置（角色 / 模型）：**只影响下一轮**（已经跑过的轮次记着它当时用的是什么）。 */
+export async function updateMyAgentConversation(
+  conversationId: string,
+  body: { role?: string; model?: string; title?: string },
+): Promise<MyAgentConversation> {
+  const response = await apiFetch(`${API_URL}/api/my-agent/conversations/${conversationId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw await apiError(response, "会话设置保存失败");
+  return response.json();
+}
+
+export async function listMyAgentTurns(conversationId: string): Promise<MyAgentTurn[]> {
+  const response = await apiFetch(`${API_URL}/api/my-agent/conversations/${conversationId}/turns`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "对话记录读取失败");
+  return response.json();
+}
+
+export async function sendMyAgentMessage(
+  conversationId: string,
+  content: string,
+  artifactIds: string[] = [],
+): Promise<MyAgentTurn> {
+  const response = await apiFetch(`${API_URL}/api/my-agent/conversations/${conversationId}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, artifact_ids: artifactIds }),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "发送失败", { conversation_busy: "上一轮还在跑，等它结束再发" });
+  }
+  return response.json();
+}
+
+export async function listMyAgentTurnEvents(turnId: string): Promise<MyAgentTurnEvent[]> {
+  const response = await apiFetch(`${API_URL}/api/my-agent/turns/${turnId}/events`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "过程事件读取失败");
+  return response.json();
+}
+
+export async function stopMyAgentTurn(turnId: string): Promise<MyAgentTurn> {
+  const response = await apiFetch(`${API_URL}/api/my-agent/turns/${turnId}/stop`, { method: "POST" });
+  if (!response.ok) {
+    throw await apiError(response, "停止失败", { turn_already_finished: "这一轮已经结束了" });
+  }
+  return response.json();
+}

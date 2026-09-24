@@ -1,0 +1,72 @@
+<!doctype html>
+<!-- 本机状态页（DP-3-01 的雏形）：只读展示内核状态 + 配对表单 + 托盘同款动作 -->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'" />
+  <title>synapforge · 本机 Agent</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; padding: 18px; background: #0f172a; color: #e2e8f0;
+           font: 13px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; }
+    h1 { font-size: 15px; margin: 0 0 4px; }
+    .hint { color: #94a3b8; font-size: 12px; }
+    .card { border: 1px solid #1e293b; border-radius: 10px; padding: 12px 14px; margin-top: 12px; background: #111c33; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+    .grey { background: #9ca3af } .green { background: #16a34a } .yellow { background: #f6bd16 } .red { background: #dc2626 }
+    input, textarea { width: 100%; box-sizing: border-box; background: #0b1424; color: #e2e8f0;
+                      border: 1px solid #24314d; border-radius: 8px; padding: 7px 9px; font: inherit; }
+    button { background: #2563eb; color: #fff; border: 0; border-radius: 8px; padding: 7px 12px; font: inherit; cursor: pointer; }
+    button.secondary { background: #1f2937; border: 1px solid #334155; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    pre { background: #0b1424; border: 1px solid #1e293b; border-radius: 8px; padding: 8px; max-height: 160px; overflow: auto; font-size: 12px; }
+    .chip { border: 1px solid #24314d; border-radius: 999px; padding: 2px 9px; font-size: 12px; }
+    .ok { color: #4ade80 } .bad { color: #f87171 }
+  </style>
+</head>
+<body>
+  <h1>本机 Agent</h1>
+  <div class="hint">壳只负责托盘与状态；连接、任务与凭据都在本机内核里（契约 v1）。</div>
+
+  <div class="card">
+    <div class="row"><span id="conn-dot" class="dot grey"></span><strong id="conn-text">正在连接内核…</strong>
+      <span class="chip" id="contract-chip">contract —</span></div>
+    <div class="hint" id="identity">未配对</div>
+    <div class="hint" id="last-error"></div>
+  </div>
+
+  <div class="card" id="pair-card">
+    <div class="row" style="justify-content: space-between"><strong>接入平台</strong>
+      <span class="hint">也可从平台「设备与接入」页点「接入这台电脑」自动填入</span></div>
+    <div style="margin-top: 8px"><input id="platform" placeholder="平台地址，例如 http://127.0.0.1:8000" /></div>
+    <div style="margin-top: 8px"><textarea id="blob" rows="3" placeholder="粘贴向导页复制的配对串"></textarea></div>
+    <div class="row" style="margin-top: 8px">
+      <button id="pair">完成配对</button>
+      <span class="hint" id="pair-hint"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content: space-between"><strong>本机可用执行体</strong>
+      <button class="secondary" id="rescan">重扫</button></div>
+    <div id="agents" class="row" style="margin-top: 8px"></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content: space-between"><strong>任务</strong>
+      <div class="row">
+        <button class="secondary" id="pause">暂停领取</button>
+        <button class="secondary" id="emergency">紧急停止</button>
+      </div></div>
+    <div class="hint" id="tasks" style="margin-top: 6px"></div>
+  </div>
+
+  <div class="card">
+    <strong>本机日志（最近 200 行）</strong>
+    <pre id="logs">…</pre>
+  </div>
+
+  <script src="status.js"></script>
+</body>
+</html>

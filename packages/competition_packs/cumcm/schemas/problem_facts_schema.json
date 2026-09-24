@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "cumcm/problem_facts.schema.json",
+  "title": "CUMCM 题面事实台账",
+  "description": "题面参数的机器可读台账。只登记题面/附件中可直接读出的事实，并用 source_files.sha256 指向来源，禁止写入推测值。",
+  "type": "object",
+  "required": [
+    "_meta",
+    "entities"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "_meta": {
+      "type": "object",
+      "required": [
+        "problem_id",
+        "source_files"
+      ],
+      "properties": {
+        "problem_id": {
+          "type": "string",
+          "minLength": 2,
+          "examples": [
+            "2026-C"
+          ]
+        },
+        "source_pages": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "source_files": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        },
+        "verification_notes": {
+          "type": "string"
+        }
+      }
+    },
+    "domain": {
+      "type": "object",
+      "description": "题面领域口径，例如时间粒度、预测发布时刻与预测视野。",
+      "additionalProperties": true,
+      "properties": {
+        "temporal": {
+          "type": "object",
+          "properties": {
+            "year": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "time_step_minutes": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            },
+            "slots_per_day": {
+              "type": "string"
+            },
+            "result_start": {
+              "type": "string"
+            },
+            "result_end": {
+              "type": "string"
+            },
+            "forecast_issue_hours": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 23
+              }
+            },
+            "forecast_horizon_hours": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "entities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "unit": {
+            "type": "string"
+          },
+          "source_sentence": {
+            "description": "支撑该事实的题面句编号，可省略但建议提供。",
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          },
+          "efficiency_raw": {
+            "type": "string",
+            "description": "题面原始写法（如 90%），数值换算放在单独字段，便于核对。"
+          },
+          "value": {
+            "type": [
+              "number",
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "expression"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "expression": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "source_sentence": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "information_boundary": {
+      "type": "object",
+      "properties": {
+        "decision_time": {
+          "type": "string"
+        },
+        "data_cutoff": {
+          "type": "string"
+        },
+        "declared_inputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "future_data": {
+          "type": "string",
+          "enum": [
+            "deny",
+            "allow"
+          ]
+        }
+      }
+    }
+  }
+}

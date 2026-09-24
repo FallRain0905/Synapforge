@@ -1,0 +1,46 @@
+{
+  "problem_id": "{{problem_id}}",
+  "competition": "{{competition}}",
+  "generated_at": "{{generated_at}}",
+  "datasets": [
+    {
+      "name": "",
+      "path": "user_data/",
+      "sha256": "",
+      "rows": null,
+      "grain": "",
+      "time_range": {
+        "start": "",
+        "end": "",
+        "timezone": ""
+      },
+      "columns": [
+        {
+          "name": "",
+          "dtype": "",
+          "unit": "",
+          "missing": null,
+          "missing_ratio": null,
+          "min": null,
+          "max": null,
+          "outliers": null,
+          "notes": ""
+        }
+      ]
+    }
+  ],
+  "quality_findings": [
+    {
+      "code": "",
+      "description": "",
+      "severity": "info"
+    }
+  ],
+  "information_boundary": {
+    "decision_time": "",
+    "data_cutoff": "",
+    "declared_inputs": [],
+    "future_data": "deny"
+  },
+  "notes": "字段画像用于数据截止时间与结果表口径核对；缺失值口径必须与题面一致。"
+}

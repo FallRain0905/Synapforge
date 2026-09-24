@@ -1,0 +1,52 @@
+{
+  "_meta": {
+    "problem_id": "{{problem_id}}",
+    "competition": "{{competition}}",
+    "problem_code": "{{problem_code}}",
+    "source_pages": [],
+    "source_files": [
+      {
+        "path": "user_data/{{problem_code}}_extracted.txt",
+        "sha256": ""
+      }
+    ],
+    "verification_notes": "题面事实必须逐条可回溯到 source_sentence；未回溯的条目不得写入本文件。",
+    "generated_at": "{{generated_at}}"
+  },
+  "domain": {
+    "temporal": {
+      "year": null,
+      "time_step_minutes": null,
+      "slots_per_day": "",
+      "result_start": "",
+      "result_end": "",
+      "forecast_issue_hours": [],
+      "forecast_horizon_hours": null
+    },
+    "domain_notes": ""
+  },
+  "entities": [
+    {
+      "id": "",
+      "name": "",
+      "unit": "",
+      "value": null,
+      "efficiency_raw": "",
+      "source_sentence": []
+    }
+  ],
+  "constraints": [
+    {
+      "id": "",
+      "expression": "",
+      "description": "",
+      "source_sentence": []
+    }
+  ],
+  "information_boundary": {
+    "decision_time": "",
+    "data_cutoff": "",
+    "declared_inputs": [],
+    "future_data": "deny"
+  }
+}

@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://math-agent-platform.local/contracts/agent-gateway.schema.json",
+  "title": "Math Agent Platform Agent Gateway Protocol",
+  "$defs": {
+    "GatewayEnvelope": {
+      "type": "object",
+      "required": ["device_id", "agent_id", "session_id", "connection_id", "sequence", "message_id", "idempotency_key", "message_type", "schema_version", "sent_at", "payload"],
+      "properties": {
+        "device_id": { "type": "string" },
+        "agent_id": { "type": "string" },
+        "session_id": { "type": "string" },
+        "connection_id": { "type": "string" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "message_id": { "type": "string", "minLength": 8, "maxLength": 160 },
+        "idempotency_key": { "type": "string", "minLength": 8, "maxLength": 160 },
+        "message_type": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "schema_version": { "type": "string" },
+        "sent_at": { "type": "string", "format": "date-time" },
+        "payload": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "AgentHeartbeat": {
+      "type": "object",
+      "required": ["device_id", "agent_id", "session_id", "connection_id", "agent_version", "running_run_ids", "local_queue_length", "user_session_state", "sent_at"],
+      "properties": {
+        "device_id": { "type": "string" },
+        "agent_id": { "type": "string" },
+        "session_id": { "type": "string" },
+        "connection_id": { "type": "string" },
+        "agent_version": { "type": "string" },
+        "adapter_versions": { "type": "object", "additionalProperties": { "type": "string" } },
+        "capabilities": { "type": "array", "items": { "type": "string" } },
+        "running_run_ids": { "type": "array", "items": { "type": "string", "format": "uuid" } },
+        "local_queue_length": { "type": "integer", "minimum": 0 },
+        "user_session_state": { "type": "string", "enum": ["unknown", "logged_in", "locked", "logged_out"] },
+        "resource_summary": { "type": "object" },
+        "sent_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "GatewayEventAck": {
+      "type": "object",
+      "required": ["device_id", "connection_id", "highest_contiguous_sequence", "acknowledged_message_ids", "received_at"],
+      "properties": {
+        "device_id": { "type": "string" },
+        "connection_id": { "type": "string" },
+        "highest_contiguous_sequence": { "type": "integer", "minimum": 0 },
+        "acknowledged_message_ids": { "type": "array", "items": { "type": "string" } },
+        "received_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "GatewayReplayRequest": {
+      "type": "object",
+      "required": ["device_id", "connection_id", "after_sequence", "limit"],
+      "properties": {
+        "device_id": { "type": "string" },
+        "connection_id": { "type": "string" },
+        "after_sequence": { "type": "integer", "minimum": 0 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
+      },
+      "additionalProperties": false
+    },
+    "GatewayCommandResult": {
+      "type": "object",
+      "required": ["id", "connection_id", "message_id", "idempotency_key", "sequence", "message_type", "status", "response_type", "created_at"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "connection_id": { "type": "string" },
+        "message_id": { "type": "string", "minLength": 8, "maxLength": 160 },
+        "idempotency_key": { "type": "string", "minLength": 8, "maxLength": 160 },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "message_type": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "status": { "type": "string", "enum": ["SUCCEEDED", "FAILED"] },
+        "response_type": { "type": "string", "enum": ["gateway.ack", "gateway.error"] },
+        "request_hash": { "type": ["string", "null"], "minLength": 64, "maxLength": 64 },
+        "result": {},
+        "error_code": { "type": ["string", "null"] },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+    "AgentEventPayload": {
+      "type": "object",
+      "required": ["project_id", "project_token", "event"],
+      "properties": {
+        "project_id": { "type": "string", "format": "uuid" },
+        "project_token": { "type": "string", "minLength": 16, "maxLength": 240 },
+        "event": {
+          "type": "object",
+          "required": ["event_id", "worker_id", "event_type", "sequence", "project_id", "occurred_at", "payload"],
+          "properties": {
+            "schema_version": { "type": "string" },
+            "event_id": { "type": "string", "minLength": 8, "maxLength": 160 },
+            "worker_id": { "type": "string", "minLength": 2, "maxLength": 160 },
+            "event_type": { "type": "string" },
+            "sequence": { "type": "integer", "minimum": 1 },
+            "run_id": { "type": ["string", "null"], "minLength": 2, "maxLength": 160 },
+            "occurred_at": { "type": "string", "format": "date-time" },
+            "payload": { "type": "object" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "oneOf": [
+    { "$ref": "#/$defs/GatewayEnvelope" },
+    { "$ref": "#/$defs/AgentHeartbeat" },
+    { "$ref": "#/$defs/GatewayEventAck" },
+    { "$ref": "#/$defs/GatewayReplayRequest" },
+    { "$ref": "#/$defs/GatewayCommandResult" },
+    { "$ref": "#/$defs/AgentEventPayload" }
+  ]
+}

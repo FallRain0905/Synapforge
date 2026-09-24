@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0",
+  "approval_rule": "APPROVED is produced by a Review gate; an Agent or generic PATCH cannot write it directly.",
+  "transitions": [
+    { "from": "DRAFT", "to": "READY", "actor_kinds": ["member", "system"], "requires_review": false },
+    { "from": "DRAFT", "to": "CANCELLED", "actor_kinds": ["member", "system"], "requires_review": false },
+    { "from": "READY", "to": "CLAIMED", "actor_kinds": ["agent"], "requires_review": false },
+    { "from": "READY", "to": "RUNNING", "actor_kinds": ["member", "agent", "system"], "requires_review": false },
+    { "from": "READY", "to": "BLOCKED", "actor_kinds": ["member", "agent", "system"], "requires_review": false },
+    { "from": "READY", "to": "CANCELLED", "actor_kinds": ["member", "system"], "requires_review": false },
+    { "from": "CLAIMED", "to": "RUNNING", "actor_kinds": ["agent"], "requires_review": false },
+    { "from": "CLAIMED", "to": "READY", "actor_kinds": ["agent", "system"], "requires_review": false },
+    { "from": "CLAIMED", "to": "BLOCKED", "actor_kinds": ["agent", "system"], "requires_review": false },
+    { "from": "CLAIMED", "to": "FAILED", "actor_kinds": ["agent", "system"], "requires_review": false },
+    { "from": "CLAIMED", "to": "CANCELLED", "actor_kinds": ["member", "system"], "requires_review": false },
+    { "from": "RUNNING", "to": "WAITING_REVIEW", "actor_kinds": ["agent", "system"], "requires_review": true },
+    { "from": "RUNNING", "to": "BLOCKED", "actor_kinds": ["agent", "system"], "requires_review": false },
+    { "from": "RUNNING", "to": "FAILED", "actor_kinds": ["agent", "system"], "requires_review": false },
+    { "from": "RUNNING", "to": "CANCELLED", "actor_kinds": ["member", "system"], "requires_review": false },
+    { "from": "WAITING_REVIEW", "to": "APPROVED", "actor_kinds": ["member"], "requires_review": true, "via": "review" },
+    { "from": "WAITING_REVIEW", "to": "NEEDS_REVISION", "actor_kinds": ["member", "agent", "system"], "requires_review": true },
+    { "from": "WAITING_REVIEW", "to": "BLOCKED", "actor_kinds": ["member", "agent", "system"], "requires_review": false },
+    { "from": "NEEDS_REVISION", "to": "READY", "actor_kinds": ["member", "agent", "system"], "requires_review": false },
+    { "from": "NEEDS_REVISION", "to": "CLAIMED", "actor_kinds": ["agent"], "requires_review": false },
+    { "from": "NEEDS_REVISION", "to": "CANCELLED", "actor_kinds": ["member", "system"], "requires_review": false },
+    { "from": "BLOCKED", "to": "READY", "actor_kinds": ["member", "system"], "requires_review": false },
+    { "from": "BLOCKED", "to": "CANCELLED", "actor_kinds": ["member", "system"], "requires_review": false },
+    { "from": "FAILED", "to": "READY", "actor_kinds": ["member", "system"], "requires_review": false },
+    { "from": "FAILED", "to": "CANCELLED", "actor_kinds": ["member", "system"], "requires_review": false }
+  ]
+}

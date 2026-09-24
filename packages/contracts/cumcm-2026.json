@@ -1,0 +1,50 @@
+{
+  "pack_id": "cumcm-2026",
+  "display_name": "CUMCM 2026",
+  "version": "0.1.0",
+  "stages": [
+    "problem_intake",
+    "problem_analysis",
+    "data_profile",
+    "modeling",
+    "coding",
+    "simulation",
+    "review",
+    "paper",
+    "delivery"
+  ],
+  "artifact_mappings": {
+    "problem_analysis": "PROBLEM_ANALYSIS.md",
+    "problem_facts": "PROBLEM_FACTS.json",
+    "data_profile": "DATA_PROFILE.json",
+    "model_spec": "MODELING_REPORT.md",
+    "audit_report": "AUDIT_REPORT.md",
+    "review_report": "COMP_REVIEW.md",
+    "paper_source": "paper/"
+  },
+  "import_paths": [
+    "PROBLEM_ANALYSIS.md",
+    "PROBLEM_FACTS.json",
+    "DATA_PROFILE.json",
+    "MODELING_REPORT.md",
+    "AUDIT_REPORT.md",
+    "COMP_REVIEW.md",
+    "INFORMATION_BOUNDARY_REVIEW.md",
+    "code/",
+    "figures/",
+    "output/",
+    "paper/",
+    "user_data/"
+  ],
+  "workflow_tasks": [
+    { "stage": "problem_analysis", "title": "题面事实与数据画像", "outputs": ["problem_facts", "data_profile"] },
+    { "stage": "modeling", "title": "问题拆解与模型建立", "outputs": ["problem_analysis", "model_spec"] },
+    { "stage": "coding", "title": "代码实现与实验", "outputs": ["code", "run_manifest", "result_table"] },
+    { "stage": "review", "title": "独立复核与信息边界审计", "outputs": ["audit_report", "review_report"] },
+    { "stage": "delivery", "title": "论文编译与提交交付", "outputs": ["paper_source", "compiled_pdf", "submission_bundle"] }
+  ],
+  "information_boundary": {
+    "default_future_data_policy": "deny",
+    "requires_runtime_input_manifest": true
+  }
+}

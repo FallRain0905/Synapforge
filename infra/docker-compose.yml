@@ -1,0 +1,88 @@
+# 自托管部署（阶段 9 最小切片）
+#
+#   docker compose -f infra/docker-compose.yml up -d --build
+#
+# 起 4 个服务：postgres（事实库）、minio（对象存储）、api（控制平面）、web（工作台）。
+# 生产环境请覆盖所有默认口令，并把应用连接换成独立非 owner 角色
+# （见 docs/POSTGRES_REPOSITORY.md 的 app_runtime 说明）。
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: math_agent_platform
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-platform-dev-only}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - platform-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform -d math_agent_platform"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-platform}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-platform-dev-only}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - platform-minio:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js"]
+    ports:
+      - "${NATS_PORT:-4222}:4222"
+      - "${NATS_MONITOR_PORT:-8222}:8222"
+    # 开发版仍使用进程内广播；NATS 为后续 outbox 消费者与多实例事件预留。
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    environment:
+      # 开发版默认 SQLite；切换 PostgreSQL 时设置 DATABASE_URL。
+      DATABASE_URL: ${DATABASE_URL:-}
+      STAGE4_POSTGRES_DSN: ${STAGE4_POSTGRES_DSN:-postgresql://platform:${POSTGRES_PASSWORD:-platform-dev-only}@postgres:5432/math_agent_platform}
+      STAGE4_MINIO_ENDPOINT: ${STAGE4_MINIO_ENDPOINT:-http://minio:9000}
+      # 工作台来源白名单：远程访问时必填（默认只允许本机 3000），否则浏览器会 Failed to fetch。
+      PLATFORM_CORS_ORIGINS: ${PLATFORM_CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://localhost:${WEB_PORT:-3000}}
+      PLATFORM_QUOTA_MAX_RUNS_PER_PROJECT: ${PLATFORM_QUOTA_MAX_RUNS_PER_PROJECT:-2000}
+      PLATFORM_QUOTA_MAX_ARTIFACTS_PER_PROJECT: ${PLATFORM_QUOTA_MAX_ARTIFACTS_PER_PROJECT:-5000}
+      PLATFORM_QUOTA_MAX_STORAGE_BYTES_PER_PROJECT: ${PLATFORM_QUOTA_MAX_STORAGE_BYTES_PER_PROJECT:-5368709120}
+      PLATFORM_COST_PER_RUN: ${PLATFORM_COST_PER_RUN:-0}
+      PLATFORM_COST_PER_GB_MONTH: ${PLATFORM_COST_PER_GB_MONTH:-0}
+    ports:
+      - "${API_PORT:-8000}:8000"
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://127.0.0.1:8000}
+    depends_on:
+      - api
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+
+volumes:
+  platform-postgres:
+  platform-minio:

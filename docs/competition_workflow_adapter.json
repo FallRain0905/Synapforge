@@ -1,0 +1,180 @@
+{
+  "plugin_root": "C:\\Users\\19855\\Documents\\ChatGPT\\数学建模\\competition-workflow",
+  "pack_id": "cumcm",
+  "skill_count": 12,
+  "mapped_skill_count": 11,
+  "template_count": 9,
+  "check_count": 4,
+  "unmapped": [
+    "skills/feishu-notify",
+    "templates/README.md"
+  ],
+  "skills": [
+    {
+      "skill": "comp-code",
+      "has_skill_md": true,
+      "stage": "coding",
+      "produces": [
+        "code",
+        "result_table"
+      ]
+    },
+    {
+      "skill": "comp-compile-en",
+      "has_skill_md": true,
+      "stage": "delivery",
+      "produces": [
+        "compiled_pdf",
+        "submission_bundle"
+      ]
+    },
+    {
+      "skill": "comp-compile-zh",
+      "has_skill_md": true,
+      "stage": "delivery",
+      "produces": [
+        "compiled_pdf",
+        "submission_bundle"
+      ]
+    },
+    {
+      "skill": "comp-modeling",
+      "has_skill_md": true,
+      "stage": "modeling",
+      "produces": [
+        "model_spec"
+      ]
+    },
+    {
+      "skill": "comp-paper-en",
+      "has_skill_md": true,
+      "stage": "paper",
+      "produces": [
+        "paper_source"
+      ]
+    },
+    {
+      "skill": "comp-paper-en-docx",
+      "has_skill_md": true,
+      "stage": "paper",
+      "produces": [
+        "paper_source",
+        "compiled_pdf"
+      ]
+    },
+    {
+      "skill": "comp-paper-zh",
+      "has_skill_md": true,
+      "stage": "paper",
+      "produces": [
+        "paper_source"
+      ]
+    },
+    {
+      "skill": "comp-paper-zh-docx",
+      "has_skill_md": true,
+      "stage": "paper",
+      "produces": [
+        "paper_source",
+        "compiled_pdf"
+      ]
+    },
+    {
+      "skill": "comp-prob-analysis",
+      "has_skill_md": true,
+      "stage": "problem_analysis",
+      "produces": [
+        "problem_analysis",
+        "problem_facts"
+      ]
+    },
+    {
+      "skill": "comp-review",
+      "has_skill_md": true,
+      "stage": "review",
+      "produces": [
+        "review_report",
+        "audit_report"
+      ]
+    },
+    {
+      "skill": "comp-stats-topic",
+      "has_skill_md": true,
+      "stage": "problem_analysis",
+      "produces": [
+        "problem_analysis"
+      ]
+    },
+    {
+      "skill": "feishu-notify",
+      "has_skill_md": true,
+      "stage": null,
+      "produces": []
+    }
+  ],
+  "templates": [
+    {
+      "source": "templates/EXPERIMENT_LOG_TEMPLATE.md",
+      "pack_template_id": "experiment_plan",
+      "relationship": "equivalent"
+    },
+    {
+      "source": "templates/EXPERIMENT_PLAN_TEMPLATE.md",
+      "pack_template_id": "experiment_plan",
+      "relationship": "equivalent"
+    },
+    {
+      "source": "templates/FINDINGS_TEMPLATE.md",
+      "pack_template_id": "audit_report",
+      "relationship": "equivalent"
+    },
+    {
+      "source": "templates/IDEA_CANDIDATES_TEMPLATE.md",
+      "pack_template_id": "model_spec",
+      "relationship": "equivalent"
+    },
+    {
+      "source": "templates/NARRATIVE_REPORT_TEMPLATE.md",
+      "pack_template_id": "paper_outline",
+      "relationship": "equivalent"
+    },
+    {
+      "source": "templates/PAPER_PLAN_TEMPLATE.md",
+      "pack_template_id": "paper_outline",
+      "relationship": "equivalent"
+    },
+    {
+      "source": "templates/README.md",
+      "pack_template_id": null,
+      "relationship": null
+    },
+    {
+      "source": "templates/RESEARCH_BRIEF_TEMPLATE.md",
+      "pack_template_id": "problem_analysis",
+      "relationship": "equivalent"
+    },
+    {
+      "source": "templates/RESEARCH_CONTRACT_TEMPLATE.md",
+      "pack_template_id": "problem_analysis",
+      "relationship": "equivalent"
+    }
+  ],
+  "checks": [
+    {
+      "source": "scripts/capability_check.py",
+      "platform_entry": "pack:capability_checklist"
+    },
+    {
+      "source": "scripts/capability_audit.py",
+      "platform_entry": "pack:capability_checklist"
+    },
+    {
+      "source": "scripts/bib_authenticity_check.py",
+      "platform_entry": "pack:paper_source.references"
+    },
+    {
+      "source": "scripts/ai_disclosure_rules.md",
+      "platform_entry": "pack:paper_outline.compliance"
+    }
+  ]
+}

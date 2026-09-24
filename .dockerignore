@@ -1,0 +1,31 @@
+# Docker 构建上下文排除清单。
+#
+# 背景：infra/docker-compose.yml 的构建上下文是仓库根（context: ..），而仓库里混着
+# 本机构建产物与开发数据，总量约 3.4GB。没有这个文件时：
+#   1) 每次 docker build 都要把这几个 GB 传给守护进程；
+#   2) 更严重的是 apps/web/Dockerfile 里的 `COPY apps/web ./` 会把宿主机（如 Windows）的
+#      node_modules 覆盖进 Linux 镜像，@next/swc 平台二进制不匹配，构建会退化甚至失败。
+#
+# 注意：这些目录都是构建产物或本机数据，容器内由各自的 stage 重新生成/挂载，排除不会缺文件。
+
+**/node_modules
+**/.next
+**/__pycache__
+**/*.pyc
+
+# 本机自带的依赖副本：镜像内用 pip 从 PyPI 安装（见 apps/api/Dockerfile）
+apps/api/vendor
+
+# 运行期数据（SQLite 与对象目录）——绝不能进镜像
+apps/api/data
+
+# 本机开发基础设施与桌面端产物
+.infra
+dist-sidecar
+apps/desktop/dist
+dist-deploy
+
+# 备份与临时文件
+*.tar.gz
+tmp
+backups

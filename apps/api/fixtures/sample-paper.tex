@@ -1,0 +1,24 @@
+\documentclass[12pt]{ctexart}
+\usepackage{amsmath}
+\title{风光储能协同优化模型}
+\author{参赛队}
+\begin{document}
+\maketitle
+\begin{abstract}
+本文针对风光储能协同调度问题建立混合整数规划模型，目标为最小化 144 个时段的购电成本，
+并在功率平衡、充放电互斥与容量边界约束下求解。
+\end{abstract}
+\section{问题重述}
+题目要求给出逐时段计划购电曲线，并满足供需平衡与 SOC 递推约束。
+\section{模型建立}
+目标函数为
+\begin{equation}
+\min \sum_{t=1}^{144} c_t p_t
+\label{eq:objective}
+\end{equation}
+约束包括功率平衡、充放电互斥与容量边界，如式~\eqref{eq:objective} 所示。
+\section{求解结果}
+求解得到日内购电成本较基准方案下降 3.1 个百分点。
+\section{检验与推广}
+对光伏出力做正负十个百分点灵敏度分析，结论保持稳定。
+\end{document}

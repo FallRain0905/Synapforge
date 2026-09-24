@@ -1,0 +1,95 @@
+{
+  "schema_version": "1.0",
+  "schema_ref": "domain.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://math-agent-platform.local/contracts/domain.json",
+  "title": "Math Agent Platform Domain Contract",
+  "type": "object",
+  "required": ["schema_version", "schema_ref", "task_statuses", "handoff_statuses", "handoff_receipt_statuses", "handoff_recipient_types", "artifact_types", "lease_statuses", "run_statuses", "review_verdicts", "reviewer_kinds", "risk_severities", "gate_statuses", "event_outbox_statuses", "device_statuses", "device_pairing_statuses", "connection_statuses", "device_identity_algorithms", "execution_modes", "gateway_command_types", "gateway_command_result_statuses"],
+  "properties": {
+    "schema_version": { "type": "string" },
+    "schema_ref": { "type": "string" },
+    "task_statuses": {
+      "type": "array",
+      "items": { "enum": ["DRAFT", "READY", "CLAIMED", "RUNNING", "WAITING_REVIEW", "APPROVED", "BLOCKED", "NEEDS_REVISION", "FAILED", "CANCELLED"] }
+    },
+    "handoff_statuses": {
+      "type": "array",
+      "items": { "enum": ["PASS", "PASS_WITH_ASSUMPTIONS", "NEEDS_REVISION", "BLOCKED"] }
+    },
+  "handoff_receipt_statuses": {
+    "type": "array",
+    "items": { "enum": ["PENDING", "ACCEPTED", "REJECTED"] }
+  },
+  "handoff_recipient_types": {
+    "type": "array",
+    "items": { "enum": ["agent", "member", "team", "agent_group"] }
+  },
+    "artifact_types": {
+      "type": "array",
+      "items": { "enum": ["problem_source", "problem_facts", "problem_analysis", "data_profile", "model_spec", "code", "experiment_plan", "run_manifest", "result_table", "figure", "audit_report", "review_report", "paper_source", "compiled_pdf", "submission_bundle"] }
+    },
+    "lease_statuses": {
+      "type": "array",
+      "items": { "enum": ["ACTIVE", "RELEASED", "EXPIRED"] }
+    },
+    "run_statuses": {
+      "type": "array",
+      "items": { "enum": ["CREATED", "RUNNING", "SUCCEEDED", "FAILED", "BLOCKED"] }
+    },
+    "review_verdicts": {
+      "type": "array",
+      "items": { "enum": ["APPROVED", "NEEDS_REVISION", "BLOCKED"] }
+    },
+    "reviewer_kinds": {
+      "type": "array",
+      "items": { "enum": ["member", "agent", "system"] }
+    },
+    "risk_severities": {
+      "type": "array",
+      "items": { "enum": ["fatal", "major", "minor"] }
+    },
+  "gate_statuses": {
+    "type": "array",
+    "items": { "enum": ["OPEN", "PASSED", "FAILED", "BLOCKED", "INVALIDATED"] }
+  },
+    "event_outbox_statuses": {
+      "type": "array",
+      "items": { "enum": ["PENDING", "PROCESSING", "DELIVERED", "FAILED"] }
+    },
+    "device_statuses": {
+      "type": "array",
+      "items": { "enum": ["active", "revoked"] }
+    },
+    "device_pairing_statuses": {
+      "type": "array",
+      "items": { "enum": ["PENDING", "CONSUMED", "EXPIRED", "REVOKED"] }
+    },
+    "connection_statuses": {
+      "type": "array",
+      "items": { "enum": ["CONNECTING", "CONNECTED", "DISCONNECTED", "REVOKED"] }
+    },
+    "device_identity_algorithms": {
+      "type": "array",
+      "items": { "enum": ["ed25519"] },
+      "minItems": 1
+    },
+    "execution_modes": {
+      "type": "array",
+      "items": { "enum": ["HEADLESS", "USER_SESSION", "INTERACTIVE_DESKTOP"] }
+    },
+    "gateway_command_types": {
+      "type": "array",
+      "items": { "enum": ["agent.task.claim", "agent.task.lease.heartbeat", "agent.task.progress", "agent.task.result", "agent.run.create", "agent.run.complete", "agent.handoff.create", "agent.handoff.accept", "agent.handoff.reject", "agent.review.submit", "agent.artifact.create"] }
+    },
+    "gateway_command_result_statuses": {
+      "type": "array",
+      "items": { "enum": ["SUCCEEDED", "FAILED"] }
+    }
+  },
+  "device_identity_algorithms": ["ed25519"],
+  "handoff_recipient_types": ["agent", "member", "team", "agent_group"],
+  "gate_statuses": ["OPEN", "PASSED", "FAILED", "BLOCKED", "INVALIDATED"],
+  "gateway_command_types": ["agent.task.claim", "agent.task.lease.heartbeat", "agent.task.progress", "agent.task.result", "agent.run.create", "agent.run.complete", "agent.handoff.create", "agent.handoff.accept", "agent.handoff.reject", "agent.review.submit", "agent.artifact.create"],
+  "gateway_command_result_statuses": ["SUCCEEDED", "FAILED"]
+}

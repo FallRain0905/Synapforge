@@ -1,0 +1,7 @@
+pywinpty>=2.0,<3; sys_platform == "win32"
+cryptography>=42,<51
+# packages/agent_protocol 用 pydantic 定义 Gateway/Heartbeat 契约；以前靠 API 侧的依赖蹭着，
+# 在只有内核的机器（云端执行体）上会 ModuleNotFoundError，所以这里显式声明。
+pydantic>=2,<3
+# 运行期用 websockets 走 Gateway 长连（gateway_client 惰性导入）；HTTP 路径不需要它
+websockets>=12,<16

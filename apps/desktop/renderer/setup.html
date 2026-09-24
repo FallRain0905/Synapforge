@@ -1,0 +1,178 @@
+<!doctype html>
+<!-- 首次运行向导 + 本机状态页（DESKTOP-GUI D-1）：配服务器地址、可选配对、开机自启、内核状态与日志。
+     配色跟随平台的黑白灰。离线也能打开（纯本地文件）。 -->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+  <title>synapforge · 本机 Agent 与设置</title>
+  <style>
+    :root { color-scheme: dark; --bg:#111111; --panel:#171717; --line:#2a2a2a; --text:#ededed; --soft:#a3a3a3; --muted:#737373; --accent:#ededed; --up:#4ade80; --warn:#f6bd16; --bad:#f87171; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 18px 20px 28px; background: var(--bg); color: var(--text);
+           font: 13px/1.65 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+    h1 { font-size: 16px; margin: 0; }
+    h2 { font-size: 13px; margin: 0 0 8px; font-weight: 600; }
+    .hint { color: var(--soft); font-size: 12px; }
+    .muted { color: var(--muted); }
+    .card { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-top: 12px; background: var(--panel); }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .row.between { justify-content: space-between; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 7px; }
+    .grey { background: #9ca3af } .green { background: var(--up) } .yellow { background: var(--warn) } .red { background: var(--bad) }
+    input, textarea, select { width: 100%; background: #0d0d0d; color: var(--text); border: 1px solid var(--line);
+                              border-radius: 9px; padding: 8px 10px; font: inherit; }
+    label.field { display: grid; gap: 5px; margin-top: 10px; }
+    label.field > span { font-size: 12px; color: var(--soft); }
+    button { background: var(--accent); color: #111; border: 0; border-radius: 9px; padding: 8px 14px; font: inherit; font-weight: 550; cursor: pointer; }
+    button.secondary { background: #202020; color: var(--text); border: 1px solid var(--line); }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    pre { background: #0d0d0d; border: 1px solid var(--line); border-radius: 9px; padding: 9px; max-height: 150px; overflow: auto; font-size: 12px; margin: 6px 0 0; }
+    .chip { border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; font-size: 12px; color: var(--soft); }
+    .ok { color: var(--up) } .bad { color: var(--bad) }
+    .switch { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+    .switch input { width: auto; }
+    .steps { display: flex; gap: 8px; margin-top: 10px; }
+    .step { flex: 1; border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; font-size: 12px; color: var(--soft); }
+    .step.active { border-color: var(--accent); color: var(--text); }
+  </style>
+</head>
+<body>
+  <h1>synapforge · 本机 Agent 与设置</h1>
+  <div class="hint">连接、任务与凭据都在本机内核里（契约 v1）；这个页面只是壳的一部分，离线也能打开。</div>
+
+  <div class="card">
+    <div class="row between">
+      <div class="row"><span id="conn-dot" class="dot grey"></span><strong id="conn-text">正在连接内核…</strong>
+        <span class="chip" id="contract-chip">contract —</span></div>
+      <div class="row">
+        <button class="secondary" id="open-workbench">打开工作台</button>
+      </div>
+    </div>
+    <div class="hint" id="identity">未配对</div>
+    <div class="hint" id="last-error"></div>
+    <div class="steps">
+      <div class="step active" id="step-addr">① 服务器地址</div>
+      <div class="step" id="step-pair">② 接入平台</div>
+      <div class="step" id="step-run">③ 开始干活</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>设置</h2>
+    <label class="field"><span>平台地址（工作台与配对都用它）</span>
+      <input id="platform" placeholder="https://synapforge.top" /></label>
+    <div class="switch">
+      <input type="checkbox" id="auto-launch" />
+      <span>开机自启（托盘常驻后台领任务）</span>
+    </div>
+    <div class="row" style="margin-top: 12px">
+      <button id="save">保存设置</button>
+      <button class="secondary" id="check-update">检查更新</button>
+      <span class="hint" id="save-hint"></span>
+    </div>
+    <div class="hint" id="version"></div>
+  </div>
+
+  <div class="card">
+    <h2>接入平台（可选：也可以在工作台的「设备与接入」页点「接入这台电脑」）</h2>
+    <label class="field"><span>配对串（向导页复制）</span>
+      <textarea id="blob" rows="3" placeholder="粘贴配对串，或从平台深链一键填入"></textarea></label>
+    <div class="row" style="margin-top: 10px">
+      <button id="pair">完成配对</button>
+      <span class="hint" id="pair-hint"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>内核状态</h2>
+    <div class="row">
+      <button class="secondary" id="rescan">重扫本机 Agent</button>
+      <button class="secondary" id="pause">暂停领取</button>
+      <button class="secondary" id="emergency">紧急停止</button>
+    </div>
+    <div class="hint" id="inventory" style="margin-top: 10px"></div>
+    <pre id="logs">（日志会在内核就绪后出现）</pre>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const shell = window.synapforgeShell || window.shell;
+    let config = {};
+
+    function paint(snapshot) {
+      if (!snapshot) return;
+      const conn = snapshot.connection || {};
+      const dot = $("conn-dot");
+      const state = conn.state || "disconnected";
+      dot.className = "dot " + (snapshot.shell?.last_error ? "red" : !snapshot.shell?.paired ? "grey" : state === "connected" ? "green" : "yellow");
+      $("conn-text").textContent = state === "connected" ? "已连接平台" : "连接状态：" + state;
+      $("contract-chip").textContent = "contract " + (snapshot.shell?.contract || "—");
+      $("identity").textContent = snapshot.shell?.paired
+        ? "设备 " + (snapshot.identity?.device_id || "—") + (snapshot.identity?.project_id ? " · 项目 " + String(snapshot.identity.project_id).slice(0, 8) : " · 未授权项目")
+        : "未配对";
+      $("last-error").textContent = snapshot.shell?.last_error ? "最后错误：" + snapshot.shell.last_error : "";
+      $("last-error").className = snapshot.shell?.last_error ? "hint bad" : "hint";
+      const available = (snapshot.local_agents || []).filter((item) => item.state === "AVAILABLE");
+      $("inventory").textContent =
+        "可用执行体：" + (available.length ? available.map((item) => item.name + "（" + (item.version || "未报版本") + "）").join("、") : "还没有探测到可用的执行体");
+      const tasks = snapshot.tasks || {};
+      $("step-pair").className = "step" + (snapshot.shell?.paired ? " active" : "");
+      $("step-run").className = "step" + (Number(tasks.completed_since_start || 0) > 0 ? " active" : "");
+      $("pause").textContent = tasks.paused ? "恢复领取" : "暂停领取";
+      $("emergency").textContent = snapshot.emergency_stop ? "解除紧急停止" : "紧急停止";
+    }
+
+    async function boot() {
+      config = await shell.config();
+      $("platform").value = config.platform_url || "";
+      $("auto-launch").checked = Boolean(config.auto_launch);
+      $("version").textContent = "桌面端版本 " + (config.app_version || "—") + " · 配置目录由内核与壳共用";
+      paint(await shell.snapshot());
+      $("logs").textContent = (await shell.logs() || []).join("\n") || "（日志会在内核就绪后出现）";
+    }
+
+    shell.onStatus(paint);
+    shell.onLog((line) => {
+      const box = $("logs");
+      box.textContent = (box.textContent === "（日志会在内核就绪后出现）" ? "" : box.textContent + "\n") + line;
+      box.scrollTop = box.scrollHeight;
+    });
+
+    $("save").onclick = async () => {
+      const saved = await shell.saveConfig({
+        platform_url: $("platform").value.trim() || "https://synapforge.top",
+        auto_launch: $("auto-launch").checked,
+        configured: true,
+      });
+      $("save-hint").textContent = "已保存：" + saved.platform_url + "（工作台窗口请用「打开工作台」刷新）";
+      setTimeout(() => { $("save-hint").textContent = ""; }, 4000);
+    };
+    $("pair").onclick = async () => {
+      const blob = $("blob").value.trim();
+      if (!blob) { $("pair-hint").textContent = "请先粘贴配对串"; return; }
+      $("pair-hint").textContent = "配对中…";
+      try {
+        await shell.saveConfig({ configured: true });
+        await shell.pair($("platform").value.trim(), blob);
+        $("pair-hint").textContent = "配对成功：内核已开始领任务";
+      } catch (error) {
+        $("pair-hint").textContent = "配对失败：" + (error.message || error);
+      }
+    };
+    $("open-workbench").onclick = () => shell.openWorkbench();
+    $("rescan").onclick = () => shell.rescan();
+    $("pause").onclick = () => shell.togglePause();
+    $("emergency").onclick = () => shell.toggleEmergency();
+    $("check-update").onclick = async () => {
+      const result = await shell.checkUpdate();
+      $("save-hint").textContent = result?.ok
+        ? (result.up_to_date ? "已是最新版本（" + result.current + "）" : "有新版 " + result.latest + "，已打开下载页")
+        : "检查更新失败：" + (result?.error || "未知原因");
+    };
+    $("auto-launch").onchange = () => shell.setAutoLaunch($("auto-launch").checked);
+
+    void boot();
+  </script>
+</body>
+</html>

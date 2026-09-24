@@ -1,0 +1,59 @@
+{
+  "name": "math-agent-desktop",
+  "version": "0.2.1",
+  "private": true,
+  "description": "synapforge 桌面端客户端（内嵌工作台 + 托盘内核管理 + 通知/深链/更新检查）",
+  "main": "src/main.js",
+  "type": "commonjs",
+  "license": "ISC",
+  "scripts": {
+    "start": "electron .",
+    "start:debug": "electron . --enable-logging",
+    "build:win": "electron-builder --win nsis --x64",
+    "toolchain": "powershell -NoProfile -ExecutionPolicy Bypass -File ../../scripts/desktop-toolchain-check.ps1"
+  },
+  "devDependencies": {
+    "electron": "^44.4.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "top.synapforge.desktop",
+    "productName": "synapforge",
+    "files": [
+      "src/**",
+      "renderer/**",
+      "assets/**"
+    ],
+    "extraResources": [
+      {
+        "from": "../../dist-sidecar/math-agent-sidecar",
+        "to": "sidecar",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "artifactName": "synapforge-setup-${version}-x64.${ext}",
+      "target": [
+        "nsis"
+      ],
+      "icon": "assets/app-icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "shortcutName": "synapforge"
+    },
+    "protocols": [
+      {
+        "name": "synapforge Pairing",
+        "schemes": [
+          "map"
+        ]
+      }
+    ]
+  }
+}

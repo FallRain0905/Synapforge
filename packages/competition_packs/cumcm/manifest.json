@@ -1,0 +1,277 @@
+{
+  "pack_id": "cumcm",
+  "display_name": "CUMCM 数学建模竞赛工作流包",
+  "version": "1.1.0",
+  "schema_version": "1.0",
+  "description": "面向中国大学生数学建模竞赛（国赛）的领域工作流包：题面事实台账、数据画像、四问任务 DAG、建模/代码/实验/复核/论文模板，以及官方结果表与信息边界校验规则。",
+  "competition_aliases": [
+    "CUMCM",
+    "cumcm",
+    "国赛",
+    "c题",
+    "mcm-zh"
+  ],
+  "problem_codes": [
+    "A",
+    "B",
+    "C",
+    "D",
+    "E"
+  ],
+  "default_problem_code": "C",
+  "stage_sequence": [
+    "problem_intake",
+    "problem_analysis",
+    "modeling",
+    "coding",
+    "experiment",
+    "review",
+    "paper",
+    "delivery"
+  ],
+  "required_artifacts": [
+    "problem_analysis",
+    "problem_facts",
+    "data_profile",
+    "model_spec",
+    "code",
+    "experiment_plan",
+    "result_table",
+    "audit_report",
+    "review_report",
+    "paper_source"
+  ],
+  "optional_artifacts": [
+    "capability_checklist",
+    "cross_problem_ledger",
+    "figure",
+    "submission_bundle",
+    "compiled_pdf"
+  ],
+  "templates": [
+    {
+      "template_id": "problem_analysis",
+      "name": "赛题分析与能力清单",
+      "artifact_type": "problem_analysis",
+      "filename": "PROBLEM_ANALYSIS.md",
+      "stage": "problem_analysis",
+      "description": "拆解四问子问题、定义变量与符号、列出候选方法与图表清单，并给出题型无关的能力清单。",
+      "questions": [],
+      "official_format": false
+    },
+    {
+      "template_id": "problem_facts",
+      "name": "题面事实台账",
+      "artifact_type": "problem_facts",
+      "filename": "PROBLEM_FACTS.json",
+      "stage": "problem_intake",
+      "description": "题面参数、实体、时间口径与来源页码/文件哈希的机器可读台账，禁止写入题面之外的推测值。",
+      "questions": [],
+      "official_format": false
+    },
+    {
+      "template_id": "data_profile",
+      "name": "数据画像与字段审计",
+      "artifact_type": "data_profile",
+      "filename": "DATA_PROFILE.json",
+      "stage": "problem_intake",
+      "description": "附件数据的时间范围、字段类型、缺失值与口径，用于信息边界和数据截止时间判定。",
+      "questions": [],
+      "official_format": false
+    },
+    {
+      "template_id": "modeling_report",
+      "name": "数学模型与假设报告",
+      "artifact_type": "model_spec",
+      "filename": "MODELING_REPORT.md",
+      "stage": "modeling",
+      "description": "四问逐问给出数学模型、公式推导、求解思路与结果预期范围表。",
+      "questions": [],
+      "official_format": false
+    },
+    {
+      "template_id": "code_module",
+      "name": "代码与计算脚本说明",
+      "artifact_type": "code",
+      "filename": "CODE_README.md",
+      "stage": "coding",
+      "description": "每问代码入口、输入输出路径、运行命令、随机种子与可复现参数。",
+      "questions": [],
+      "official_format": false
+    },
+    {
+      "template_id": "experiment_plan",
+      "name": "实验与灵敏度计划",
+      "artifact_type": "experiment_plan",
+      "filename": "EXPERIMENT_PLAN.md",
+      "stage": "experiment",
+      "description": "每问的对照方案、灵敏度与鲁棒性实验块、成功判据和失败解释。",
+      "questions": [],
+      "official_format": false
+    },
+    {
+      "template_id": "result_table",
+      "name": "官方结果表",
+      "artifact_type": "result_table",
+      "filename": "RESULT_TABLE_TEMPLATE.md",
+      "stage": "experiment",
+      "description": "按赛题要求的提交结果表结构（时段/方案/汇总）登记结果文件名与校验状态。",
+      "questions": [],
+      "official_format": true
+    },
+    {
+      "template_id": "compliance_review",
+      "name": "独立复核报告",
+      "artifact_type": "review_report",
+      "filename": "COMP_REVIEW.md",
+      "stage": "review",
+      "description": "独立复算、量纲/边界检查、结论与限制说明；复核意见决定 Review 结论。",
+      "questions": [],
+      "official_format": false
+    },
+    {
+      "template_id": "paper_outline",
+      "name": "论文结构与写作模板",
+      "artifact_type": "paper_source",
+      "filename": "PAPER_OUTLINE.md",
+      "stage": "paper",
+      "description": "摘要、问题重述、假设、模型建立与求解、灵敏度、检验与推广的论文骨架与合规自查。",
+      "questions": [],
+      "official_format": true
+    }
+  ],
+  "validation_rules": {
+    "required_artifacts": {
+      "problem_analysis": {
+        "requires_questions": true,
+        "required_sections": [
+          "子问题拆解",
+          "变量与符号",
+          "图表清单"
+        ],
+        "min_words": 300
+      },
+      "problem_facts": {
+        "required_keys": [
+          "_meta.problem_id",
+          "_meta.source_files"
+        ],
+        "forbidden_keys": [
+          "guess",
+          "assumption_values"
+        ]
+      },
+      "data_profile": {
+        "required_keys": [
+          "datasets"
+        ],
+        "requires_declared_time_range": true
+      },
+      "model_spec": {
+        "requires_all_questions": true,
+        "required_sections": [
+          "模型建立",
+          "求解思路",
+          "结果预期"
+        ],
+        "min_words": 500
+      },
+      "code": {
+        "requires_entrypoint": true,
+        "requires_output_paths": true
+      },
+      "audit_report": {
+        "required_sections": [
+          "约束检查",
+          "灵敏度"
+        ],
+        "min_words": 200
+      },
+      "review_report": {
+        "required_sections": [
+          "独立复算",
+          "结论与限制"
+        ],
+        "min_words": 200
+      },
+      "result_table": {
+        "requires_official_filename": true,
+        "requires_hash": true
+      },
+      "paper_source": {
+        "required_sections": [
+          "摘要",
+          "问题重述",
+          "模型建立与求解",
+          "检验",
+          "推广"
+        ],
+        "min_words": 800
+      },
+      "experiment_plan": {
+        "required_sections": [
+          "论证主张映射",
+          "实验块",
+          "灵敏度与鲁棒性"
+        ],
+        "min_words": 200
+      }
+    },
+    "question_coverage": {
+      "expected_questions": [
+        1,
+        2,
+        3,
+        4
+      ],
+      "require_each_question_modeling": true,
+      "require_each_question_results": true,
+      "question_markers": [
+        "问题一",
+        "问题二",
+        "问题三",
+        "问题四"
+      ]
+    },
+    "information_boundary": {
+      "deny_future_data": true,
+      "require_declared_inputs": true,
+      "require_observation_mode": "system",
+      "fail_closed_on_missing_observation": true
+    },
+    "official_result_files": {
+      "1": "result1.xlsx",
+      "2": "result2.xlsx",
+      "3": "result3.xlsx",
+      "4": "result4.xlsx"
+    }
+  },
+  "boundary_rules": {
+    "data_cutoff_field": "information_boundary.data_cutoff",
+    "decision_time_field": "information_boundary.decision_time",
+    "declared_inputs_field": "information_boundary.declared_inputs",
+    "future_data_policy": "deny",
+    "runtime_dependency_roots": [
+      "python",
+      "site-packages",
+      "temp"
+    ],
+    "notes": "题面附件的可获取时间必须不晚于决策时间；预测类问题禁止使用决策时间之后的数据。"
+  },
+  "upgrade_rules": [
+    {
+      "from_version": "1.0.0",
+      "to_version": "1.1.0",
+      "compatibility": "compatible",
+      "added_artifacts": [
+        "capability_checklist",
+        "cross_problem_ledger"
+      ],
+      "renamed_artifacts": {
+        "review.md": "COMP_REVIEW.md"
+      },
+      "removed_artifacts": [],
+      "notes": "新增题型无关能力清单与跨问题台账；复核报告统一为 COMP_REVIEW.md 命名。"
+    }
+  ]
+}
