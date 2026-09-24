@@ -130,6 +130,7 @@ _SQLITE_SCHEMA = (
     CREATE TABLE IF NOT EXISTS file_transfer_sessions (
         id TEXT PRIMARY KEY,
         organization_id TEXT NOT NULL,
+        owner_member_id TEXT,
         operation_id TEXT,
         workspace_id TEXT,
         source_type TEXT NOT NULL,
@@ -149,6 +150,23 @@ _SQLITE_SCHEMA = (
     """,
     "CREATE INDEX IF NOT EXISTS file_transfer_sessions_status_idx ON file_transfer_sessions(status, expires_at)",
     "CREATE INDEX IF NOT EXISTS file_transfer_sessions_operation_idx ON file_transfer_sessions(operation_id)",
+    # FM-6 断点续传：分片表 + 会话上的多分片会话 id / 分片大小（老库用 _ensure_columns 补列）
+    """
+    CREATE TABLE IF NOT EXISTS file_transfer_parts (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL,
+        transfer_id TEXT NOT NULL REFERENCES file_transfer_sessions(id),
+        part_number INTEGER NOT NULL,
+        size_bytes INTEGER NOT NULL DEFAULT 0,
+        content_hash TEXT NOT NULL DEFAULT '',
+        etag TEXT NOT NULL DEFAULT '',
+        attempts INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS file_transfer_parts_unique_idx ON file_transfer_parts(transfer_id, part_number)",
+    "CREATE INDEX IF NOT EXISTS file_transfer_parts_transfer_idx ON file_transfer_parts(transfer_id)",
     """
     CREATE TABLE IF NOT EXISTS workspace_audit (
         id TEXT PRIMARY KEY,
@@ -178,11 +196,35 @@ def _schema_ready(store: Any) -> bool:
         return True
 
 
+def _ensure_columns(store: Any, table: str, columns: dict[str, str]) -> None:
+    """给已建好的表补列（老库升级用；PG 侧由迁移的 ADD COLUMN IF NOT EXISTS 负责）。"""
+
+    try:
+        existing = {row["name"] for row in store.db.execute(f"PRAGMA table_info({table})")}
+    except Exception:  # noqa: BLE001 - 非 SQLite：跳过
+        return
+    for name, definition in columns.items():
+        if name not in existing:
+            store.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
 def ensure_schema(store: Any) -> None:
     if _schema_ready(store):
+        # 表在 ≠ 列齐：老库（FM-5 之前建的）缺 FM-6 的两列，这里补齐
+        _ensure_columns(
+            store,
+            "file_transfer_sessions",
+            {"multipart_upload_id": "TEXT", "part_size_bytes": "INTEGER NOT NULL DEFAULT 0", "owner_member_id": "TEXT"},
+        )
+        store.db.commit()
         return
     for statement in _SQLITE_SCHEMA:
         store.db.execute(statement)
+    _ensure_columns(
+        store,
+        "file_transfer_sessions",
+        {"multipart_upload_id": "TEXT", "part_size_bytes": "INTEGER NOT NULL DEFAULT 0", "owner_member_id": "TEXT"},
+    )
     store.db.commit()
 
 
@@ -881,6 +923,8 @@ def _row_to_transfer(row: Any) -> dict[str, Any]:
         "expected_hash": _field(row, "expected_hash"),
         "uploaded_size": int(_field(row, "uploaded_size", 0)),
         "status": str(_field(row, "status", "initialized")),
+        "multipart_upload_id": _field(row, "multipart_upload_id"),
+        "part_size_bytes": int(_field(row, "part_size_bytes", 0) or 0),
         "expires_at": _field(row, "expires_at"),
         "created_at": _field(row, "created_at"),
         "updated_at": _field(row, "updated_at"),
@@ -916,14 +960,15 @@ def create_transfer(
         store.db.execute(
             """
             INSERT INTO file_transfer_sessions
-                (id, organization_id, operation_id, workspace_id, source_type, source_id, source_hash,
+                (id, organization_id, owner_member_id, operation_id, workspace_id, source_type, source_id, source_hash,
                  target_type, target_id, storage_key, expected_size, expected_hash, uploaded_size, status,
                  expires_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'initialized', ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'initialized', ?, ?, ?)
             """,
             (
                 transfer_id,
                 actor.organization_id,
+                actor.member_id,
                 operation_id,
                 workspace_id,
                 source_type,
@@ -992,9 +1037,18 @@ def read_transfer_content(store: Any, actor: WorkspaceActor, transfer_id: str, *
 
 @_with_schema
 def get_transfer(store: Any, actor: WorkspaceActor, transfer_id: str) -> dict[str, Any]:
+    """取一个传输会话：**按成员收口**（内容可能是他从自己私有云盘搬出来的，同组织也不行）。
+
+    `owner_member_id` 为空的历史行（FM-6 之前建的）按"同组织可见"兜底——避免老数据突然读不到。
+    """
+
     row = store.db.execute(
-        "SELECT * FROM file_transfer_sessions WHERE id = ? AND organization_id = ?",
-        (str(transfer_id), actor.organization_id),
+        """
+        SELECT * FROM file_transfer_sessions
+        WHERE id = ? AND organization_id = ?
+          AND (owner_member_id IS NULL OR owner_member_id = ?)
+        """,
+        (str(transfer_id), actor.organization_id, actor.member_id),
     ).fetchone()
     if row is None:
         raise WorkspaceError("workspace_transfer_not_found")
@@ -1003,8 +1057,8 @@ def get_transfer(store: Any, actor: WorkspaceActor, transfer_id: str) -> dict[st
 
 @_with_schema
 def list_transfers(store: Any, actor: WorkspaceActor, *, operation_id: str | None = None) -> list[dict[str, Any]]:
-    clauses = ["organization_id = ?"]
-    params: list[Any] = [actor.organization_id]
+    clauses = ["organization_id = ?", "(owner_member_id IS NULL OR owner_member_id = ?)"]
+    params: list[Any] = [actor.organization_id, actor.member_id]
     if operation_id:
         clauses.append("operation_id = ?")
         params.append(str(operation_id))
@@ -1013,6 +1067,214 @@ def list_transfers(store: Any, actor: WorkspaceActor, *, operation_id: str | Non
         tuple(params),
     ).fetchall()
     return [_row_to_transfer(row) for row in rows]
+
+
+MAX_PART_NUMBER = 10000  # S3 的硬限制
+DEFAULT_PART_SIZE = 8 * 1024 * 1024
+
+
+def _row_to_part(row: Any) -> dict[str, Any]:
+    return {
+        "part_number": int(row["part_number"]),
+        "size_bytes": int(_field(row, "size_bytes", 0)),
+        "content_hash": str(_field(row, "content_hash", "")),
+        "etag": str(_field(row, "etag", "")),
+        "attempts": int(_field(row, "attempts", 1)),
+        "updated_at": _field(row, "updated_at"),
+    }
+
+
+@_with_schema
+def list_transfer_parts(store: Any, actor: WorkspaceActor, transfer_id: str) -> dict[str, Any]:
+    """续传游标：已经收到哪些片、每片的 sha256、还缺哪些（客户端据此只补缺的）。"""
+
+    transfer = get_transfer(store, actor, transfer_id)
+    rows = store.db.execute(
+        "SELECT * FROM file_transfer_parts WHERE transfer_id = ? ORDER BY part_number ASC", (str(transfer_id),)
+    ).fetchall()
+    parts = [_row_to_part(row) for row in rows]
+    received = [item["part_number"] for item in parts]
+    expected_size = int(transfer.get("expected_size") or 0)
+    # 分片大小：**没收到过任何片时如实报 0（未知）**——切片大小是客户端的选择，
+    # 平台只回显"观察到的那个"（首片落地后才有）。报个默认值会让客户端以为平台要求 8MB，
+    # 于是把整份大文件当一片传（验收脚本真踩到过）。
+    part_size = int(transfer.get("part_size_bytes") or 0)
+    # total/missing 是**提示**：收口只认"片号从 1 连续 + 长度之和 == 声明大小"，
+    # 所以客户端切片与提示不同也不会把文件拼坏，最多多补一片
+    total_parts = ((expected_size + part_size - 1) // part_size) if (expected_size and part_size) else 0
+    missing = [number for number in range(1, total_parts + 1) if number not in received] if total_parts else []
+    return {
+        "transfer_id": str(transfer_id),
+        "status": transfer["status"],
+        "part_size_bytes": part_size,
+        "expected_size": expected_size,
+        "expected_hash": transfer.get("expected_hash"),
+        "total_parts": total_parts,
+        "received_parts": received,
+        "missing_parts": missing,
+        "received_bytes": sum(item["size_bytes"] for item in parts),
+        "parts": parts,
+    }
+
+
+def _ensure_multipart(store: Any, actor: WorkspaceActor, transfer: dict[str, Any], part_size: int) -> str:
+    """发起（或复用）对象存储的多分片会话。"""
+
+    existing = str(transfer.get("multipart_upload_id") or "")
+    if existing:
+        return existing
+    upload_id = store.object_store.initiate_multipart(str(transfer["storage_key"]), None)
+    with _transaction(store):
+        store.db.execute(
+            "UPDATE file_transfer_sessions SET multipart_upload_id = ?, part_size_bytes = ?, status = 'uploading', updated_at = ? WHERE id = ?",
+            (str(upload_id), int(part_size), _now(), str(transfer["id"])),
+        )
+    return str(upload_id)
+
+
+@_with_schema
+def upload_transfer_part(
+    store: Any,
+    actor: WorkspaceActor,
+    transfer_id: str,
+    part_number: int,
+    content: bytes,
+    *,
+    part_hash: str | None = None,
+) -> dict[str, Any]:
+    """上传一片。同一片重传 = 覆盖（重试的常态），并写入新的 sha256。"""
+
+    transfer = get_transfer(store, actor, transfer_id)
+    if transfer["status"] in {"consumed", "expired", "failed"}:
+        raise WorkspaceError("workspace_transfer_expired", transfer["status"])
+    if not isinstance(part_number, int) or part_number < 1 or part_number > MAX_PART_NUMBER:
+        raise WorkspaceError("workspace_transfer_part_invalid", str(part_number))
+    if not content:
+        raise WorkspaceError("workspace_transfer_part_empty", str(part_number))
+    digest = hashlib.sha256(content).hexdigest()
+    if part_hash and str(part_hash) != digest:
+        raise WorkspaceError("workspace_transfer_part_hash_mismatch", f"{part_hash}!={digest}")
+    # 分片大小以**首片**为准：客户端切多大，游标就按多大推"还缺哪些"。
+    # 收口时不靠这个推出来的 total_parts，而是靠"片号从 1 连续 + 长度之和 == 声明大小"。
+    part_size = int(transfer.get("part_size_bytes") or 0)
+    if part_size <= 0 or int(part_number) == 1:
+        part_size = len(content)
+    upload_id = _ensure_multipart(store, actor, transfer, part_size)
+    try:
+        etag = store.object_store.upload_part(str(upload_id), int(part_number), content, key=str(transfer["storage_key"]))
+    except KeyError as error:
+        raise WorkspaceError("workspace_transfer_not_found", "multipart_upload_missing") from error
+    timestamp = _now()
+    existing = store.db.execute(
+        "SELECT id, attempts FROM file_transfer_parts WHERE transfer_id = ? AND part_number = ?",
+        (str(transfer_id), int(part_number)),
+    ).fetchone()
+    with _transaction(store):
+        if existing is None:
+            store.db.execute(
+                """
+                INSERT INTO file_transfer_parts
+                    (id, organization_id, transfer_id, part_number, size_bytes, content_hash, etag, attempts, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                """,
+                (str(uuid4()), actor.organization_id, str(transfer_id), int(part_number), len(content), digest, str(etag), timestamp, timestamp),
+            )
+        else:
+            store.db.execute(
+                "UPDATE file_transfer_parts SET size_bytes = ?, content_hash = ?, etag = ?, attempts = attempts + 1, updated_at = ? WHERE id = ?",
+                (len(content), digest, str(etag), timestamp, str(existing["id"])),
+            )
+        store.db.execute(
+            """
+            UPDATE file_transfer_sessions
+            SET uploaded_size = (SELECT COALESCE(SUM(size_bytes), 0) FROM file_transfer_parts WHERE transfer_id = ?),
+                status = 'uploading', updated_at = ?
+            WHERE id = ?
+            """,
+            (str(transfer_id), timestamp, str(transfer_id)),
+        )
+    return {"part": _row_to_part(store.db.execute("SELECT * FROM file_transfer_parts WHERE transfer_id = ? AND part_number = ?", (str(transfer_id), int(part_number))).fetchone()),
+            "cursor": list_transfer_parts(store, actor, transfer_id)}
+
+
+@_with_schema
+def complete_transfer_upload(store: Any, actor: WorkspaceActor, transfer_id: str) -> dict[str, Any]:
+    """收口：所有片都到齐才拼装；拼完再比对整体 sha256（对不上就删对象并标 failed）。"""
+
+    transfer = get_transfer(store, actor, transfer_id)
+    cursor = list_transfer_parts(store, actor, transfer_id)
+    upload_id = str(transfer.get("multipart_upload_id") or "")
+    if not upload_id:
+        raise WorkspaceError("workspace_transfer_not_found", "multipart_not_started")
+    received_numbers = [item["part_number"] for item in cursor["parts"]]
+    if not received_numbers:
+        raise WorkspaceError("workspace_transfer_parts_missing", "none")
+    expected_numbers = list(range(1, len(received_numbers) + 1))
+    if received_numbers != expected_numbers:
+        # 片号必须从 1 连续（对象存储的多分片也要求这样）：缺片就明确报缺哪些
+        missing = [number for number in range(1, max(received_numbers) + 1) if number not in received_numbers]
+        raise WorkspaceError("workspace_transfer_parts_missing", ",".join(str(item) for item in missing[:20]))
+    expected_size = int(transfer.get("expected_size") or 0)
+    received = int(cursor["received_bytes"])
+    if expected_size and received != expected_size:
+        # 差得少时先回答"还缺哪几片"（对续传最有用）：按已观察到的片大小推总片数，
+        # 只有推不出缺片（例如末片被截短）才报长度不符
+        if received < expected_size and received_numbers:
+            observed_part = cursor["parts"][0]["size_bytes"] or 0
+            if observed_part:
+                expected_total = (expected_size + observed_part - 1) // observed_part
+                missing = [number for number in range(1, expected_total + 1) if number not in received_numbers]
+                if missing:
+                    raise WorkspaceError("workspace_transfer_parts_missing", ",".join(str(item) for item in missing[:20]))
+        raise WorkspaceError("workspace_transfer_size_mismatch", f"{received}!={expected_size}")
+    try:
+        stored = store.object_store.complete_multipart(upload_id, key=str(transfer["storage_key"]))
+    except (KeyError, ValueError) as error:
+        raise WorkspaceError("workspace_transfer_complete_failed", str(error)) from error
+    expected_hash = transfer.get("expected_hash")
+    timestamp = _now()
+    if expected_hash and str(stored.content_hash) != str(expected_hash):
+        # 整体对不上：删掉刚拼出来的对象，标 failed（不把坏数据交出去）
+        try:
+            store.object_store.delete(str(transfer["storage_key"]))
+        except Exception:  # noqa: BLE001 - 删不掉不影响"拒绝交付"的结论
+            pass
+        with _transaction(store):
+            store.db.execute(
+                "UPDATE file_transfer_sessions SET status = 'failed', uploaded_size = ?, updated_at = ? WHERE id = ?",
+                (received, timestamp, str(transfer_id)),
+            )
+        raise WorkspaceError("workspace_transfer_hash_mismatch", f"{stored.content_hash}!={expected_hash}")
+    with _transaction(store):
+        store.db.execute(
+            """
+            UPDATE file_transfer_sessions
+            SET status = 'ready', uploaded_size = ?, expected_size = ?, source_hash = ?, multipart_upload_id = NULL, updated_at = ?
+            WHERE id = ?
+            """,
+            (received, received, stored.content_hash, timestamp, str(transfer_id)),
+        )
+    return {"transfer": get_transfer(store, actor, transfer_id), "cursor": list_transfer_parts(store, actor, transfer_id)}
+
+
+@_with_schema
+def abort_transfer_upload(store: Any, actor: WorkspaceActor, transfer_id: str) -> dict[str, Any]:
+    """放弃续传：作废对象存储里的分片会话并删掉已收的分片记录（不留半成品）。"""
+
+    transfer = get_transfer(store, actor, transfer_id)
+    upload_id = str(transfer.get("multipart_upload_id") or "")
+    if upload_id:
+        try:
+            store.object_store.abort_multipart(upload_id, key=str(transfer["storage_key"]))
+        except Exception:  # noqa: BLE001 - 后端可能已经没有这个会话了
+            pass
+    with _transaction(store):
+        store.db.execute("DELETE FROM file_transfer_parts WHERE transfer_id = ?", (str(transfer_id),))
+        store.db.execute(
+            "UPDATE file_transfer_sessions SET status = 'failed', multipart_upload_id = NULL, uploaded_size = 0, updated_at = ? WHERE id = ?",
+            (_now(), str(transfer_id)),
+        )
+    return {"transfer": get_transfer(store, actor, transfer_id), "aborted": True}
 
 
 @_with_schema
@@ -1030,14 +1292,23 @@ def cleanup_expired_transfers(store: Any, actor: WorkspaceActor) -> dict[str, in
         deadline = _parse_time(_field(row, "expires_at"))
         if deadline is None or deadline > now:
             continue
+        upload_id = str(_field(row, "multipart_upload_id") or "")
+        if upload_id:
+            # 半成品分片也要清掉（否则 .multipart/ 会一直涨）
+            try:
+                store.object_store.abort_multipart(upload_id, key=str(row["storage_key"]))
+            except Exception:  # noqa: BLE001
+                pass
         try:
             store.object_store.delete(str(row["storage_key"]))
             deleted += 1
         except Exception:  # noqa: BLE001 - 删不掉就把状态留成 expired，对象留给运维扫描
             pass
         with _transaction(store):
+            store.db.execute("DELETE FROM file_transfer_parts WHERE transfer_id = ?", (str(row["id"]),))
             store.db.execute(
-                "UPDATE file_transfer_sessions SET status = 'expired', updated_at = ? WHERE id = ?", (_now(), str(row["id"]))
+                "UPDATE file_transfer_sessions SET status = 'expired', multipart_upload_id = NULL, updated_at = ? WHERE id = ?",
+                (_now(), str(row["id"])),
             )
         expired += 1
     return {"expired": expired, "objects_deleted": deleted}
@@ -1081,19 +1352,23 @@ def is_protected(workspace: dict[str, Any], relative_path: str, *, root_is_prote
 
 
 __all__ = [
+    "DEFAULT_PART_SIZE",
     "LARGE_FILE_BYTES",
+    "MAX_PART_NUMBER",
     "OPERATION_STATUSES",
     "OPERATION_TYPES",
     "TERMINAL_STATUSES",
     "WRITE_OPERATION_TYPES",
     "WorkspaceActor",
     "WorkspaceError",
+    "abort_transfer_upload",
     "actor_for",
     "audit_log",
     "cancel_operation",
     "claim_operations",
     "cleanup_expired_transfers",
     "complete_operation",
+    "complete_transfer_upload",
     "create_operation",
     "create_transfer",
     "ensure_schema",
@@ -1103,6 +1378,7 @@ __all__ = [
     "get_workspace",
     "is_protected",
     "list_operations",
+    "list_transfer_parts",
     "list_transfers",
     "list_workspaces",
     "mark_agent_offline",
@@ -1114,6 +1390,7 @@ __all__ = [
     "request_hash",
     "start_operation",
     "touch_workspace",
+    "upload_transfer_part",
     "validate_relative_path",
     "workspace_identity_for",
     "write_transfer_content",

@@ -48,7 +48,7 @@ import {
   getWorkspaceOperation,
   getWorkspaceTransferContent,
   isWorkspaceOperationFinished,
-  putWorkspaceTransferContent,
+  putWorkspaceTransferChunked,
   runWorkspaceOperation,
   saveTransferToDrive,
 } from "../../lib/api";
@@ -290,8 +290,16 @@ export function WorkspaceBrowser({
           expected_hash: digest,
           expected_size: file.size,
         });
-        await putWorkspaceTransferContent(transfer.transfer.id, file);
+        // 大文件走分片（断点续传 + 每片重试）；小文件一次 PUT
+        const transferResult = await putWorkspaceTransferChunked(transfer.transfer.id, file, {
+          onProgress: (percent) =>
+            setUploads((previous) => previous.map((job, position) => (position === index ? { ...job, percent: Math.round(percent * 0.6) } : job))),
+        });
         setUploads((previous) => previous.map((job, position) => (position === index ? { ...job, percent: 60 } : job)));
+        if (transferResult.mode === "chunked" && transferResult.resumed) {
+          // 续传：已经传过的片没重传，如实说一句
+          note(`${file.name}：续传（跳过已传的 ${transferResult.resumed}/${transferResult.parts} 片）`);
+        }
         const target = path ? `${path}/${file.name}` : file.name;
         const operation = await run(`upload-${file.name}`, {
           operation_type: "upload",

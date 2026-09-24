@@ -3362,3 +3362,97 @@ export async function listFileTransfers(params: { workspaceId?: string; limit?: 
   if (!response.ok) throw await apiError(response, "传输历史读取失败");
   return response.json();
 }
+
+/** 分片上传的默认片大小（与服务端观察到的对齐；服务端没收到片时会回 0 = 由客户端定）。 */
+export const WORKSPACE_TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
+
+/** 传输会话的分片游标：已收到哪些、还缺哪些（续传只补缺的）。 */
+export async function getWorkspaceTransferParts(transferId: string): Promise<{
+  part_size_bytes: number;
+  expected_size: number;
+  total_parts: number;
+  received_parts: number[];
+  missing_parts: number[];
+  parts: { part_number: number; size_bytes: number; content_hash: string }[];
+}> {
+  const response = await apiFetch(`${API_URL}/api/workspace-transfers/${transferId}/parts`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "分片游标读取失败", { workspace_transfer_not_found: "传输会话不存在或已过期" });
+  return response.json();
+}
+
+async function sha256OfBlob(content: Blob): Promise<string> {
+  const buffer = await content.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * 把内容分片传进传输会话：**大文件才走这条**（小文件一次 PUT 更省事）。
+ *
+ * 续传的要点与内核侧一致：先问服务端已经收到哪些片，哈希一致的就跳过；每片单独重试；
+ * 全部到齐再 `complete`。这样中途断网只要重传缺的那几片。
+ */
+export async function putWorkspaceTransferChunked(
+  transferId: string,
+  content: Blob,
+  options: { chunkBytes?: number; retries?: number; onProgress?: (percent: number) => void } = {},
+): Promise<{ mode: "single" | "chunked"; parts: number; uploaded: number; resumed: number }> {
+  const chunkBytes = options.chunkBytes ?? WORKSPACE_TRANSFER_CHUNK_BYTES;
+  const retries = options.retries ?? 3;
+  if (content.size <= chunkBytes) {
+    await putWorkspaceTransferContent(transferId, content);
+    options.onProgress?.(100);
+    return { mode: "single", parts: 1, uploaded: 1, resumed: 0 };
+  }
+  const cursor = await getWorkspaceTransferParts(transferId);
+  const partSize = cursor.part_size_bytes || chunkBytes;
+  const existing = new Map(cursor.parts.map((item) => [item.part_number, item.content_hash]));
+  const parts: Blob[] = [];
+  for (let offset = 0; offset < content.size; offset += partSize) {
+    parts.push(content.slice(offset, Math.min(offset + partSize, content.size)));
+  }
+  let uploaded = 0;
+  let resumed = 0;
+  for (const [index, chunk] of parts.entries()) {
+    const number = index + 1;
+    const digest = await sha256OfBlob(chunk);
+    if (existing.get(number) === digest) {
+      resumed += 1;
+      options.onProgress?.(Math.round(((index + 1) / parts.length) * 100));
+      continue;
+    }
+    let lastError = "";
+    for (let attempt = 1; attempt <= retries; attempt += 1) {
+      const response = await apiFetch(`${API_URL}/api/workspace-transfers/${transferId}/parts/${number}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/octet-stream", "X-Part-SHA256": digest },
+        body: chunk,
+      });
+      if (response.ok) {
+        uploaded += 1;
+        lastError = "";
+        break;
+      }
+      const failure = await apiError(response, `第 ${number} 片上传失败`, {
+        workspace_transfer_part_hash_mismatch: "这一片的内容与声明的哈希不一致",
+        workspace_transfer_expired: "传输会话已过期（重新发起）",
+      });
+      lastError = `${failure.message}（第 ${attempt} 次）`;
+      await new Promise((resolve) => setTimeout(resolve, Math.min(2000, 300 * attempt)));
+    }
+    if (lastError) {
+      throw new Error(`第 ${number} 片反复失败：${lastError}`);
+    }
+    options.onProgress?.(Math.round(((index + 1) / parts.length) * 100));
+  }
+  const completed = await apiFetch(`${API_URL}/api/workspace-transfers/${transferId}/complete`, { method: "POST" });
+  if (!completed.ok) {
+    throw await apiError(completed, "分片收口失败", {
+      workspace_transfer_parts_missing: "还有分片没传上去（平台拒绝收口，避免拼出半个文件）",
+      workspace_transfer_hash_mismatch: "整体哈希与声明不符，已拒绝",
+    });
+  }
+  return { mode: "chunked", parts: parts.length, uploaded, resumed };
+}

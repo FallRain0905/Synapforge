@@ -27,9 +27,11 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import shutil
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -189,6 +191,92 @@ def _entry(path: Path, root: Path, relative: str, *, deep: bool = False) -> dict
 # ---- Worker -----------------------------------------------------------------
 
 
+DEFAULT_CHUNK_BYTES = 8 * 1024 * 1024
+DEFAULT_CHUNK_RETRIES = 3
+
+
+def upload_transfer_content(
+    http: Callable[..., Any],
+    *,
+    url: str,
+    headers: dict[str, str],
+    transfer_id: str,
+    content: bytes,
+    chunk_bytes: int = DEFAULT_CHUNK_BYTES,
+    retries: int = DEFAULT_CHUNK_RETRIES,
+    log: Callable[[str], None] = print,
+) -> dict[str, Any]:
+    """把内容传进传输会话：小文件一次 PUT；大文件分片 + 断点续传 + 每片重试。
+
+    为什么分片：几百 MB 的文件一次性 PUT，中途断一次就得从头再来——而"大文件"恰恰最容易断。
+    续传的做法是**先问服务端已经收到哪些片**（`GET .../parts`），只补缺的；接收到的片只要
+    sha256 与本机算出来的一致就跳过（不一致说明那片坏了，重传）。
+    """
+
+    base = url.rstrip("/")
+    total_hash = hashlib.sha256(content).hexdigest()
+    if len(content) <= max(1024, int(chunk_bytes)):
+        status, payload = http("PUT", f"{base}/api/agent/workspace-transfers/{transfer_id}/content", headers=headers, body=content)
+        if status not in (200, 201):
+            raise FileWorkerError("workspace_transfer_failed", f"{status}:{str(payload)[:120]}")
+        return {"mode": "single", "size_bytes": len(content), "sha256": total_hash, "parts": 1, "uploaded_parts": [], "resumed_parts": []}
+
+    status, cursor = http("GET", f"{base}/api/agent/workspace-transfers/{transfer_id}/parts", headers=headers, body=None)
+    if status != 200 or not isinstance(cursor, dict):
+        raise FileWorkerError("workspace_transfer_failed", f"parts_cursor:{status}")
+    # 服务端没收到过任何片时会给 0（未知）：这时按**本机配置**切；续传时用服务端观察到的那个，
+    # 保证与已经传上去的片对齐
+    part_size = int(cursor.get("part_size_bytes") or 0) or int(chunk_bytes)
+    existing = {int(item["part_number"]): str(item.get("content_hash") or "") for item in cursor.get("parts") or []}
+
+    chunks = [(index, content[offset : offset + part_size]) for index, offset in enumerate(range(0, len(content), part_size), start=1)]
+    uploaded: list[int] = []
+    resumed: list[int] = []
+    client_retries: dict[str, int] = {}  # 片号 → 客户端侧重试次数（平台看不到那些没到达的请求）
+    for number, chunk in chunks:
+        digest = hashlib.sha256(chunk).hexdigest()
+        if existing.get(number) == digest:
+            resumed.append(number)  # 服务端已经有这一片且内容一致：不重传
+            continue
+        last_error = ""
+        for attempt in range(1, max(1, int(retries)) + 1):
+            status, payload = http(
+                "PUT",
+                f"{base}/api/agent/workspace-transfers/{transfer_id}/parts/{number}",
+                headers={**headers, "X-Part-SHA256": digest, "Content-Type": "application/octet-stream"},
+                body=chunk,
+            )
+            if status in (200, 201):
+                uploaded.append(number)
+                last_error = ""
+                break
+            last_error = f"{status}:{str(payload)[:100]}"
+            client_retries[str(number)] = client_retries.get(str(number), 0) + 1
+            log(f"[files] 第 {number} 片第 {attempt} 次失败：{last_error}（稍后重试）")
+            time.sleep(min(2.0, 0.3 * attempt))
+        if last_error:
+            # 失败也要能说清"重试了几次"：平台侧只统计到达它的请求，网络层失败的次数只有客户端知道
+            raise FileWorkerError(
+                "workspace_transfer_part_failed",
+                f"part={number} retries={client_retries.get(str(number), 0)} {last_error}",
+            )
+
+    status, payload = http("POST", f"{base}/api/agent/workspace-transfers/{transfer_id}/complete", headers=headers, body=b"{}")
+    if status not in (200, 201):
+        raise FileWorkerError("workspace_transfer_complete_failed", f"{status}:{str(payload)[:120]}")
+    return {
+        "mode": "chunked",
+        "size_bytes": len(content),
+        "sha256": total_hash,
+        "parts": len(chunks),
+        "uploaded_parts": uploaded,
+        "resumed_parts": resumed,
+        # 客户端侧重试次数如实回报：平台那份 attempts 只统计"到达平台的请求"，
+        # 网络层就失败的次数只有客户端知道（对账"到底重试了没有"要用这个）
+        "client_retries": client_retries,
+    }
+
+
 @dataclass
 class FileWorkerConfig:
     url: str
@@ -199,6 +287,10 @@ class FileWorkerConfig:
     device_id: str | None = None
     workspace_id: str | None = None
     protected_paths: list[str] = field(default_factory=list)
+    # 断点续传（FM-6）：超过 chunk_bytes 的文件走分片上传；每片最多重试 chunk_retries 次。
+    # 分片大小默认与服务端一致（8MB），服务端定下的 part_size 优先。
+    chunk_bytes: int = DEFAULT_CHUNK_BYTES
+    chunk_retries: int = DEFAULT_CHUNK_RETRIES
     idle_seconds: float = 3.0
     lease_seconds: int = 120
     limit: int = 4
@@ -369,12 +461,27 @@ class WorkspaceFileWorker:
         if not target.is_file():
             raise FileWorkerError("workspace_path_invalid", "not_a_file")
         content = target.read_bytes()
-        status, payload = self._call(
-            "PUT", f"/api/agent/workspace-transfers/{transfer_id}/content", raw_body=content
+        # 大文件走分片 + 续传（小文件仍是一次 PUT，省一次往返）
+        transfer = upload_transfer_content(
+            self._http,
+            url=self.config.url,
+            headers=self._headers(),
+            transfer_id=transfer_id,
+            content=content,
+            chunk_bytes=int(self.config.chunk_bytes or DEFAULT_CHUNK_BYTES),
+            retries=int(self.config.chunk_retries or DEFAULT_CHUNK_RETRIES),
+            log=self.log,
         )
-        if status not in (200, 201):
-            raise FileWorkerError("workspace_transfer_failed", f"{status}:{str(payload)[:120]}")
-        return {"relative_path": normalized, "size_bytes": len(content), "sha256": _sha256(content), "transfer_id": transfer_id}
+        return {
+            "relative_path": normalized,
+            "size_bytes": len(content),
+            "sha256": transfer["sha256"],
+            "transfer_id": transfer_id,
+            "transfer_mode": transfer["mode"],
+            "parts": transfer["parts"],
+            "resumed_parts": transfer.get("resumed_parts", []),
+            "client_retries": transfer.get("client_retries", {}),
+        }
 
     def _op_rename(self, relative: str, arguments: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -483,6 +590,8 @@ def _sha256(content: bytes) -> str:
 
 
 __all__ = [
+    "DEFAULT_CHUNK_BYTES",
+    "DEFAULT_CHUNK_RETRIES",
     "DEFAULT_PROTECTED",
     "FileWorkerConfig",
     "FileWorkerError",
@@ -491,5 +600,6 @@ __all__ = [
     "WorkspaceFileWorker",
     "is_protected",
     "safe_path",
+    "upload_transfer_content",
     "validate_relative",
 ]

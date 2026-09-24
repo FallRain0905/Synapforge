@@ -64,6 +64,7 @@ class PlatformContractTests(unittest.TestCase):
                 "029_drive_nodes.sql",
                 "030_agent_workspaces.sql",
                 "031_drive_grants.sql",
+                "032_file_transfer_parts.sql",
             ],
         )
         initial = files[0].read_text(encoding="utf-8").lower()
@@ -105,6 +106,14 @@ class PlatformContractTests(unittest.TestCase):
         self.assertIn("agents_package_id_idx", agent_description)
         self.assertIn("update agents set instance_id = agent_id", agent_description)
         self.assertNotIn("?", agent_description)
+        # 032（FM-6 断点续传）：分片表 + 会话上的多分片会话 id / 分片大小 / 属主
+        parts = files[31].read_text(encoding="utf-8").lower()
+        self.assertIn("create table if not exists file_transfer_parts", parts)
+        self.assertIn("alter table file_transfer_parts enable row level security", parts)
+        self.assertIn("file_transfer_parts_unique_idx", parts)
+        for column in ["multipart_upload_id", "part_size_bytes", "owner_member_id"]:
+            self.assertIn(f"add column if not exists {column}", parts)
+        self.assertNotIn("?", parts)
         # 031（FM-5 云盘授权）：Grant / Grant Node / Lease，三张表都要有 RLS
         grants = files[30].read_text(encoding="utf-8").lower()
         for table in ["file_access_grants", "file_access_grant_nodes", "file_access_leases"]:

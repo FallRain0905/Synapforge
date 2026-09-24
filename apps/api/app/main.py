@@ -2321,6 +2321,93 @@ def read_workspace_transfer(transfer_id: str, request: Request) -> Response:
     return Response(content=content, media_type="application/octet-stream", headers=headers)
 
 
+# ---- 断点续传（FM-6）：分片上传与续传游标 -------------------------------------
+#
+# 人类侧与 Agent 侧各有一套（与 `/content` 的两套同源）：
+#   ① 传一片：`PUT .../parts/{n}`（同一片重传=覆盖，重试的常态）
+#   ② 看游标：`GET .../parts` → 已收到哪些、还缺哪些（只补缺的，不重传已传的）
+#   ③ 收口：  `POST .../complete` → 片不齐明确报缺哪些；拼完再比对整体 sha256
+#   ④ 放弃：  `POST .../abort` → 作废分片会话、清半成品
+
+
+@app.get("/api/workspace-transfers/{transfer_id}/parts", response_model=dict[str, Any])
+def list_workspace_transfer_parts(transfer_id: str, request: Request) -> dict[str, Any]:
+    actor = _workspace_actor(request)
+    try:
+        return workspace_files.list_transfer_parts(store, actor, transfer_id)
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+
+
+@app.put("/api/workspace-transfers/{transfer_id}/parts/{part_number}", response_model=dict[str, Any])
+async def put_workspace_transfer_part(transfer_id: str, part_number: int, request: Request) -> dict[str, Any]:
+    actor = _workspace_actor(request)
+    body = await request.body()
+    try:
+        return workspace_files.upload_transfer_part(
+            store, actor, transfer_id, part_number, body, part_hash=request.headers.get("X-Part-SHA256")
+        )
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+
+
+@app.post("/api/workspace-transfers/{transfer_id}/complete", response_model=dict[str, Any])
+def complete_workspace_transfer(transfer_id: str, request: Request) -> dict[str, Any]:
+    actor = _workspace_actor(request)
+    try:
+        return workspace_files.complete_transfer_upload(store, actor, transfer_id)
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+
+
+@app.post("/api/workspace-transfers/{transfer_id}/abort", response_model=dict[str, Any])
+def abort_workspace_transfer(transfer_id: str, request: Request) -> dict[str, Any]:
+    actor = _workspace_actor(request)
+    try:
+        return workspace_files.abort_transfer_upload(store, actor, transfer_id)
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+
+
+@app.get("/api/agent/workspace-transfers/{transfer_id}/parts", response_model=dict[str, Any])
+def agent_list_workspace_transfer_parts(transfer_id: str, request: Request) -> dict[str, Any]:
+    agent_id = request.headers.get("X-Agent-Id", "")
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id_required")
+    actor = _agent_transfer_actor(request, agent_id, "workspace.files.read")
+    try:
+        return workspace_files.list_transfer_parts(store, actor, transfer_id)
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+
+
+@app.put("/api/agent/workspace-transfers/{transfer_id}/parts/{part_number}", response_model=dict[str, Any])
+async def agent_put_workspace_transfer_part(transfer_id: str, part_number: int, request: Request) -> dict[str, Any]:
+    agent_id = request.headers.get("X-Agent-Id", "")
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id_required")
+    actor = _agent_transfer_actor(request, agent_id, "workspace.files.write")
+    body = await request.body()
+    try:
+        return workspace_files.upload_transfer_part(
+            store, actor, transfer_id, part_number, body, part_hash=request.headers.get("X-Part-SHA256")
+        )
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+
+
+@app.post("/api/agent/workspace-transfers/{transfer_id}/complete", response_model=dict[str, Any])
+def agent_complete_workspace_transfer(transfer_id: str, request: Request) -> dict[str, Any]:
+    agent_id = request.headers.get("X-Agent-Id", "")
+    if not agent_id:
+        raise HTTPException(status_code=400, detail="agent_id_required")
+    actor = _agent_transfer_actor(request, agent_id, "workspace.files.write")
+    try:
+        return workspace_files.complete_transfer_upload(store, actor, transfer_id)
+    except workspace_files.WorkspaceError as error:
+        raise _workspace_error(error) from error
+
+
 @app.get("/api/agent-workspaces/{workspace_id}/audit", response_model=dict[str, Any])
 def workspace_audit_log(workspace_id: str, request: Request, limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
     actor = _workspace_actor(request)
