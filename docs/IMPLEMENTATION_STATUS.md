@@ -916,8 +916,11 @@ JSON parse: domain schemas, agent gateway/session schemas    -> passed
 - **验收** `scripts/deploy/_fm6_verify.py` **15/15**（真 HTTP + 真 Worker：传输往返、并发 8 路全部有终态、
   同名冲突如实失败、回收删对象、扫描不删对象）。测试：`test_file_transfers.py` 12 项、`test_s3_object_store.py` 5 项。
 - **测试抓到的真问题**：会话与操作之间没对号（`operation_id` 不回填）→ 传输历史看不到成败与原因；已修。
+- **前端跨空间传输入口已做并过浏览器实机**（2026-09-24 追加）：云盘侧「复制到工作区」（目标路径 + 允许覆盖）、
+  工作区侧「保存到云盘」（自动两步 + 同名冲突给改名入口）；实机走通双向、冲突与改名；
+  顺带修掉一个真 bug——切换「位置」不回云盘不重拉目录（新存的文件不出现）。
 - **未做（逐条）**：断点续传、真 MinIO/S3 端到端（本机无 Docker）、PostgreSQL/RLS 真机验证、
-  长时间 soak 与备份/恢复演练、定时回收任务、**前端跨空间传输入口**、旧接口 `Deprecation` 头。
+  长时间 soak 与备份/恢复演练、定时回收任务、批量跨空间传输、旧接口 `Deprecation` 头。
 - 交接 `docs/handoffs/FM_6_FILE_TRANSFER_HARDENING_HANDOFF.md`（含 FM 全计划收尾状态与下一步建议顺序）。
 
 ## FM-5 云盘文件访问授权与 Agent 读取（2026-09-24：**已交付，平台 20 + 内核 6 + 端到端 22/22**）
@@ -931,8 +934,10 @@ JSON parse: domain schemas, agent gateway/session schemas    -> passed
   接入 `daemon-run --drive-grant <id>`。
 - **测试抓到真问题**：授权列表原先只按组织收口 → 同组织同事能看到你的授权对象；已改为按 `owner_member_id` 收口。
 - 验收 `scripts/deploy/_fm5_verify.py` **22/22**（含撤销演练：撤销后同段 lease 立刻失效、已物化副本按计划保留）。
-- **偏差**：前端授权面板（详情抽屉「授权给哪些 Agent」+ 一键撤销）已写完并通过构建，但**未做浏览器实机**；
-  `/devices` 的授权视图没做；续期接口可用但页面无入口。交接 `docs/handoffs/FM_5_AGENT_DRIVE_GRANTS_HANDOFF.md`。
+- **前端已过浏览器实机**（2026-09-24 追加）：详情抽屉「授权给哪些 Agent」显示空态 → 弹窗授权
+  （选工作区 + 1/7/30 天）→ 卡片显示 `agent-fm4 · 这个文件 · 到期 …` → 一键撤销后显示「已撤销」；
+  平台侧核对 capabilities 只含三项只读能力、`revoked_at` 已写入。
+- **偏差**：`/devices` 的授权视图没做；续期接口可用但页面无入口。交接 `docs/handoffs/FM_5_AGENT_DRIVE_GRANTS_HANDOFF.md`。
 
 ## FM-3 Agent 工作区文件服务（2026-09-24：**已交付，内核 20 + 平台 22 + 端到端 27/27**）
 

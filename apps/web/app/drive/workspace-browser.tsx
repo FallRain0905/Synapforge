@@ -33,6 +33,7 @@ import {
   Square,
   Trash2,
   Upload,
+  UploadCloud,
   WifiOff,
   XCircle,
 } from "lucide-react";
@@ -42,11 +43,14 @@ import {
   WorkspaceEntry,
   WorkspaceOperation,
   cancelWorkspaceOperation,
+  copyWorkspaceFileToDrive,
   createWorkspaceTransfer,
+  getWorkspaceOperation,
   getWorkspaceTransferContent,
   isWorkspaceOperationFinished,
   putWorkspaceTransferContent,
   runWorkspaceOperation,
+  saveTransferToDrive,
 } from "../../lib/api";
 import { formatTime } from "../../components/shell";
 
@@ -140,10 +144,22 @@ export function WorkspaceBrowser({
   const [moveTargets, setMoveTargets] = useState<WorkspaceEntry[] | null>(null);
   const [moveDestination, setMoveDestination] = useState("");
   const [uploads, setUploads] = useState<{ name: string; percent: number; error: string }[]>([]);
+  const [saveState, setSaveState] = useState<{
+    entry: WorkspaceEntry;
+    transferId: string;
+    status: string;
+    conflict: boolean;
+    name: string;
+    error: string;
+  } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const offline = workspace.status !== "online";
   const breadcrumb = useMemo(() => ["工作区", ...path.split("/").filter(Boolean)], [path]);
+
+  // 本地消息条（工作区这侧没有 toast 队列，用一行"最近结果"如实展示成败）
+  const [notes, setNotes] = useState<string[]>([]);
+  const note = useCallback((message: string) => setNotes((previous) => [message, ...previous].slice(0, 3)), []);
 
   const track = useCallback((operation: WorkspaceOperation) => {
     setOperations((previous) => {
@@ -383,6 +399,63 @@ export function WorkspaceBrowser({
     }
   };
 
+  const handleSaveToDrive = async (entry: WorkspaceEntry) => {
+    setBusy(`save-${entry.relative_path}`);
+    setSaveState({ entry, transferId: "", status: "已入队，等 Agent 把文件传到传输会话…", conflict: false, name: entry.name, error: "" });
+    try {
+      const started = await copyWorkspaceFileToDrive({ workspaceId: workspace.id, relativePath: entry.relative_path });
+      const transferId = started.transfer.id;
+      track(started.operation);
+      setSaveState((previous) => (previous ? { ...previous, transferId, status: "排队中（Agent 还没领）" } : previous));
+      const deadline = Date.now() + 90_000;
+      let operation = started.operation;
+      while (!isWorkspaceOperationFinished(operation)) {
+        if (Date.now() > deadline) {
+          setSaveState((previous) => (previous ? { ...previous, status: "等太久还没结果（Agent 可能不在线）；操作留在队列里，可以在下面取消" } : previous));
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        operation = (await getWorkspaceOperation(workspace.id, operation.id)).operation;
+        track(operation);
+        setSaveState((previous) =>
+          previous
+            ? { ...previous, status: operation.status === "claimed" ? "Agent 已领取，正在读文件…" : operation.status === "running" ? "正在传…" : previous.status }
+            : previous,
+        );
+      }
+      if (operation.status !== "succeeded") {
+        setSaveState((previous) =>
+          previous ? { ...previous, error: `Agent 没能把文件传上来：${operation.error_code ?? operation.status}`, status: "" } : previous,
+        );
+        return;
+      }
+      const saved = await saveTransferToDrive({ transferId, name: entry.name });
+      setSaveState(null);
+      note(`已存进云盘：${saved.node.name}（${saved.saved_bytes} 字节）`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "保存到云盘失败";
+      const conflict = message.includes("同名");
+      setSaveState((previous) => (previous ? { ...previous, conflict, error: conflict ? "" : message, status: "" } : previous));
+      if (!conflict) notify(message);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const retrySaveWithNewName = async () => {
+    if (!saveState?.transferId) return;
+    setBusy("save-rename");
+    try {
+      const saved = await saveTransferToDrive({ transferId: saveState.transferId, name: saveState.name.trim() || saveState.entry.name });
+      setSaveState(null);
+      note(`已存进云盘：${saved.node.name}`);
+    } catch (error) {
+      setSaveState((previous) => (previous ? { ...previous, error: error instanceof Error ? error.message : "仍失败" } : previous));
+    } finally {
+      setBusy("");
+    }
+  };
+
   const handleCopy = async (entry: WorkspaceEntry) => {
     const operation = await run("copy", {
       operation_type: "copy",
@@ -594,9 +667,20 @@ export function WorkspaceBrowser({
                 </span>
                 <span className="drive-cell-actions">
                   {entry.kind === "file" ? (
-                    <button className="drive-icon-button" title="下载" disabled={busy !== ""} onClick={() => void handleDownload(entry)}>
-                      <Download size={15} />
-                    </button>
+                    <>
+                      <button className="drive-icon-button" title="下载" disabled={busy !== ""} onClick={() => void handleDownload(entry)}>
+                        <Download size={15} />
+                      </button>
+                      <button
+                        className="drive-icon-button"
+                        title="保存到个人云盘"
+                        disabled={busy !== ""}
+                        data-testid={`workspace-save-${entry.name}`}
+                        onClick={() => void handleSaveToDrive(entry)}
+                      >
+                        <UploadCloud size={15} />
+                      </button>
+                    </>
                   ) : null}
                   {entry.kind === "file" && entry.name.toLowerCase().endsWith(".zip") ? (
                     <button className="drive-icon-button" title="解压到当前目录" disabled={busy !== ""} onClick={() => void handleExtract(entry)}>
@@ -659,9 +743,14 @@ export function WorkspaceBrowser({
           </dl>
           <div className="drive-drawer-actions">
             {detail.kind === "file" ? (
-              <button className="text-button" disabled={busy !== ""} onClick={() => void handleDownload(detail)}>
-                <Download size={14} /> 下载
-              </button>
+              <>
+                <button className="text-button" disabled={busy !== ""} onClick={() => void handleDownload(detail)}>
+                  <Download size={14} /> 下载
+                </button>
+                <button className="text-button" data-testid="workspace-save-to-drive" disabled={busy !== ""} onClick={() => void handleSaveToDrive(detail)}>
+                  <UploadCloud size={14} /> 保存到云盘
+                </button>
+              </>
             ) : null}
             {isProtected(workspace, protectedPaths, detail.relative_path) ? (
               <span className="hint">受保护路径不给改动入口</span>
@@ -686,6 +775,51 @@ export function WorkspaceBrowser({
             )}
           </div>
         </aside>
+      ) : null}
+
+      {saveState ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setSaveState(null)}>
+          <div className="modal" role="dialog" aria-modal="true" data-testid="workspace-save-modal" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div>
+                <h2>保存到个人云盘</h2>
+                <p>{saveState.entry.name} · 显式保存一次（云盘里那份是复制）</p>
+              </div>
+              <button className="app-icon" aria-label="关闭" onClick={() => setSaveState(null)}>
+                ×
+              </button>
+            </div>
+            {saveState.status ? <p className="hint" data-testid="workspace-save-status">{saveState.status}</p> : null}
+            {saveState.conflict ? (
+              <>
+                <p className="hint">云盘里已有同名文件（不会覆盖）。换个名字再存一次：</p>
+                <label className="drive-grant-field">
+                  <span>存成</span>
+                  <input
+                    value={saveState.name}
+                    data-testid="workspace-save-name"
+                    onChange={(event) => setSaveState((previous) => (previous ? { ...previous, name: event.target.value } : previous))}
+                  />
+                </label>
+              </>
+            ) : null}
+            {saveState.error ? (
+              <p className="drive-danger" data-testid="workspace-save-error">
+                {saveState.error}
+              </p>
+            ) : null}
+            <div className="modal-actions">
+              <button className="button button-secondary" onClick={() => setSaveState(null)}>
+                关闭
+              </button>
+              {saveState.conflict ? (
+                <button className="button button-primary" data-testid="workspace-save-retry" disabled={busy !== ""} onClick={() => void retrySaveWithNewName()}>
+                  存成这个名字
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
       ) : null}
 
       {moveTargets ? (
@@ -776,6 +910,11 @@ export function WorkspaceBrowser({
                   <XCircle size={13} /> 取消
                 </button>
               )}
+            </div>
+          ))}
+          {notes.map((line) => (
+            <div className="drive-job drive-note" key={line}>
+              {line}
             </div>
           ))}
           {failedUploads.length ? <p className="hint">失败的传输在上面的进度区里如实列出，不会标成成功。</p> : null}

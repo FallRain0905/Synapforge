@@ -31,6 +31,7 @@ import {
   Move,
   Pencil,
   RefreshCcw,
+  FolderInput,
   Search,
   ShieldCheck,
   Square,
@@ -67,6 +68,8 @@ import {
   AgentWorkspace,
   FileAccessGrant,
   createFileAccessGrant,
+  copyDriveFileToWorkspace,
+  getWorkspaceOperation,
   listAgentWorkspaces,
   listFileAccessGrants,
   revokeFileAccessGrant,
@@ -116,6 +119,11 @@ export default function DrivePage() {
   const [pendingTrash, setPendingTrash] = useState<DriveNode[] | null>(null);
   const [pendingPurge, setPendingPurge] = useState<DriveNode | null>(null);
   const [grantTarget, setGrantTarget] = useState<DriveNode | null>(null);
+  const [copyTarget, setCopyTarget] = useState<DriveNode | null>(null);
+  const [copyWorkspaceId, setCopyWorkspaceId] = useState("");
+  const [copyPath, setCopyPath] = useState("");
+  const [copyOverwrite, setCopyOverwrite] = useState(false);
+  const [copyStatus, setCopyStatus] = useState("");
   const [grantWorkspaceId, setGrantWorkspaceId] = useState("");
   const [grantDays, setGrantDays] = useState(7);
   const [importTarget, setImportTarget] = useState<DriveNode | null>(null);
@@ -191,6 +199,14 @@ export default function DrivePage() {
   useEffect(() => {
     void loadWorkspaces();
   }, [loadWorkspaces]);
+
+  // 切回「个人云盘」时**必须重新拉一次目录**：否则看到的是上次进云盘时的旧列表。
+  // 实测踩到：从工作区「保存到云盘」成功后切回来，新文件不出现（平台其实已经有了）。
+  // 依赖只放 sourceId：换根才是"需要刷新"的信号，加别的依赖会把每次渲染都变成一次请求。
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (sourceId === "drive" && view === "files") void loadNodes(parentId);
+  }, [sourceId]);
 
   const showDetail = useCallback(
     async (node: DriveNode) => {
@@ -423,6 +439,60 @@ export default function DrivePage() {
       notify(`已入队转换（job: ${String(job.id).slice(0, 8)}）；完成后可在知识库页写入`);
     } catch (error) {
       notify(error instanceof Error ? error.message : "转换入队失败");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const openCopyToWorkspace = (node: DriveNode) => {
+    setCopyTarget(node);
+    setCopyPath(node.name);
+    setCopyOverwrite(false);
+    setCopyStatus("");
+    if (!copyWorkspaceId && workspaces.length) setCopyWorkspaceId(workspaces[0].id);
+  };
+
+  const handleCopyToWorkspace = async () => {
+    const workspace = workspaces.find((item) => item.id === copyWorkspaceId);
+    if (!workspace || !copyTarget) {
+      notify("请先选择目标工作区");
+      return;
+    }
+    setBusy("copy-to-workspace");
+    setCopyStatus("已入队，等 Agent 领取…");
+    try {
+      const payload = await copyDriveFileToWorkspace({
+        nodeId: copyTarget.id,
+        workspaceId: workspace.id,
+        relativePath: copyPath.trim() || copyTarget.name,
+        overwrite: copyOverwrite,
+      });
+      // 轮询到终态：**不乐观假成功**——Agent 没执行完就一直显示排队/执行中
+      const deadline = Date.now() + 90_000;
+      let operation = payload.operation;
+      while (!["succeeded", "failed", "cancelled", "expired"].includes(operation.status)) {
+        if (Date.now() > deadline) {
+          setCopyStatus("等太久还没结果（Agent 可能不在线）；操作留在队列里，可以在工作区那侧取消");
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        operation = (await getWorkspaceOperation(workspace.id, operation.id)).operation;
+        setCopyStatus(operation.status === "queued" ? "排队中（Agent 还没领）" : operation.status === "claimed" ? "Agent 已领取" : "Agent 执行中…");
+      }
+      if (operation.status === "succeeded") {
+        setCopyStatus("");
+        setCopyTarget(null);
+        note(`已复制到 ${workspace.display_name}：${copyPath.trim() || copyTarget.name}`);
+      } else {
+        setCopyStatus(
+          operation.error_code === "workspace_path_conflict"
+            ? "目标已存在同名文件（默认不覆盖）：换个路径，或勾上「允许覆盖」再试"
+            : `失败：${operation.error_code ?? operation.status}`,
+        );
+      }
+    } catch (error) {
+      setCopyStatus("");
+      notify(error instanceof Error ? error.message : "复制到工作区失败");
     } finally {
       setBusy("");
     }
@@ -782,9 +852,14 @@ export default function DrivePage() {
                 </span>
                 <span className="drive-cell-actions">
                   {node.kind === "file" ? (
-                    <button className="drive-icon-button" title="下载" onClick={() => void handleDownload(node)}>
-                      <Download size={15} />
-                    </button>
+                    <>
+                      <button className="drive-icon-button" title="下载" onClick={() => void handleDownload(node)}>
+                        <Download size={15} />
+                      </button>
+                      <button className="drive-icon-button" title="复制到 Agent 工作区" onClick={() => openCopyToWorkspace(node)}>
+                        <FolderInput size={15} />
+                      </button>
+                    </>
                   ) : null}
                   {node.is_archive ? (
                     <button className="drive-icon-button" title="解压" disabled={busy !== ""} onClick={() => void handleExtract(node)}>
@@ -938,6 +1013,11 @@ export default function DrivePage() {
             <button className="text-button" data-testid="drive-grant-open" onClick={() => setGrantTarget(detail.node)}>
               <ShieldCheck size={14} /> 授权给 Agent
             </button>
+            {detail.node.kind === "file" ? (
+              <button className="text-button" data-testid="drive-copy-to-workspace" onClick={() => openCopyToWorkspace(detail.node)}>
+                <FolderInput size={14} /> 复制到工作区
+              </button>
+            ) : null}
             {detail.node.is_archive ? (
               <button className="text-button" disabled={busy !== ""} onClick={() => void handleExtract(detail.node)}>
                 <FileArchive size={14} /> 解压
@@ -1097,6 +1177,59 @@ export default function DrivePage() {
             void handlePurge(target);
           }}
         />
+      ) : null}
+
+      {copyTarget ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setCopyTarget(null)}>
+          <div className="modal" role="dialog" aria-modal="true" data-testid="drive-copy-modal" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-heading">
+              <div>
+                <h2>复制到 Agent 工作区</h2>
+                <p>{copyTarget.name} · 显式复制一次（不做后台同步）</p>
+              </div>
+              <button className="app-icon" aria-label="关闭" onClick={() => setCopyTarget(null)}>
+                ×
+              </button>
+            </div>
+            <label className="drive-grant-field">
+              <span>目标工作区</span>
+              <select value={copyWorkspaceId} onChange={(event) => setCopyWorkspaceId(event.target.value)} data-testid="drive-copy-workspace">
+                <option value="">选择工作区…</option>
+                {workspaces.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.display_name}（{item.status === "online" ? "在线" : "离线"}）
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="drive-grant-field">
+              <span>目标相对路径（留空 = 用文件名）</span>
+              <input
+                value={copyPath}
+                data-testid="drive-copy-path"
+                onChange={(event) => setCopyPath(event.target.value)}
+                placeholder="papers/数据.csv"
+              />
+            </label>
+            <label className="drive-grant-field drive-grant-check">
+              <input type="checkbox" checked={copyOverwrite} onChange={(event) => setCopyOverwrite(event.target.checked)} />
+              <span>允许覆盖工作区里的同名文件（默认不覆盖）</span>
+            </label>
+            {copyStatus ? (
+              <p className="hint" data-testid="drive-copy-status">
+                {copyStatus}
+              </p>
+            ) : null}
+            <div className="modal-actions">
+              <button className="button button-secondary" onClick={() => setCopyTarget(null)}>
+                关闭
+              </button>
+              <button className="button button-primary" data-testid="drive-copy-confirm" disabled={busy !== "" || !copyWorkspaceId} onClick={() => void handleCopyToWorkspace()}>
+                复制
+              </button>
+            </div>
+          </div>
+        </div>
       ) : null}
 
       {grantTarget ? (

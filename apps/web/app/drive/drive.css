@@ -605,3 +605,27 @@
   background: var(--surface, #fff);
   font-size: 13px;
 }
+
+/* 跨空间传输弹窗里的"允许覆盖"勾选：全局 input{width:100%} 会把它拉成整行 */
+.drive-grant-check {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  display: grid;
+}
+
+.drive-grant-check input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.drive-grant-field input[type="text"],
+.drive-grant-field input:not([type]) {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border, #d8dbe0);
+  border-radius: 8px;
+  font-size: 13px;
+}

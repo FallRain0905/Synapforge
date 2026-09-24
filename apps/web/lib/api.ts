@@ -3263,3 +3263,102 @@ export async function revokeFileAccessGrant(grantId: string, reason = "revoked_b
   if (!response.ok) throw await apiError(response, "撤销失败");
   return response.json();
 }
+
+// ---- 显式跨空间传输（FM-6） ------------------------------------------------
+//
+// 语义是"显式动作"：点一次 = 复制一次（不是后台同步）。云端 → 工作区由平台把内容搬进传输会话、
+// 再入队一个 upload 操作；工作区 → 云端则反过来，Agent 传完再由人确认"存进云盘"。
+// 同名默认**不覆盖**：冲突会明确报出来，让用户改名或换目录。
+
+export type FileTransferSession = {
+  id: string;
+  operation_id: string | null;
+  workspace_id: string | null;
+  source_type: string;
+  target_type: string;
+  source_id: string | null;
+  source_hash: string | null;
+  expected_hash: string | null;
+  expected_size: number;
+  uploaded_size: number;
+  status: string;
+  expires_at: string;
+};
+
+export async function copyDriveFileToWorkspace(payload: {
+  nodeId: string;
+  workspaceId: string;
+  relativePath?: string | null;
+  overwrite?: boolean;
+}): Promise<{ transfer: FileTransferSession; operation: WorkspaceOperation }> {
+  const response = await apiFetch(`${API_URL}/api/file-transfers/drive-to-workspace`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      node_id: payload.nodeId,
+      workspace_id: payload.workspaceId,
+      relative_path: payload.relativePath ?? null,
+      overwrite: payload.overwrite ?? false,
+    }),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "复制到工作区失败", {
+      file_node_not_found: "这个文件读不到（可能已被清除）",
+      workspace_not_found: "工作区不存在（Agent 可能已注销）",
+      file_transfer_source_invalid: "目录不能直接复制到工作区（先选文件）",
+      workspace_path_protected: "目标路径受保护（工作区根/.git/平台元数据目录）",
+    });
+  }
+  return response.json();
+}
+
+export async function copyWorkspaceFileToDrive(payload: {
+  workspaceId: string;
+  relativePath: string;
+}): Promise<{ transfer: FileTransferSession; operation: WorkspaceOperation }> {
+  const response = await apiFetch(`${API_URL}/api/file-transfers/workspace-to-drive`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workspace_id: payload.workspaceId, relative_path: payload.relativePath }),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "保存到云盘失败", {
+      workspace_path_outside_root: "路径越界（只能用工作区内的相对路径）",
+      workspace_path_invalid: "路径不合法",
+    });
+  }
+  return response.json();
+}
+
+/** 人确认后把传输会话的内容写进云盘（同名冲突 409，不静默覆盖）。 */
+export async function saveTransferToDrive(payload: {
+  transferId: string;
+  parentId?: string | null;
+  name?: string | null;
+}): Promise<{ node: DriveNode; transfer_id: string; saved_bytes: number }> {
+  const response = await apiFetch(`${API_URL}/api/file-transfers/save-to-drive`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ transfer_id: payload.transferId, parent_id: payload.parentId ?? null, name: payload.name ?? null }),
+  });
+  if (!response.ok) {
+    throw await apiError(response, "存进云盘失败", {
+      file_name_conflict: "云盘里已有同名文件（换个名字或先处理那个）",
+      file_quota_exceeded: "云盘空间不足",
+      workspace_transfer_expired: "传输会话已过期（重新发起一次）",
+      file_upload_hash_mismatch: "内容与声明的哈希不一致，已拒绝",
+    });
+  }
+  return response.json();
+}
+
+export async function listFileTransfers(params: { workspaceId?: string; limit?: number } = {}): Promise<{
+  transfers: (FileTransferSession & { operation: WorkspaceOperation | null; retryable: boolean })[];
+}> {
+  const search = new URLSearchParams();
+  if (params.workspaceId) search.set("workspace_id", params.workspaceId);
+  if (params.limit) search.set("limit", String(params.limit));
+  const response = await apiFetch(`${API_URL}/api/file-transfers?${search.toString()}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "传输历史读取失败");
+  return response.json();
+}
