@@ -185,10 +185,11 @@ from .store import Store
 from .accounts import LOGIN_THROTTLE
 from .object_store import create_object_store
 from .path_privacy import public_agent, public_artifact, public_run
-from . import archive, drive, drive_grants, file_transfers, workspace_files
+from . import archive, drive, drive_grants, file_transfers, llm_channels, workspace_files
 from .cumcm_importer import CumcmHandoffImporter, CumcmImporter
 from .gateway import GatewayProtocolError, GatewayService
 from . import agent_chat, ai_chat, ai_probe, boundary_gate, collaboration, convert_queue, delivery, document_api, kb_gateway, knowledge_base, observability, pack_api, personal_drive
+from .contracts import LlmChannelCreate, LlmChannelUpdate, LlmQuotaSet
 from packages.competition_packs import CompetitionPackError
 
 
@@ -199,6 +200,8 @@ agent_chat.ensure_schema(store)
 # 个人云盘（FM-1）：节点树 + 引用 + 对象清理队列 + 审计；老表数据一次性回填（幂等）
 drive.ensure_schema(store)
 DRIVE_BACKFILL = drive.backfill_legacy(store)
+# LLM 渠道与全员免费额度（管理员「渠道」页 + 成员代理端点）：启动建表（幂等）
+llm_channels.ensure_schema(store)
 importer = CumcmImporter(store)
 handoff_importer = CumcmHandoffImporter(store)
 gateway = GatewayService(store)
@@ -349,6 +352,31 @@ def _request_member_id(request: Request) -> str:
     if _auth_mode() in {"required", "production"}:
         raise HTTPException(status_code=401, detail="authentication_required")
     return "member-001"
+
+
+def _request_member(request: Request) -> HumanMember:
+    """当前会话成员（带 organization_id）；开发模式回落到内置 member-001。"""
+
+    authorization = request.headers.get("Authorization", "")
+    if authorization:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not token:
+            raise HTTPException(status_code=401, detail="invalid_authorization_header")
+        try:
+            return store.resolve_session(token)
+        except PermissionError as error:
+            raise HTTPException(status_code=401, detail=str(error)) from error
+    if _auth_mode() in {"required", "production"}:
+        raise HTTPException(status_code=401, detail="authentication_required")
+    return store.get_member("member-001")
+
+
+def _require_admin_member(request: Request) -> HumanMember:
+    """管理员动作的成员对象（organization_id 用于渠道/额度的组织隔离）。"""
+
+    member = _request_member(request)
+    store.require_admin(member.id)
+    return member
 
 
 def _project_id_from_path(request: Request) -> UUID | None:
@@ -4583,3 +4611,240 @@ def read_chat_turn(agent_id: str, turn_id: UUID, request: Request) -> AgentChatT
         return agent_chat.get_turn(store, turn_id)
     except agent_chat.AgentChatError as error:
         raise _agent_chat_http_error(error) from error
+
+
+# ---- LLM 渠道与全员免费额度（管理员「渠道」页 + 成员代理端点） ----------------
+# 设计口径（交接计划 §LLM）：
+#   * api_key 只落库，任何响应只回 key_hint（末 4 位）；
+#   * 代理端点 OpenAI 兼容：非流式原样回传上游 JSON，stream=true 走 SSE 逐行透传；
+#   * 额度调用前检查（耗尽 429）、调用后按上游 usage 扣减（无 usage 按字符数粗估）；
+#   * 检测/测速对上游发最小真实请求（max_tokens=1），成功失败都如实回填。
+
+
+def _llm_channel_http_error(error: Exception) -> HTTPException:
+    """LlmChannelError 稳定码 → HTTP 状态（ERROR_STATUS）；其余错误走 account_error。"""
+
+    if isinstance(error, llm_channels.LlmChannelError):
+        return HTTPException(
+            status_code=llm_channels.ERROR_STATUS.get(error.code, 400), detail=str(error)
+        )
+    return account_error(error)
+
+
+async def _optional_json_body(request: Request) -> dict[str, Any]:
+    """可选 JSON 体（检测/测速的 {"model": ...} / {"rounds": N}）；空体 = {}，坏 JSON = 400。"""
+
+    raw = await request.body()
+    if not raw.strip():
+        return {}
+    try:
+        payload = json.loads(raw)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="invalid_json") from error
+    return payload if isinstance(payload, dict) else {}
+
+
+# ---- 成员端点：平台代理（渠道对成员不可见，成员只见模型与自己的额度） ----
+
+
+@app.get("/api/llm/quota")
+def get_my_llm_quota(request: Request) -> dict[str, Any]:
+    """成员看自己的免费额度（懒创建：首次查看即按平台默认额度建档）。"""
+
+    try:
+        member = _request_member(request)
+        return llm_channels.get_quota(store, member.id, organization_id=str(member.organization_id))
+    except Exception as error:
+        raise _llm_channel_http_error(error) from error
+
+
+@app.get("/api/llm/v1/models")
+def list_llm_models(request: Request) -> dict[str, Any]:
+    """可用模型列表：所有启用渠道的模型合集（按优先级排序去重）。"""
+
+    try:
+        member = _request_member(request)
+        models = llm_channels.available_models(store, organization_id=str(member.organization_id))
+    except Exception as error:
+        raise _llm_channel_http_error(error) from error
+    return {
+        "object": "list",
+        "models": models,
+        "data": [{"id": name, "object": "model"} for name in models],
+    }
+
+
+@app.post("/api/llm/v1/chat/completions")
+async def llm_chat_completions(request: Request) -> Any:
+    """OpenAI 兼容代理：调用前查额度（耗尽 429），调用后按上游 usage 扣减并记流水。"""
+
+    member = _request_member(request)
+    try:
+        payload = await request.json()
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="invalid_json") from error
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="llm_messages_required")
+    try:
+        if payload.get("stream"):
+            generator = llm_channels.proxy_chat_completions_stream(
+                store, member.id, payload, organization_id=str(member.organization_id)
+            )
+            return StreamingResponse(
+                generator,
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        return llm_channels.proxy_chat_completions(
+            store, member.id, payload, organization_id=str(member.organization_id)
+        )
+    except Exception as error:
+        raise _llm_channel_http_error(error) from error
+
+
+# ---- 管理员端点：渠道 CRUD + 检测/测速 + 用量总览 + 成员额度 ----
+
+
+@app.get("/api/admin/llm-channels")
+def list_llm_channels(request: Request) -> dict[str, Any]:
+    try:
+        actor = _require_admin_member(request)
+        return {
+            "channels": llm_channels.list_channels(store, str(actor.organization_id)),
+            "default_quota_tokens": llm_channels.DEFAULT_QUOTA_TOKENS,
+        }
+    except Exception as error:
+        raise _llm_channel_http_error(error) from error
+
+
+@app.post("/api/admin/llm-channels", status_code=201)
+def create_llm_channel(data: LlmChannelCreate, request: Request) -> dict[str, Any]:
+    try:
+        actor = _require_admin_member(request)
+        return llm_channels.create_channel(
+            store,
+            name=data.name,
+            base_url=data.base_url,
+            api_key=data.api_key,
+            models=data.models or None,
+            priority=data.priority,
+            enabled=data.enabled,
+            actor_member_id=actor.id,
+            organization_id=str(actor.organization_id),
+        )
+    except Exception as error:
+        raise _llm_channel_http_error(error) from error
+
+
+@app.get("/api/admin/llm-channels/{channel_id}")
+def get_llm_channel(channel_id: str, request: Request) -> dict[str, Any]:
+    try:
+        actor = _require_admin_member(request)
+        return llm_channels.get_channel(store, channel_id, str(actor.organization_id))
+    except Exception as error:
+        raise _llm_channel_http_error(error) from error
+
+
+@app.patch("/api/admin/llm-channels/{channel_id}")
+def update_llm_channel(channel_id: str, data: LlmChannelUpdate, request: Request) -> dict[str, Any]:
+    """只改传入字段；api_key 缺省/null = 不变、空串 = 清空（响应只回 key_hint）。"""
+
+    try:
+        actor = _require_admin_member(request)
+        return llm_channels.update_channel(
+            store,
+            channel_id,
+            organization_id=str(actor.organization_id),
+            name=data.name,
+            base_url=data.base_url,
+            api_key=data.api_key,
+            models=data.models,
+            priority=data.priority,
+            enabled=data.enabled,
+            actor_member_id=actor.id,
+        )
+    except Exception as error:
+        raise _llm_channel_http_error(error) from error
+
+
+@app.delete("/api/admin/llm-channels/{channel_id}", status_code=204)
+def delete_llm_channel(channel_id: str, request: Request) -> Response:
+    try:
+        actor = _require_admin_member(request)
+        llm_channels.delete_channel(store, channel_id, organization_id=str(actor.organization_id))
+    except Exception as error:
+        raise _llm_channel_http_error(error) from error
+    return Response(status_code=204)
+
+
+@app.post("/api/admin/llm-channels/{channel_id}/check")
+async def check_llm_channel(channel_id: str, request: Request) -> dict[str, Any]:
+    """渠道检测：对上游发一次最小真实请求，成功与否都如实回填 last_check_*。"""
+
+    try:
+        actor = _require_admin_member(request)
+        payload = await _optional_json_body(request)
+        return llm_channels.check_channel(
+            store,
+            channel_id,
+            model=str(payload.get("model") or "") or None,
+            organization_id=str(actor.organization_id),
+        )
+    except Exception as error:
+        raise _llm_channel_http_error(error) from error
+
+
+@app.post("/api/admin/llm-channels/{channel_id}/speed-test")
+async def speed_test_llm_channel(channel_id: str, request: Request) -> dict[str, Any]:
+    """渠道测速：连续 N 轮最小请求（默认 3，上限 10），逐轮如实汇报并给汇总。"""
+
+    try:
+        actor = _require_admin_member(request)
+        payload = await _optional_json_body(request)
+        rounds = payload.get("rounds")
+        return llm_channels.speed_test_channel(
+            store,
+            channel_id,
+            model=str(payload.get("model") or "") or None,
+            rounds=int(rounds) if rounds is not None else llm_channels.SPEED_TEST_ROUNDS,
+            organization_id=str(actor.organization_id),
+        )
+    except Exception as error:
+        raise _llm_channel_http_error(error) from error
+
+
+@app.get("/api/admin/llm-usage")
+def llm_usage_overview(request: Request) -> dict[str, Any]:
+    """用量总览：总量 + 按成员聚合（top N）。"""
+
+    try:
+        actor = _require_admin_member(request)
+        return llm_channels.usage_overview(store, organization_id=str(actor.organization_id))
+    except Exception as error:
+        raise _llm_channel_http_error(error) from error
+
+
+@app.get("/api/admin/llm-quotas/{member_id}")
+def get_llm_member_quota(member_id: str, request: Request) -> dict[str, Any]:
+    try:
+        actor = _require_admin_member(request)
+        return llm_channels.get_quota(store, member_id, organization_id=str(actor.organization_id))
+    except Exception as error:
+        raise _llm_channel_http_error(error) from error
+
+
+@app.put("/api/admin/llm-quotas/{member_id}")
+def set_llm_member_quota(member_id: str, data: LlmQuotaSet, request: Request) -> dict[str, Any]:
+    """管理员设置成员免费额度（token 上限；负数 = 不限量）。"""
+
+    try:
+        actor = _require_admin_member(request)
+        return llm_channels.set_quota(
+            store,
+            member_id,
+            data.token_limit,
+            actor_member_id=actor.id,
+            organization_id=str(actor.organization_id),
+        )
+    except Exception as error:
+        raise _llm_channel_http_error(error) from error

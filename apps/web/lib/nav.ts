@@ -8,6 +8,7 @@ import {
   FileCheck2,
   FileText,
   Inbox,
+  KeyRound,
   Layers3,
   ListChecks,
   MessagesSquare,
@@ -186,6 +187,14 @@ export const NAV_SECTIONS: NavSection[] = [
         keywords: ["团队", "成员", "工作量", "谁在忙", "角色", "邀请", "队伍"],
       },
       {
+        href: "/channels",
+        label: "LLM 渠道",
+        icon: KeyRound,
+        testId: "nav-channels",
+        hint: "管理员录入 OpenAI 兼容上游，全员共享免费额度",
+        keywords: ["渠道", "llm", "模型", "免费额度", "管理员", "代理", "测速", "channel"],
+      },
+      {
         href: "/settings",
         label: "空间设置",
         icon: Settings2,
@@ -287,6 +296,7 @@ const PAGE_TITLES: Record<string, { title: string; subtitle: string }> = {
   "/timeline": { title: "项目时间线", subtitle: "事件流审计" },
   "/team": { title: "团队与成员", subtitle: "成员工作量、项目成员管理与团队" },
   "/settings": { title: "空间设置", subtitle: "平台 API 凭据（LLM / Embedding / MinerU）与空间配额" },
+  "/channels": { title: "LLM 渠道", subtitle: "平台代管的 OpenAI 兼容上游与全员免费额度" },
 };
 
 export function findSection(pathname: string): NavSection | undefined {

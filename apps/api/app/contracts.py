@@ -2315,3 +2315,31 @@ class MyAgentEndpoint(APIModel):
     # 空列表 = 这台执行体没有可选角色：页面只显示「默认」，不显示空下拉
     roles: list[MyAgentRole] = Field(default_factory=list)
     conversation_count: int = 0
+
+
+class LlmChannelCreate(APIModel):
+    """管理员录入 OpenAI 兼容渠道：api_key 只落库，响应一律只给末 4 位提示。"""
+
+    name: str = Field(min_length=1, max_length=120)
+    base_url: str = Field(min_length=1, max_length=500)
+    api_key: str = ""
+    models: list[str] = Field(default_factory=list)
+    priority: int = 100
+    enabled: bool = True
+
+
+class LlmChannelUpdate(APIModel):
+    """只改传入字段；api_key 缺省/null = 不变、空串 = 清空。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    base_url: str | None = Field(default=None, min_length=1, max_length=500)
+    api_key: str | None = None
+    models: list[str] | None = None
+    priority: int | None = None
+    enabled: bool | None = None
+
+
+class LlmQuotaSet(APIModel):
+    """成员免费额度（token 上限）；负数 = 不限量。"""
+
+    token_limit: int

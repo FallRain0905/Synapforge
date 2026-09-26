@@ -3456,3 +3456,155 @@ export async function putWorkspaceTransferChunked(
   }
   return { mode: "chunked", parts: parts.length, uploaded, resumed };
 }
+/* ---------- LLM 渠道与全员免费额度 ----------
+   管理员在「渠道」页录入 OpenAI 兼容上游，成员用平台额度调 /api/llm/v1/chat/completions。
+   硬约束：**api_key 只在服务端**——列表/详情只回 key_hint（末 4 位），前端绝不显示明文。 */
+
+export type LlmChannel = {
+  id: string;
+  name: string;
+  base_url: string;
+  models: string[];
+  priority: number;
+  enabled: boolean;
+  /** 末 4 位提示（明文 key 永不回传）。 */
+  key_hint: string;
+  last_check_at: string | null;
+  last_check_ok: boolean | null;
+  last_check_detail: string;
+  last_latency_ms: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type LlmChannelList = { channels: LlmChannel[]; default_quota_tokens: number };
+
+export type LlmChannelInput = {
+  name: string;
+  base_url: string;
+  /** 新建时必填；编辑时留空 = 不变（服务端语义：缺省/null 不变、空串清空）。 */
+  api_key?: string;
+  models: string[];
+  priority?: number;
+  enabled?: boolean;
+};
+
+export type LlmCheckResult = { ok: boolean; detail: string; latency_ms: number; model: string; checked_at: string };
+
+export type LlmSpeedRound = { round: number; ok: boolean; latency_ms: number; detail: string };
+export type LlmSpeedResult = {
+  model: string;
+  rounds: LlmSpeedRound[];
+  ok_rounds: number;
+  avg_ms: number | null;
+  min_ms: number | null;
+  max_ms: number | null;
+};
+
+export type LlmQuota = {
+  member_id: string;
+  token_limit: number;
+  tokens_used: number;
+  tokens_remaining: number | null;
+  unlimited: boolean;
+};
+
+export type LlmUsage = {
+  totals: { requests: number; ok_requests: number; total_tokens: number };
+  members: {
+    member_id: string;
+    requests: number;
+    log_tokens: number;
+    tokens_used: number | null;
+    token_limit: number | null;
+    unlimited: boolean;
+  }[];
+};
+
+/** 渠道接口的错误码 → 人话（管理员看得懂"为什么存不进去"）。 */
+const LLM_CHANNEL_MESSAGES: Record<string, string> = {
+  llm_channel_not_found: "渠道不存在（可能已被删除）",
+  llm_name_required: "渠道名称不能为空",
+  llm_name_taken: "已有同名渠道，换个名字",
+  llm_base_url_invalid: "Base URL 必须以 http:// 或 https:// 开头",
+  llm_models_required: "至少填一个模型名（成员按模型名路由到渠道）",
+  llm_model_required: "这条渠道没有可测的模型",
+  llm_upstream_error: "上游返回错误（看下方详情）",
+  llm_upstream_unreachable: "上游不可达（网络或地址不对）",
+  admin_required: "只有管理员能管理渠道",
+};
+
+export async function listLlmChannels(): Promise<LlmChannelList> {
+  const response = await apiFetch(`${API_URL}/api/admin/llm-channels`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "渠道列表读取失败", LLM_CHANNEL_MESSAGES);
+  return response.json();
+}
+
+export async function createLlmChannel(payload: LlmChannelInput): Promise<LlmChannel> {
+  const response = await apiFetch(`${API_URL}/api/admin/llm-channels`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw await apiError(response, "渠道创建失败", LLM_CHANNEL_MESSAGES);
+  return response.json();
+}
+
+/** 编辑：api_key 留空表示**不变**（不传该字段即可，服务端不会清空）。 */
+export async function updateLlmChannel(id: string, payload: Partial<LlmChannelInput>): Promise<LlmChannel> {
+  const response = await apiFetch(`${API_URL}/api/admin/llm-channels/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) throw await apiError(response, "渠道保存失败", LLM_CHANNEL_MESSAGES);
+  return response.json();
+}
+
+export async function deleteLlmChannel(id: string): Promise<void> {
+  const response = await apiFetch(`${API_URL}/api/admin/llm-channels/${id}`, { method: "DELETE" });
+  if (!response.ok) throw await apiError(response, "渠道删除失败", LLM_CHANNEL_MESSAGES);
+}
+
+export async function checkLlmChannel(id: string, model?: string): Promise<LlmCheckResult> {
+  const response = await apiFetch(`${API_URL}/api/admin/llm-channels/${id}/check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(model ? { model } : {}),
+  });
+  if (!response.ok) throw await apiError(response, "渠道检测失败", LLM_CHANNEL_MESSAGES);
+  return response.json();
+}
+
+export async function speedTestLlmChannel(id: string, rounds = 3, model?: string): Promise<LlmSpeedResult> {
+  const response = await apiFetch(`${API_URL}/api/admin/llm-channels/${id}/speed-test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rounds, ...(model ? { model } : {}) }),
+  });
+  if (!response.ok) throw await apiError(response, "渠道测速失败", LLM_CHANNEL_MESSAGES);
+  return response.json();
+}
+
+export async function getLlmUsage(): Promise<LlmUsage> {
+  const response = await apiFetch(`${API_URL}/api/admin/llm-usage`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "用量总览读取失败", LLM_CHANNEL_MESSAGES);
+  return response.json();
+}
+
+export async function getLlmQuota(memberId: string): Promise<LlmQuota> {
+  const response = await apiFetch(`${API_URL}/api/admin/llm-quotas/${memberId}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "成员额度读取失败", LLM_CHANNEL_MESSAGES);
+  return response.json();
+}
+
+/** 设置成员额度；**负数 = 不限量**。 */
+export async function setLlmQuota(memberId: string, tokenLimit: number): Promise<LlmQuota> {
+  const response = await apiFetch(`${API_URL}/api/admin/llm-quotas/${memberId}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token_limit: tokenLimit }),
+  });
+  if (!response.ok) throw await apiError(response, "成员额度保存失败", LLM_CHANNEL_MESSAGES);
+  return response.json();
+}

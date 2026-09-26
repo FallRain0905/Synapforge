@@ -65,6 +65,7 @@ class PlatformContractTests(unittest.TestCase):
                 "030_agent_workspaces.sql",
                 "031_drive_grants.sql",
                 "032_file_transfer_parts.sql",
+                "033_llm_channels.sql",
             ],
         )
         initial = files[0].read_text(encoding="utf-8").lower()
