@@ -47,6 +47,17 @@ CHAT_TIMEOUT = 120.0
 SPEED_TEST_ROUNDS = 3
 MAX_SPEED_ROUNDS = 10
 
+# 出站请求头：**必须**给 User-Agent。
+# 实测教训（2026-09-26 真实渠道验收）：云/AI 中转普遍挂在 Cloudflare 后面，它按 UA 拦
+# "看起来像脚本"的客户端——urllib 默认的 `Python-urllib/3.x` 会被直接 403（CF error 1010），
+# 换成 SDK 形态的 UA 立刻 200。这里按 OpenAI 兼容客户端形态发请求（中转的允许清单就按这个认），
+# 不是伪装浏览器。
+UPSTREAM_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+    "User-Agent": "OpenAI/Python 1.0.0",
+}
+
 # 稳定错误码 → HTTP 状态（main.py 的 _llm_error 用）。
 ERROR_STATUS = {
     "llm_channel_not_found": 404,
@@ -346,7 +357,7 @@ def _open_upstream(base_url: str, api_key: str, payload: dict[str, Any], *, time
     """打开上游 chat/completions；HTTPError / 网络错误统一转 LlmChannelError。"""
 
     url = _normalized_base(base_url) + "/chat/completions"
-    headers = {"Content-Type": "application/json"}
+    headers = dict(UPSTREAM_HEADERS)
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(

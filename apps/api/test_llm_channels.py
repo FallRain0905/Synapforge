@@ -62,7 +62,12 @@ class FakeUpstream:
                 except ValueError:
                     parsed = {}
                 upstream.requests.append(
-                    {"path": self.path, "auth": self.headers.get("Authorization", ""), "body": parsed}
+                    {
+                        "path": self.path,
+                        "auth": self.headers.get("Authorization", ""),
+                        "user_agent": self.headers.get("User-Agent", ""),
+                        "body": parsed,
+                    }
                 )
                 status, payload = upstream.next_response()
                 encoded = json.dumps(payload).encode("utf-8")
@@ -488,6 +493,11 @@ class CheckAndSpeedTest(LlmChannelTestBase):
         self.assertTrue(body["ok"])
         self.assertEqual(upstream.requests[0]["body"]["max_tokens"], 1)
         self.assertEqual(upstream.requests[0]["body"]["temperature"], 0)
+        # User-Agent 必须显式给出：默认的 `Python-urllib/3.x` 会被 Cloudflare 前置的中转
+        # 直接 403（CF error 1010）——这是真实渠道验收踩出来的坑，锁一条回归。
+        agent = upstream.requests[0]["user_agent"]
+        self.assertTrue(agent, "出站请求必须带 User-Agent")
+        self.assertNotIn("Python-urllib", agent, f"不能发 urllib 默认 UA（会被 CF 拦）：{agent}")
         stored = self.client.get(
             f"/api/admin/llm-channels/{channel['id']}", headers=self.admin_headers
         ).json()
