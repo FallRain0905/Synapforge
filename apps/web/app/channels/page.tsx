@@ -27,7 +27,8 @@ import {
   Zap,
 } from "lucide-react";
 import { PageHeading, formatTime } from "../../components/shell";
-import { ConfirmDialog, EmptyState, LoadingSkeleton, Metric, Modal, Panel } from "../../components/ui";
+import { ConfirmDialog, EmptyState, LoadingSkeleton, Metric, Modal, Panel } from "../../components/ui"
+import { PAGE_GRID } from "../../lib/page-layout";
 import {
   LlmChannel,
   LlmChannelInput,
@@ -65,14 +66,6 @@ function parseModels(raw: string): string[] {
     .map((item) => item.trim())
     .filter(Boolean);
 }
-
-/** 页面级 grid 默认 align-content:stretch，而 `.main-area > .page-content` 是 flex:1 1 auto：
- *  窗口一高，多余高度就被平摊给每一个区块——标题行、指标卡、面板标题行会被逐层撑高，
- *  行内内容却留在原处，于是每块里都出现"莫名其妙的大片空白"。
- *  这里统一改成**按内容取高、整体靠上**：任何被拉高的容器（panel 自己也是 grid、
- *  .list-item 还是 align-items:center 的 grid）都会把空白摊给子块，所以不做局部拉伸。
- *  本页自持这组样式，是为了不去改动正在被并行编辑的 globals.css。 */
-const PAGE_GRID: React.CSSProperties = { alignContent: "start" };
 
 export default function ChannelsPage() {
   const { notify } = useWorkspace();

@@ -10,6 +10,7 @@
 - 本地 Agent 注册、心跳和任务领取接口
 - 成果物哈希、运行记录和事件时间线
 - 面向项目负责人的协作工作台
+- 平台 LLM 渠道与全员免费额度：管理员录入 OpenAI 兼容上游，成员用平台额度调用（含渠道检测/测速）
 
 ## 项目结构
 
@@ -231,6 +232,28 @@ Gateway 任务命令使用 `agent.task.claim`、`agent.task.lease.heartbeat`、`
 
 Windows 侧的 Session Worker、ConPTY、Machine Service 安装与运行属于生产验收步骤（`service-install` / `service-control` / `session-worker-run` 需要管理员权限，自动化测试不执行）：`python apps/agent/agentd.py --help` 可查看全部子命令，`docs/AGENT_DEVICE_CONNECTION_DESIGN.md` 记录了设计约束。
 
+## 平台 LLM 渠道与全员免费额度
+
+管理员在「LLM 渠道」页（`/channels`）录入 OpenAI 兼容上游，**所有成员**即可用平台提供的免费额度调用——
+成员不接触上游密钥，也不需要自己配凭据。
+
+- **管理员**：新建/编辑渠道（名称、Base URL、API Key、模型列表、优先级、启用开关）、单条「检测」「测速」、
+  用量总览（按成员聚合）、按成员调整额度。
+- **成员**：`GET /api/llm/quota` 看自己的额度；`GET /api/llm/v1/models` 看可用模型；
+  `POST /api/llm/v1/chat/completions` 调用（OpenAI 兼容，`stream=true` 走 SSE 逐行透传）。
+- **路由**：请求的模型名必须命中某条**启用**渠道的 `models`（大小写不敏感），命中多条时 `priority` 小者优先；
+  找不到就明确报错（`llm_channel_no_route`），**不猜、不回落**。
+- **密钥安全**：`api_key` 只落库，任何响应都只回 `key_hint`（末 4 位）；编辑时该输入框留空 = 保持不变。
+- **额度**：默认值取环境变量 `PLATFORM_LLM_FREE_TOKENS_PER_MEMBER`（默认 200000）；**负数 = 不限量**。
+  调用前查剩余额度（耗尽返回 `429 llm_quota_exceeded`，且**不打上游**），调用后按上游回报的 usage 扣减
+  （上游不给 usage 时按字符数粗估）。
+- **检测/测速打的是真实上游**：发一次 `max_tokens=1, temperature=0` 的最小请求，成功失败都如实回填
+  （失败轮不会冒充通过）。
+- 数据在迁移 `033_llm_channels.sql`（三张表 + RLS）；SQLite 侧由服务模块 `ensure_schema` 在启动时镜像建表。
+
+> 出站请求统一带 SDK 形态的 `User-Agent`。**不是**可选项：Cloudflare 前置的中转会按 UA 拦掉
+> `Python-urllib/3.x`（实测直接 403、CF error 1010），换 SDK 形态 UA 立刻 200。
+
 ## 当前实现边界
 
 本仓库先实现完整目标架构的核心契约和可运行纵向链路：项目、任务、交接、成果物、Agent、事件、审核、CUMCM 工作区导入、任务租约和 Run Manifest。生产环境切换 PostgreSQL、对象存储、NATS、Temporal 和正式身份服务时，API 契约保持不变。
@@ -244,7 +267,7 @@ Windows 侧的 Session Worker、ConPTY、Machine Service 安装与运行属于�
 
 **禁区**（本阶段禁止改动，理由见计划书 §6.4）：`apps/api/app/collaboration.py` 的中继语义、`apps/api/app/gateway.py` 的逐帧应答模型、`packages/agent_protocol/` 的信封与序号语义、`packages/competition_packs/` 的内置包内容、`apps/api/app/kb_gateway.py` 的错误码映射、`infra/docker-compose.yml`、**既有** PostgreSQL 迁移脚本（新增迁移文件不受此限，但必须同步 SQLite 侧表结构与契约测试，并更新 `apps/api/test_platform_contracts.py` 的迁移清单）。
 
-**基线**（改动后必须仍然成立）：Agent `python -X utf8 -m unittest discover -s . -p "test_*.py"` ≥ 247（9 skipped）；后端同命令 ≥ 305（14 skipped）；前端 `npm run build` 通过且路由数不少于 19；`scripts/demo-1.0.ps1 -AutoApprove` 17 项全过。
+**基线**（改动后必须仍然成立）：Agent `python -X utf8 -m unittest discover -s . -p "test_*.py"` ≥ 473（12 skipped）；后端同命令 ≥ 727（15 skipped；其中 2 项 `test_latex_compile` 是**本机环境**失败——没装 xelatex，与代码无关）；前端 `npm run build` 通过且路由数不少于 26；`scripts/demo-1.0.ps1 -AutoApprove` 17 项全过。
 
 **前端改动后必须重建并重启 Web 进程**（见上文「Web」小节）：`next start` 会缓存构建清单，只重建文件不重启会持续发旧 HTML。
 

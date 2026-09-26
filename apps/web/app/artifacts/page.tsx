@@ -4,7 +4,8 @@ import { useState } from "react";
 import Link from "next/link";
 import { Archive, Box, Download, FilePlus2, Info } from "lucide-react";
 import { PageHeading, formatTime } from "../../components/shell";
-import { ConfirmDialog, EmptyState, LoadingSkeleton, Metric, Modal, Panel, StatusPill } from "../../components/ui";
+import { ConfirmDialog, EmptyState, LoadingSkeleton, Metric, Modal, Panel, StatusPill } from "../../components/ui"
+import { PAGE_GRID } from "../../lib/page-layout";
 import {
   downloadArtifactContent,
   Artifact,
@@ -132,7 +133,7 @@ export default function ArtifactsPage() {
   };
 
   return (
-    <div className="page-content" id="artifacts">
+    <div className="page-content" id="artifacts" style={PAGE_GRID}>
       <PageHeading hint="版本、状态与来源保持可追溯" actions={
         <select value={typeFilter} onChange={(event) => setTypeFilter(event.target.value)} style={{ width: "auto" }} data-testid="artifact-filter">
           <option value="all">全部类型</option>

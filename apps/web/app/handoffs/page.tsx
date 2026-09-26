@@ -3,7 +3,8 @@
 import { useState } from "react";
 import { CheckCircle2, Inbox, XCircle } from "lucide-react";
 import { PageHeading, formatTime } from "../../components/shell";
-import { ConfirmDialog, EmptyState, LoadingSkeleton, Metric, Modal, Panel, StatusPill } from "../../components/ui";
+import { ConfirmDialog, EmptyState, LoadingSkeleton, Metric, Modal, Panel, StatusPill } from "../../components/ui"
+import { PAGE_GRID } from "../../lib/page-layout";
 import { Handoff, acceptHandoff, errorMessage, rejectHandoff } from "../../lib/api";
 import { useWorkspace } from "../../lib/workspace";
 
@@ -50,7 +51,7 @@ export default function HandoffsPage() {
   };
 
   return (
-    <div className="page-content" id="handoffs">
+    <div className="page-content" id="handoffs" style={PAGE_GRID}>
       <PageHeading hint="接力与分发交接：逐接收方收据，拒绝即返工（接受/拒绝由接收方提交）" />
       <section className="metrics-grid">
         <Metric label="交接总数" value={handoffs.length} detail="含接力与分发" />

@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUpRight, FileText, RefreshCcw } from "lucide-react";
 import { PageHeading, formatTime } from "../../components/shell";
-import { EmptyState, Modal, Panel } from "../../components/ui";
+import { EmptyState, Modal, Panel } from "../../components/ui"
+import { PAGE_GRID } from "../../lib/page-layout";
 import {
   DocumentComment,
   DocumentDiff,
@@ -248,7 +249,7 @@ export default function DocumentsPage() {
   const current = timeline?.revisions[timeline.revisions.length - 1];
 
   return (
-    <div className="page-content" id="documents">
+    <div className="page-content" id="documents" style={PAGE_GRID}>
       <PageHeading
         hint="草稿 / 提交 / 批准三层版本；正式版本可追溯到成员、任务与 Git commit"
         actions={

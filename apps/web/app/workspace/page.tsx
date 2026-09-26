@@ -21,7 +21,8 @@ import {
 } from "lucide-react";
 import { ArtifactDrawer } from "../../components/artifact-drawer";
 import { PageHeading, formatTime } from "../../components/shell";
-import { ConfirmDialog, EmptyState, LoadingSkeleton, Metric, Modal, Panel, Progress, StatusPill } from "../../components/ui";
+import { ConfirmDialog, EmptyState, LoadingSkeleton, Metric, Modal, Panel, Progress, StatusPill } from "../../components/ui"
+import { FILL_COLUMN } from "../../lib/page-layout";
 import {
   ProjectDeliverables,
   ProjectMessage,
@@ -718,6 +719,7 @@ export default function WorkspacePage() {
             >
               <div
                 className={dropActive ? "drop-active" : undefined}
+                style={FILL_COLUMN}
                 data-testid="chat-dropzone"
                 onDragOver={(event) => {
                   if (!canChat) return;
