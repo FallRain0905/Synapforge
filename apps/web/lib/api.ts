@@ -1968,14 +1968,20 @@ export async function enqueueDriveConversion(file: { id: string; name: string },
   return response.json();
 }
 
-/** 内置 AI 普通对话（非流式）。 */
-export async function askAiChat(messages: { role: string; content: string }[]): Promise<{ content?: string; reply?: string }> {
+/** 内置 AI 普通对话（非流式）。渠道优先：via=channel 表示走了平台渠道（扣免费额度）。 */
+export async function askAiChat(messages: { role: string; content: string }[]): Promise<{ content?: string; reply?: string; via?: "channel" | "own_key" }> {
   const response = await apiFetch(`${API_URL}/api/ai/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ messages, stream: false }),
   });
-  if (!response.ok) throw await apiError(response, "AI 对话失败", { ai_credentials_missing: "请先在设置中配置 LLM 凭据" });
+  if (!response.ok)
+    throw await apiError(response, "AI 对话失败", {
+      ai_credentials_missing: "平台没有接得住这个模型的渠道，且你未在设置里配置自己的 LLM 凭据",
+      llm_quota_exceeded: "平台免费额度已用完（联系管理员调整，或在设置里配置自己的模型）",
+      llm_upstream_error: "渠道上游返回错误",
+      llm_upstream_unreachable: "渠道上游不可达",
+    });
   return response.json();
 }
 

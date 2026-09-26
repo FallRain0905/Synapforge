@@ -1544,38 +1544,45 @@ from .contracts import AiChatRequest
 
 @app.post("/api/ai/chat")
 def chat_with_user_llm(data: AiChatRequest, request: Request) -> Response:
-    """普通对话：代理调用成员配置的 OpenAI 兼容 LLM。
+    """普通对话：**渠道优先**——模型命中启用渠道就走平台渠道（扣成员免费额度、记用量流水）；
+    没有渠道接得住再回退成员自配凭据。响应带 ``via``（channel / own_key）说明走了哪条。
 
     ``stream=true`` 时返回 SSE（每行 ``data: {"delta": "..."}``），
-    ``stream=false`` 时返回完整 JSON ``{"content": "...", "usage": {}}``。
+    ``stream=false`` 时返回完整 JSON ``{"content": "...", "usage": {}, "via": "..."}``。
     """
 
-    member_id = _request_member_id(request)
-    settings = knowledge_base.get_ai_settings(store, member_id)
-    if not knowledge_base.ai_credentials_ready(settings):
-        raise HTTPException(status_code=400, detail="ai_credentials_missing")
+    member = _request_member(request)
+    settings = knowledge_base.get_ai_settings(store, member.id)
 
     messages = [{"role": str(item["role"]), "content": str(item["content"])} for item in data.messages]
     if data.system_prompt:
         messages.insert(0, {"role": "system", "content": str(data.system_prompt)})
 
+    try:
+        # 渠道接住后的失败不静默回落到成员自配 key（口径见 ai_chat.chat_routed）
+        outcome, via = ai_chat.chat_routed(
+            store,
+            member_id=member.id,
+            organization_id=str(member.organization_id),
+            messages=messages,
+            settings=settings,
+            temperature=data.temperature,
+            stream=data.stream,
+        )
+    except ai_chat.AiChatError as error:
+        status = 400 if error.code == "ai_credentials_missing" else 429 if error.code == "llm_quota_exceeded" else 502
+        raise HTTPException(status_code=status, detail=str(error)) from error
+
     if not data.stream:
-        try:
-            result = ai_chat.chat(messages, settings, temperature=data.temperature)
-        except ai_chat.AiChatError as error:
-            status = 400 if error.code == "ai_credentials_missing" else 502
-            raise HTTPException(status_code=status, detail=str(error)) from error
-        return JSONResponse(result)
+        return JSONResponse({**outcome, "via": via})
 
     def generate() -> Generator[str, None, None]:
-        try:
-            for chunk in ai_chat.chat(messages, settings, temperature=data.temperature, stream=True):
-                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
-        except ai_chat.AiChatError as error:
-            yield f"data: {json.dumps({'error': str(error)}, ensure_ascii=False)}\n\n"
+        for chunk in outcome:
+            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
 
 
 # ---- MinerU 转换队列（Phase B） ------------------------------------------

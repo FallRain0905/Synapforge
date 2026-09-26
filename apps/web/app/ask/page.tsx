@@ -19,7 +19,7 @@ import {
 import { useAuth } from "../../lib/auth";
 import { useWorkspace } from "../../lib/workspace";
 
-type Message = { id: string; role: "user" | "assistant"; content: string; sources: Record<string, unknown>[] };
+type Message = { id: string; role: "user" | "assistant"; content: string; sources: Record<string, unknown>[]; via?: "channel" | "own_key" };
 
 const MODE_LABEL: Record<string, string> = { chat: "对话", rag: "检索" };
 
@@ -143,14 +143,14 @@ export default function AskPage() {
   const sendTo = async (
     conversation: Conversation,
     question: string,
-  ): Promise<{ answer: string; sources: Record<string, unknown>[] }> => {
+  ): Promise<{ answer: string; sources: Record<string, unknown>[]; via?: "channel" | "own_key" }> => {
     const isRag = conversation.mode === "rag" && (conversation.kb_id || ragKbId);
     if (isRag) {
       const result = await queryKb(conversation.kb_id || ragKbId, question);
-      return { answer: result.response || "（无结果）", sources: (result.text_units as Record<string, unknown>[]) || [] };
+      return { answer: result.response || "（无结果）", sources: (result.text_units as Record<string, unknown>[]) || [], via: undefined };
     }
     const data = await askAiChat([{ role: "user", content: question }]);
-    return { answer: data.content ?? data.reply ?? "（空回答）", sources: [] };
+    return { answer: data.content ?? data.reply ?? "（空回答）", sources: [], via: data.via };
   };
 
   const handleSend = async () => {
@@ -171,8 +171,8 @@ export default function AskPage() {
         setSelectedId(conversation.id);
         await loadConversations(conversation.id);
       }
-      const { answer, sources } = await sendTo(conversation, question);
-      setMessages((current) => [...current, { id: `reply-${Date.now()}`, role: "assistant", content: answer, sources }]);
+      const { answer, sources, via } = await sendTo(conversation, question);
+      setMessages((current) => [...current, { id: `reply-${Date.now()}`, role: "assistant", content: answer, sources, via }]);
       await appendMessage(conversation.id, "user", question);
       await appendMessage(conversation.id, "assistant", answer, sources);
       await loadConversations(conversation.id);
@@ -297,6 +297,11 @@ export default function AskPage() {
                   ) : (
                     <div className="ask-answer">
                       {message.content}
+                      {message.via ? (
+                        <div className="hint" style={{ marginTop: 6 }}>
+                          {message.via === "channel" ? "平台渠道 · 消耗免费额度" : "你的自配模型"}
+                        </div>
+                      ) : null}
                       {message.sources.length > 0 ? (
                         <div className="chips" style={{ marginTop: 8 }}>
                           {message.sources.slice(0, 3).map((source, index) => (
