@@ -1707,6 +1707,9 @@ class DeviceProjectGrantCreate(APIModel):
     capabilities: list[str] = Field(default_factory=lambda: [
         # 「对话」（MY-AGENT）：单纯对话轮次的领取/回传，与任务领取分开授权
         "chat.run",
+        # 「LLM 渠道」（方案 A）：执行体上的 opencode 经平台代理消费渠道模型，
+        # 额度记到 agent 的 owner 名下。旧授权串没有它 ⇒ 需要重签授权
+        "llm.invoke",
         "task.claim",
         "task.lease",
         "task.progress",

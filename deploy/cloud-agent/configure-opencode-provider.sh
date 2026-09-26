@@ -11,9 +11,18 @@
 #
 # `--provider` 是**我们自己在 opencode 配置里起的别名**（`-m <别名>/<模型 id>`），不是厂商要求的前缀；
 # 当前部署用别名 `deepseek`，于是模型串是 `deepseek/deepseek-v4.1-flash`。
+#
+# **合并语义（2026-09-26 起）**：重复运行是安全的——只更新 `--provider` 指的那一个条目，
+# 其它 provider（如 deepseek）原样保留；默认模型仅在传 `--set-default` 或配置里还没有
+# model 时才会改动。方案 A 的接法就是再跑一次：
+#   bash configure-opencode-provider.sh --provider synapforge \
+#     --base-url https://synapforge.top/api/agent/llm/v1/<agent_id>/<project_id> \
+#     --api-key-file /root/grant-token.txt --model <渠道模型名>
+# （apiKey 是**项目能力令牌**，授权串需带 `llm.invoke` 能力；令牌走文件，别放命令行。）
 set -euo pipefail
 
 API_KEY=""; API_KEY_FILE=""; BASE_URL=""; MODEL=""; PROVIDER="deepseek"; INSTANCE="cloud"
+SET_DEFAULT=0
 SERVICE_USER="synapforge"
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -23,6 +32,7 @@ while [[ $# -gt 0 ]]; do
     --model) MODEL="$2"; shift 2 ;;
     --provider) PROVIDER="$2"; shift 2 ;;
     --instance) INSTANCE="$2"; shift 2 ;;
+    --set-default) SET_DEFAULT=1 ;;
     *) echo "未知参数：$1" >&2; exit 2 ;;
   esac
 done
@@ -40,29 +50,36 @@ CONFIG_DIR="$HOME_DIR/.config/opencode"
 CONFIG_FILE="$CONFIG_DIR/opencode.json"
 install -d -m 0700 -o "$SERVICE_USER" -g "$SERVICE_USER" "$CONFIG_DIR"
 
-# key 直接写进配置（不落 shell 历史、不进平台库）；文件 0600、属主是执行体用户
-python3 - "$CONFIG_FILE" "$PROVIDER" "$BASE_URL" "$MODEL" "$API_KEY" <<'PY'
-import json, os, sys
+# key 直接写进配置（不落 shell 历史、不进平台库）；文件 0600、属主是执行体用户。
+# **合并**而非覆盖：只更新本 provider 的条目，其它 provider 与既有默认模型都保留。
+python3 - "$CONFIG_FILE" "$PROVIDER" "$BASE_URL" "$MODEL" "$API_KEY" "$SET_DEFAULT" <<'PY'
+import json, sys
 from pathlib import Path
-path, provider, base_url, model, api_key = sys.argv[1:6]
-config = {
-    "$schema": "https://opencode.ai/config.json",
-    "provider": {
-        provider: {
-            "npm": "@ai-sdk/openai-compatible",
-            "name": provider,
-            "options": {"baseURL": base_url, "apiKey": api_key},
-            "models": {model: {"name": model}},
-        }
-    },
-    "model": f"{provider}/{model}",
+path, provider, base_url, model, api_key, set_default = sys.argv[1:7]
+config = {}
+if Path(path).exists():
+    try:
+        config = json.loads(Path(path).read_text(encoding="utf-8"))
+    except ValueError:
+        config = {}  # 坏文件就重建（0600 且属主正确，风险可控）
+if not isinstance(config, dict):
+    config = {}
+config.setdefault("$schema", "https://opencode.ai/config.json")
+providers = config.setdefault("provider", {})
+providers[provider] = {
+    "npm": "@ai-sdk/openai-compatible",
+    "name": provider,
+    "options": {"baseURL": base_url, "apiKey": api_key},
+    "models": {model: {"name": model}},
 }
+if set_default == "1" or not config.get("model"):
+    config["model"] = f"{provider}/{model}"
 Path(path).write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 PY
 chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_FILE"
 chmod 0600 "$CONFIG_FILE"
 
-echo "已写入 $CONFIG_FILE（0600，属主 $SERVICE_USER）"
+echo "已写入 $CONFIG_FILE（0600，属主 $SERVICE_USER；合并模式，其它 provider 保留）"
 echo "provider=$PROVIDER model=$PROVIDER/$MODEL baseURL=$BASE_URL"
 echo
 echo "验证（会真发一次请求，key 不出现在命令行里）："

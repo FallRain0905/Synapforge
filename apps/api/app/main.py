@@ -4855,3 +4855,72 @@ def set_llm_member_quota(member_id: str, data: LlmQuotaSet, request: Request) ->
         )
     except Exception as error:
         raise _llm_channel_http_error(error) from error
+
+# ---- 执行体侧 LLM 代理（方案 A：我的智能体对话走平台渠道） ----------------
+# opencode 的 provider 指到这里：baseURL = <平台>/api/agent/llm/v1/<agent_id>/<project_id>，
+# apiKey = **项目能力令牌**（Bearer）。鉴权复用项目授权机器：令牌必须带 ``llm.invoke``
+# 能力、属于该 agent——额度与用量记到 agent 的 ``owner_member_id`` 名下。
+# 令牌不走 URL（会进访问日志），opencode 恰好只会发 Authorization 头，正好吻合。
+
+
+def _agent_llm_context(agent_id: str, project_id: str, request: Request) -> tuple[str, str]:
+    """校验执行体身份与 ``llm.invoke`` 能力，返回（额度归属成员, 其组织）。"""
+
+    authorization = request.headers.get("Authorization", "")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="agent_project_token_required")
+    try:
+        project_uuid = UUID(project_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="invalid_project_id") from error
+    try:
+        grant = store.resolve_device_project_token(token, project_uuid, "llm.invoke")
+    except PermissionError as error:
+        detail = str(error)
+        status_code = 401 if detail in _INVALID_AGENT_TOKEN_ERRORS else 403
+        raise HTTPException(status_code=status_code, detail=detail) from error
+    if grant.agent_id != agent_id:
+        raise HTTPException(status_code=403, detail="agent_project_agent_mismatch")
+    agent = store.db.execute("SELECT owner_member_id FROM agents WHERE agent_id = ?", (agent_id,)).fetchone()
+    if agent is None:
+        raise HTTPException(status_code=404, detail="agent_not_found")
+    owner = store.get_member(str(agent["owner_member_id"]))
+    return str(owner.id), str(owner.organization_id)
+
+
+@app.get("/api/agent/llm/v1/{agent_id}/{project_id}/models")
+def agent_llm_models(agent_id: str, project_id: str, request: Request) -> dict[str, Any]:
+    """执行体侧可见的渠道模型清单（opencode provider 的 models 配置来源）。"""
+
+    _, organization_id = _agent_llm_context(agent_id, project_id, request)
+    models = llm_channels.available_models(store, organization_id=organization_id)
+    return {"object": "list", "models": models, "data": [{"id": name, "object": "model"} for name in models]}
+
+
+@app.post("/api/agent/llm/v1/{agent_id}/{project_id}/chat/completions")
+async def agent_llm_chat_completions(agent_id: str, project_id: str, request: Request) -> Response:
+    """OpenAI 兼容代理（执行体身份）：额度记到 agent 的 owner 名下，口径与成员代理一致。"""
+
+    member_id, organization_id = _agent_llm_context(agent_id, project_id, request)
+    try:
+        payload = await request.json()
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="invalid_json") from error
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="llm_messages_required")
+    try:
+        if payload.get("stream"):
+            generator = llm_channels.proxy_chat_completions_stream(
+                store, member_id, payload, organization_id=organization_id
+            )
+            return StreamingResponse(
+                generator,
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        return JSONResponse(
+            llm_channels.proxy_chat_completions(store, member_id, payload, organization_id=organization_id)
+        )
+    except llm_channels.LlmChannelError as error:
+        raise _llm_channel_http_error(error) from error

@@ -30,6 +30,10 @@ import urllib.request
 from typing import Any
 
 DEFAULT_CAPABILITIES = [
+    # 「对话」（MY-AGENT）与「LLM 渠道」（方案 A）缺了会直接不可用：
+    # chat.run 领对话轮次、llm.invoke 让执行体经平台代理消费渠道模型
+    "chat.run",
+    "llm.invoke",
     "task.claim",
     "task.lease",
     "task.progress",
