@@ -66,6 +66,14 @@ function parseModels(raw: string): string[] {
     .filter(Boolean);
 }
 
+/** 页面级 grid 默认 align-content:stretch，而 `.main-area > .page-content` 是 flex:1 1 auto：
+ *  窗口一高，多余高度就被平摊给每一个区块——标题行、指标卡、面板标题行会被逐层撑高，
+ *  行内内容却留在原处，于是每块里都出现"莫名其妙的大片空白"。
+ *  这里统一改成**按内容取高、整体靠上**：任何被拉高的容器（panel 自己也是 grid、
+ *  .list-item 还是 align-items:center 的 grid）都会把空白摊给子块，所以不做局部拉伸。
+ *  本页自持这组样式，是为了不去改动正在被并行编辑的 globals.css。 */
+const PAGE_GRID: React.CSSProperties = { alignContent: "start" };
+
 export default function ChannelsPage() {
   const { notify } = useWorkspace();
   // 会话状态来自 AuthProvider，**不要**在这里自己发 /api/auth/me：
@@ -218,7 +226,7 @@ export default function ChannelsPage() {
 
   if (!ready) {
     return (
-      <div className="page-content" id="channels">
+      <div className="page-content" id="channels" style={PAGE_GRID}>
         <PageHeading hint="平台代管的 OpenAI 兼容上游与全员免费额度" />
         <LoadingSkeleton rows={3} />
       </div>
@@ -227,7 +235,7 @@ export default function ChannelsPage() {
 
   if (!account) {
     return (
-      <div className="page-content" id="channels">
+      <div className="page-content" id="channels" style={PAGE_GRID}>
         <PageHeading hint="平台代管的 OpenAI 兼容上游与全员免费额度" />
         <Panel title="请先登录" subtitle="渠道管理需要登录后的管理员身份">
           <div className="empty-state" data-testid="channels-signed-out">
@@ -246,7 +254,7 @@ export default function ChannelsPage() {
 
   if (!isAdmin) {
     return (
-      <div className="page-content" id="channels">
+      <div className="page-content" id="channels" style={PAGE_GRID}>
         <PageHeading hint="平台代管的 OpenAI 兼容上游与全员免费额度" />
         <Panel title="仅管理员可访问" subtitle="渠道里存着上游密钥，因此只对管理员开放">
           <div className="empty-state" data-testid="channels-forbidden">
@@ -264,7 +272,7 @@ export default function ChannelsPage() {
   const formOpen = creating || Boolean(editing);
 
   return (
-    <div className="page-content" id="channels">
+    <div className="page-content" id="channels" style={PAGE_GRID}>
       <PageHeading
         hint="平台代管的 OpenAI 兼容上游与全员免费额度"
         actions={

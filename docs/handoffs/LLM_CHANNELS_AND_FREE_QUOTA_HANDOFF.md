@@ -86,7 +86,21 @@
    并在 `test_llm_channels` 里锁了回归（断言"必须带 UA、且不能是 urllib 默认值"）。
    **接手者注意**：任何新加的出站 HTTP（例如以后要代理 embeddings）都要走同一套头。
 
-6. **页面不要自己发 `/api/auth/me`（浏览器验收踩出来的坑，已修）。**
+6. **页面不跟着窗口拉伸（样式自持在本页，不动 globals.css）。**
+   `.main-area > .page-content` 是 `flex: 1 1 auto`，`.page-content` 又是 `display: grid`，
+   默认 `align-content: stretch`——窗口一高，多余高度被**平摊给每个区块**：标题行 85→260px、
+   指标卡 123→299px、面板标题行 46→148px，而块内内容留在原处，于是每块里都出现大片空白
+   （实测：视口高 800→1500 时每块恰好各涨 100px）。
+   本页做法是 `alignContent: "start"`（行按内容取高、整体靠上）；实测 800/1000/1500 三档
+   区块高度完全一致（标题 85 / 指标 123 / 面板标题 46 / 渠道行 103）。
+   **为什么没照 #kb / #graph 写进 globals.css**：那两份规则同期正被另一个会话编辑，
+   本页把样式自持在 `app/channels/page.tsx`（`PAGE_GRID` 常量），避免互相覆盖；
+   等并行编辑结束，把 `PAGE_GRID` 直接搬进全局样式表即可。
+   **不要**改成"主体吃剩余高度"（`gridTemplateRows: "auto auto 1fr auto"`）：实测那样只是把空白
+   挪进面板内部——panel 自己也是 grid、`.list-item` 又是 `align-items: center`，会逐层摊白，
+   单个渠道行会"浮"在面板正中。
+
+7. **页面不要自己发 `/api/auth/me`（浏览器验收踩出来的坑，已修）。**
    `/channels` 最初在 mount effect 里直接调 `getCurrentAccount()`。子组件 effect 先于
    `AuthProvider` 恢复令牌执行，于是这次请求**不带 Authorization** → 401；而 `apiFetch`
    收到 401 会**无条件** `setSessionToken(null)`，把 localStorage 里**有效**的令牌也抹掉
