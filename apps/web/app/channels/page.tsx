@@ -14,6 +14,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import {
   Activity,
   Gauge,
@@ -37,13 +38,13 @@ import {
   createLlmChannel,
   deleteLlmChannel,
   errorMessage,
-  getCurrentAccount,
   getLlmUsage,
   listLlmChannels,
   setLlmQuota,
   speedTestLlmChannel,
   updateLlmChannel,
 } from "../../lib/api";
+import { useAuth } from "../../lib/auth";
 import { useWorkspace } from "../../lib/workspace";
 
 type FormState = {
@@ -67,8 +68,11 @@ function parseModels(raw: string): string[] {
 
 export default function ChannelsPage() {
   const { notify } = useWorkspace();
-  const [checkingAccess, setCheckingAccess] = useState(true);
-  const [isAdmin, setIsAdmin] = useState(false);
+  // 会话状态来自 AuthProvider，**不要**在这里自己发 /api/auth/me：
+  // 子组件的 effect 先于 Provider 恢复令牌执行，裸发请求会 401，而 apiFetch 收到 401 会
+  // 清掉 localStorage 里的有效令牌 —— 结果是"打开本页即被登出"（浏览器验收抓到的真 bug）。
+  const { ready, account } = useAuth();
+  const isAdmin = Boolean(account?.is_admin);
   const [channels, setChannels] = useState<LlmChannel[]>([]);
   const [usage, setUsage] = useState<LlmUsage | null>(null);
   const [defaultQuota, setDefaultQuota] = useState(0);
@@ -97,21 +101,15 @@ export default function ChannelsPage() {
     }
   }, [notify]);
 
-  // 先确认身份：非管理员给明确提示，而不是让页面空着（服务端也会 403 兜底）
+  // 等 AuthProvider 恢复完会话再动：非管理员给明确提示，而不是空白页（服务端 403 兜底）
   useEffect(() => {
-    void (async () => {
-      try {
-        const account = await getCurrentAccount();
-        setIsAdmin(Boolean(account.is_admin));
-        if (account.is_admin) await load();
-      } catch (error) {
-        notify(errorMessage(error, "身份校验失败"));
-      } finally {
-        setCheckingAccess(false);
-        setLoading(false);
-      }
-    })();
-  }, [load, notify]);
+    if (!ready) return;
+    if (!account || !account.is_admin) {
+      setLoading(false);
+      return;
+    }
+    void load();
+  }, [ready, account, load]);
 
   const openCreate = () => {
     setForm(EMPTY_FORM);
@@ -218,11 +216,30 @@ export default function ChannelsPage() {
     }
   };
 
-  if (checkingAccess) {
+  if (!ready) {
     return (
       <div className="page-content" id="channels">
         <PageHeading hint="平台代管的 OpenAI 兼容上游与全员免费额度" />
         <LoadingSkeleton rows={3} />
+      </div>
+    );
+  }
+
+  if (!account) {
+    return (
+      <div className="page-content" id="channels">
+        <PageHeading hint="平台代管的 OpenAI 兼容上游与全员免费额度" />
+        <Panel title="请先登录" subtitle="渠道管理需要登录后的管理员身份">
+          <div className="empty-state" data-testid="channels-signed-out">
+            <ShieldAlert size={18} />
+            <div className="item-copy">
+              <strong>还没登录</strong>
+              <small>
+                渠道配置涉及上游 API Key，需要管理员权限。<Link className="text-button" href="/login">去登录</Link>
+              </small>
+            </div>
+          </div>
+        </Panel>
       </div>
     );
   }
