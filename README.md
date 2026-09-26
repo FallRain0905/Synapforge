@@ -241,6 +241,8 @@ Windows 侧的 Session Worker、ConPTY、Machine Service 安装与运行属于�
   用量总览（按成员聚合）、按成员调整额度。
 - **成员**：`GET /api/llm/quota` 看自己的额度；`GET /api/llm/v1/models` 看可用模型；
   `POST /api/llm/v1/chat/completions` 调用（OpenAI 兼容，`stream=true` 走 SSE 逐行透传）。
+- **已经接上的消费点**：`/ask` 问答默认走渠道（成员**零配置**可用，答案下方标注「平台渠道 · 消耗免费额度」）；
+  没有渠道接得住该模型时回退成员自配凭据。
 - **路由**：请求的模型名必须命中某条**启用**渠道的 `models`（大小写不敏感），命中多条时 `priority` 小者优先；
   找不到就明确报错（`llm_channel_no_route`），**不猜、不回落**。
 - **密钥安全**：`api_key` 只落库，任何响应都只回 `key_hint`（末 4 位）；编辑时该输入框留空 = 保持不变。
