@@ -86,6 +86,18 @@
    并在 `test_llm_channels` 里锁了回归（断言"必须带 UA、且不能是 urllib 默认值"）。
    **接手者注意**：任何新加的出站 HTTP（例如以后要代理 embeddings）都要走同一套头。
 
+6. **页面不要自己发 `/api/auth/me`（浏览器验收踩出来的坑，已修）。**
+   `/channels` 最初在 mount effect 里直接调 `getCurrentAccount()`。子组件 effect 先于
+   `AuthProvider` 恢复令牌执行，于是这次请求**不带 Authorization** → 401；而 `apiFetch`
+   收到 401 会**无条件** `setSessionToken(null)`，把 localStorage 里**有效**的令牌也抹掉
+   ——表现为"整页打开 /channels 就被登出"（随后 `/api/auth/me` 全部 401，
+   页面退化成"你不是管理员"）。
+   修法与 `lib/workspace.tsx` 同口径：**用 `useAuth()` 的 `ready`/`account`**，
+   等 Provider 恢复完会话再动，页面自己不发身份请求。
+   **接手者注意**：任何新页面都别在 mount 里裸调接口来判断身份；
+   要么读 `useAuth()`，要么照 workspace 的 `if (!ready || !authenticated) return;` 门控。
+   （这条只有真浏览器能抓到：单测、`tsc`、`npm run build` 全绿。）
+
 ## 4. 测试与验证
 
 ```text
@@ -128,6 +140,20 @@ python -X utf8 <临时脚本>   # 读状态记忆里的测试渠道凭据 → �
 
 > 这一轮真打的价值：暴露了假上游测不出的 UA 问题（见 §3 第 5 条）。
 > 上线后若某条渠道 403/1010，先怀疑 UA 与 CF 规则，而不是怀疑模型名或 key。
+
+**浏览器实机验收（临时账号，验完已从本地库删除）**：
+
+```text
+管理员登录 → 整页打开 /channels
+→ 令牌保持 present（修复前会被清掉，见 §3 第 6 条）
+→ 指标卡：渠道 1 / 启用 1 / 调用 3 次 / 消耗 1,267 token / 默认额度 200,000
+→ 渠道列表：真实测试渠道（管理员录入）· 优先级 10 · 模型名与 Key 末 4 位在页面显示为 ••••xxxx
+→ 点「检测」：本次检测 模型 gemini-3.8-flash 可用（2425 ms），并回填"最近检测"
+→ 点「测速」：3/3 轮通过 · 均值 2400 ms（2291–2475 ms）
+→ 「新建渠道」弹窗含 6 个字段（key 是 password 型输入框）
+普通成员登录 → 整页打开 /channels
+→ 令牌保持 present，页面显示「仅管理员可访问 / 你不是管理员」+ 指引（不是空白）
+```
 
 ## 5. 尚未完成与边界
 
