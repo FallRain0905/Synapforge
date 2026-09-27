@@ -2243,6 +2243,29 @@ class AgentChatTurnOutput(APIModel):
     relative_path: str = ""
 
 
+class AgentConversationPromote(APIModel):
+    """把一次对话转入正式项目生产（W1.2）：会话产出 → 任务输入附件 + 新任务。
+
+    产物只能从**本会话**轮次的 outputs 里挑（服务端校验），防止跨会话/跨项目夹带输入。
+    """
+
+    title: str = Field(min_length=2, max_length=180)
+    description: str = Field(default="", max_length=8000)
+    output_artifact_ids: list[UUID] = Field(default_factory=list, max_length=10)
+    # 交给另一个 Agent：当前任务系统按能力匹配领取、不支持把任务硬性钉给某个 Agent，
+    # 所以这里如实做成**结构化交接块**写进任务描述（目标 + 上下文）；真正的派发钉定
+    # 属多智能体编排期（实施计划 W3.2 的派发策略），不在这里假装已经能钉。
+    target_agent_id: str | None = Field(default=None, max_length=80)
+    handoff_context: str | None = Field(default=None, max_length=4000)
+
+
+class AgentConversationPromoteResult(APIModel):
+    task: "Task"
+    attached_artifact_ids: list[UUID] = Field(default_factory=list)
+    # 非空 = 有交接意图；如实说明"是描述里的交接块，不是硬性钉定"，页面照原文展示。
+    handoff_note: str = ""
+
+
 class AgentChatTurnApprovalRequest(APIModel):
     """执行体上报一条权限请求（M-5c S-3）。
 

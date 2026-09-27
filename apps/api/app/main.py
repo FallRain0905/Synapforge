@@ -23,6 +23,8 @@ from .contracts import (
     AgentChatConversationCreate,
     AgentChatConversationUpdate,
     AgentChatMessageCreate,
+    AgentConversationPromote,
+    AgentConversationPromoteResult,
     AgentChatTurn,
     AgentChatTurnApproval,
     AgentChatTurnApprovalDecision,
@@ -4668,6 +4670,36 @@ def report_chat_turn_event(
         return agent_chat.record_turn_event(store, turn_id, agent_id, data)
     except agent_chat.AgentChatError as error:
         raise _agent_chat_http_error(error) from error
+
+
+@app.post("/api/my-agent/conversations/{conversation_id}/promote", response_model=AgentConversationPromoteResult, status_code=201)
+def promote_my_agent_conversation(
+    conversation_id: UUID, data: AgentConversationPromote, request: Request
+) -> AgentConversationPromoteResult:
+    """转入项目生产（W1.2）：会话产出挂为任务输入附件 + 创建正式任务。
+
+    幂等键服务端派生、**内容寻址**（会话 + 请求指纹）：同一会话同一载荷重复提交
+    返回同一任务；载荷变了就是新的转产意图，得到自己的键、允许再建。
+    """
+
+    try:
+        member_id = _request_member_id(request)
+        fingerprint = request_hash(
+            {"conversation_id": str(conversation_id), "member_id": member_id, "payload": data.model_dump(mode="json")}
+        )
+        result = idempotent_model_response(
+            f"myagent:promote:{conversation_id}:{fingerprint[:16]}",
+            "myagent.conversation.promote",
+            fingerprint,
+            AgentConversationPromoteResult,
+            lambda: agent_chat.promote_conversation(store, conversation_id, member_id, data),
+        )
+    except agent_chat.AgentChatError as error:
+        raise _agent_chat_http_error(error) from error
+    except Exception as error:
+        raise task_protocol_error(error) from error
+    publish_chat_after(result.task.project_id)
+    return result
 
 
 @app.get("/api/agent/artifacts/{artifact_id}/content")

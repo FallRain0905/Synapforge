@@ -36,8 +36,11 @@ from .contracts import (
     AgentChatTurnEvent,
     AgentChatTurnEventReport,
     AgentChatTurnOutput,
+    AgentConversationPromote,
+    AgentConversationPromoteResult,
     MyAgentEndpoint,
     MyAgentRole,
+    TaskCreate,
 )
 
 # 对话默认命令模板（平台把模板也交给执行体，执行体只做 `{prompt}` 替换 + 在它前面插入 --session/-m）。
@@ -988,6 +991,69 @@ def cancel_turn(store: Any, turn_id: UUID, member_id: str, reason: str = "") -> 
     return get_turn(store, turn_id)
 
 
+def _conversation_output_index(store: Any, conversation_id: UUID) -> dict[str, str]:
+    """本会话全部轮次产出：{artifact_id: 名字}——promote 挑输入附件的白名单。"""
+
+    rows = store.db.execute(
+        "SELECT outputs FROM agent_turns WHERE conversation_id = ?", (str(conversation_id),)
+    ).fetchall()
+    index: dict[str, str] = {}
+    for row in rows:
+        for item in _turn_outputs(row["outputs"]):
+            index.setdefault(str(item.artifact_id), item.name or "")
+    return index
+
+
+def promote_conversation(
+    store: Any, conversation_id: UUID, member_id: str, data: AgentConversationPromote
+) -> AgentConversationPromoteResult:
+    """转入项目生产（W1.2）：从会话建一个正式任务，会话产出挂为任务输入附件。
+
+    诚实边界：任务系统按能力匹配领取，`target_agent_id` 只能做成描述里的结构化交接块
+    （目标 Agent 存在性在这里校验），不做假的"钉定"。
+    """
+
+    ensure_schema(store)
+    conversation = get_conversation(store, conversation_id, member_id)  # 归属校验
+    available = _conversation_output_index(store, conversation_id)
+    requested: list[UUID] = []
+    for artifact_id in data.output_artifact_ids:
+        key = str(artifact_id)
+        if key not in available:
+            raise AgentChatError("artifact_not_in_conversation", key)
+        requested.append(artifact_id)
+
+    description = data.description or ""
+    handoff_note = ""
+    if data.target_agent_id:
+        exists = store.db.execute(
+            "SELECT 1 FROM agents WHERE agent_id = ?", (data.target_agent_id,)
+        ).fetchone()
+        if exists is None:
+            raise AgentChatError("target_agent_not_found", data.target_agent_id)
+        block = ["—— 来自对话转产 ——", f"对话：{conversation.title or conversation_id}（{conversation_id}）"]
+        block.append(f"交接目标：agent:{data.target_agent_id}（领取时优先核对；平台按能力匹配派发）")
+        if data.handoff_context:
+            block.append("交接上下文：")
+            block.append(data.handoff_context)
+        description = (description + chr(10) * 2 if description else "") + chr(10).join(block)
+        handoff_note = f"交接块已写入任务描述（目标 agent:{data.target_agent_id}；平台按能力匹配领取，未硬性钉定）"
+
+    task = store.create_task(
+        conversation.project_id,
+        TaskCreate(
+            title=data.title,
+            description=description,
+            input_artifacts=[str(a) for a in requested],
+        ),
+    )
+    return AgentConversationPromoteResult(
+        task=task,
+        attached_artifact_ids=requested,
+        handoff_note=handoff_note,
+    )
+
+
 def ensure_turn_owned(store: Any, turn_id: UUID, member_id: str) -> None:
     """SSE 订阅前的可见性门：轮次必须属于该成员的会话（与 list_turn_events 同口径，但不搬数据）。"""
 
@@ -1033,6 +1099,7 @@ __all__ = [
     "list_my_agents",
     "list_turn_events",
     "list_turns",
+    "promote_conversation",
     "record_turn_event",
     "turn_project_id",
     "turn_topic",
