@@ -14,10 +14,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any, Sequence
 from uuid import UUID, uuid4
 
+from . import stream_bridge
 from .contracts import (
     AGENT_TURN_STOP_REASONS,
     AgentChatConversation,
@@ -42,6 +44,57 @@ from .contracts import (
 DEFAULT_COMMAND_TEMPLATE = ["opencode", "run", "--format", "json", "--auto", "{prompt}"]
 # 一轮的默认租约：执行体崩了不会把会话卡死（过期可被重新领取）。
 DEFAULT_CLAIM_LEASE_SECONDS = 1800
+
+# ---- 实时桥（W1.3，消费工作包 C 的 stream_bridge）--------------------------------
+#
+# 事件权威仍是 `agent_turn_events` 与轮次行本身；桥只是 SSE 加速器（断线重连从桥重放，
+# 桥被裁剪就给 gap 让客户端回权威存储重同步）。两条流的游标口径：
+#   * turn:{id}     seq == agent_turn_events.sequence（执行体上报的幂等键）——SSE 的
+#                   `id:` 帧、桥的游标、权威存储三处一致，重连从任意一侧重放都不错位；
+#   * conversation:{id}  seq 由桥自增（会话流只承载"轮次生命周期"信号：
+#                   turn.created / turn.finished / turn.cancelled），gap 后客户端
+#                   全量重取轮次列表即可。轮次内容不镜像到会话流（省内存、避免两套 seq）。
+#
+# 注意：`validate_envelope`（event_catalog）只认 `project.*` 注册名，适用于第三期
+# project 事件写 outbox 的路径；轮次事件按契约文档是"沿用既有通道"的姊妹协议，
+# 不进那套目录——这里的守卫是结构性的（seq 正整数、事件名非空、payload 是对象）。
+
+_BRIDGE = stream_bridge.StreamBridge()
+
+
+def bridge() -> stream_bridge.StreamBridge:
+    """当前实时桥（测试可整体替换 `agent_chat._BRIDGE`）。"""
+
+    return _BRIDGE
+
+
+def turn_topic(turn_id: UUID) -> str:
+    return f"turn:{turn_id}"
+
+
+def conversation_topic(conversation_id: UUID) -> str:
+    return f"conversation:{conversation_id}"
+
+
+def _publish_turn_event_to_bridge(turn_id: UUID, sequence: int, event_type: str, payload: Mapping) -> None:
+    """结构守卫后镜像一条轮次事件到桥（seq 用权威存储的 sequence，游标两处一致）。"""
+
+    if int(sequence) < 1 or not str(event_type or "").strip() or not isinstance(payload, Mapping):
+        return  # 守卫不过就少一条加速器缓存，绝不让它污染流或抛错打断落库路径
+    try:
+        _BRIDGE.publish(turn_topic(turn_id), str(event_type), dict(payload), seq=int(sequence))
+    except ValueError:
+        # 桥侧拒绝（seq 非递增等）只影响加速器，不影响权威存储——落库已成功，流上客户端会走 gap 重同步。
+        pass
+
+
+def _notify_conversation(conversation_id: UUID, action: str, data: dict[str, Any]) -> None:
+    """会话流的轮次生命周期信号（turn.created/finished/cancelled；错误是事件，不是传输层异常）。"""
+
+    try:
+        _BRIDGE.publish(conversation_topic(conversation_id), action, data)
+    except ValueError:
+        pass
 
 
 class AgentChatError(RuntimeError):
@@ -651,6 +704,10 @@ def update_conversation(
 
 def delete_conversation(store: Any, conversation_id: UUID, member_id: str) -> None:
     get_conversation(store, conversation_id, member_id)  # 归属校验
+    # 桥清理要的 turn id 先取出来（删完行就查不到了）。
+    turn_rows = store.db.execute(
+        "SELECT id FROM agent_turns WHERE conversation_id = ?", (str(conversation_id),)
+    ).fetchall()
     # 先清"挂在轮次上的东西"再删轮次：**漏一张表就是一整个会话删不掉**（S-3 的审批表踩过——
     # `agent_turn_approvals.turn_id` 有外键，不先删它，DELETE agent_turns 直接违反约束）。
     store.db.execute(
@@ -664,6 +721,11 @@ def delete_conversation(store: Any, conversation_id: UUID, member_id: str) -> No
     store.db.execute("DELETE FROM agent_turns WHERE conversation_id = ?", (str(conversation_id),))
     store.db.execute("DELETE FROM agent_conversations WHERE id = ?", (str(conversation_id),))
     store.db.commit()
+    # 会话没了，实时桥上的话题一并清走（墓碑语义：阻塞中的订阅者收到 END，
+    # 需要历史的客户端回权威存储——桥不装它不知道的事）。
+    for row in turn_rows:
+        _BRIDGE.cleanup(turn_topic(UUID(str(row["id"]))))
+    _BRIDGE.cleanup(conversation_topic(conversation_id))
 
 
 def list_turns(store: Any, conversation_id: UUID, member_id: str, *, limit: int = 200) -> list[AgentChatTurn]:
@@ -755,6 +817,8 @@ def append_message(store: Any, conversation_id: UUID, member_id: str, data: Agen
         (timestamp, title, str(conversation_id)),
     )
     store.db.commit()
+    # 会话流信号：有新轮次了（订阅方据此刷新轮次列表/打开新轮的事件流）
+    _notify_conversation(conversation_id, "turn.created", {"turn_id": turn_id, "seq": next_seq})
     return get_turn(store, UUID(turn_id))
 
 
@@ -852,6 +916,14 @@ def complete_turn(store: Any, turn_id: UUID, agent_id: str, data: AgentChatTurnC
             (session_key, timestamp, str(row["conversation_id"])),
         )
     store.db.commit()
+    # 流收尾：轮次话题宣布结束（订阅者收到 END 后回权威行取最终 content/stop_reason），
+    # 会话流广播生命周期事件（订阅方据此刷新轮次列表）。
+    _BRIDGE.publish_end(turn_topic(turn_id))
+    _notify_conversation(
+        UUID(str(row["conversation_id"])),
+        "turn.finished",
+        {"turn_id": str(turn_id), "status": "DONE" if data.success else "FAILED", "stop_reason": stop_reason},
+    )
     return get_turn(store, turn_id)
 
 
@@ -875,6 +947,9 @@ def record_turn_event(store: Any, turn_id: UUID, agent_id: str, data: AgentChatT
         (event_id, str(turn_id), int(data.sequence), data.event_type, json.dumps(data.payload or {}, ensure_ascii=False), timestamp),
     )
     store.db.commit()
+    # 镜像到实时桥（加速器）：seq 用权威存储的 sequence，SSE 的 id: 帧/桥游标/权威存储三处一致。
+    # 注意顺序：先落库后上桥——桥丢了无所谓（gap 重同步），权威存储丢了才是事故。
+    _publish_turn_event_to_bridge(turn_id, int(data.sequence), data.event_type, dict(data.payload or {}))
     return _turn_event(
         store.db.execute("SELECT * FROM agent_turn_events WHERE id = ?", (event_id,)).fetchone()
     )
@@ -903,7 +978,27 @@ def cancel_turn(store: Any, turn_id: UUID, member_id: str, reason: str = "") -> 
         (reason or "cancelled_by_member", timestamp, str(turn_id)),
     )
     store.db.commit()
+    # 流收尾（与 complete_turn 同口径）：轮次话题结束，会话流广播取消。
+    _BRIDGE.publish_end(turn_topic(turn_id))
+    _notify_conversation(
+        UUID(str(owned["conversation_id"])),
+        "turn.cancelled",
+        {"turn_id": str(turn_id), "status": "CANCELLED", "stop_reason": "cancelled"},
+    )
     return get_turn(store, turn_id)
+
+
+def ensure_turn_owned(store: Any, turn_id: UUID, member_id: str) -> None:
+    """SSE 订阅前的可见性门：轮次必须属于该成员的会话（与 list_turn_events 同口径，但不搬数据）。"""
+
+    ensure_schema(store)
+    owned = store.db.execute(
+        "SELECT 1 FROM agent_turns t JOIN agent_conversations c ON c.id = t.conversation_id "
+        "WHERE t.id = ? AND c.member_id = ?",
+        (str(turn_id), member_id),
+    ).fetchone()
+    if owned is None:
+        raise AgentChatError("turn_not_found")
 
 
 def turn_project_id(store: Any, turn_id: UUID) -> str:
@@ -922,13 +1017,16 @@ __all__ = [
     "DEFAULT_CLAIM_LEASE_SECONDS",
     "DEFAULT_COMMAND_TEMPLATE",
     "append_message",
+    "bridge",
     "cancel_turn",
     "claim_turn",
     "complete_turn",
+    "conversation_topic",
     "conversation_project_id",
     "create_conversation",
     "delete_conversation",
     "ensure_schema",
+    "ensure_turn_owned",
     "get_conversation",
     "get_turn",
     "list_conversations",
@@ -937,4 +1035,5 @@ __all__ = [
     "list_turns",
     "record_turn_event",
     "turn_project_id",
+    "turn_topic",
 ]

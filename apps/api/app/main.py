@@ -188,7 +188,7 @@ from .path_privacy import public_agent, public_artifact, public_run
 from . import archive, drive, drive_grants, file_transfers, llm_channels, workspace_files
 from .cumcm_importer import CumcmHandoffImporter, CumcmImporter
 from .gateway import GatewayProtocolError, GatewayService
-from . import agent_chat, ai_chat, ai_probe, boundary_gate, collaboration, convert_queue, delivery, document_api, kb_gateway, knowledge_base, observability, pack_api, personal_drive
+from . import agent_chat, ai_chat, ai_probe, boundary_gate, collaboration, convert_queue, delivery, document_api, kb_gateway, knowledge_base, observability, pack_api, personal_drive, stream_bridge
 from .contracts import LlmChannelCreate, LlmChannelUpdate, LlmQuotaSet
 from packages.competition_packs import CompetitionPackError
 
@@ -4454,6 +4454,97 @@ def my_agent_turn_events(turn_id: UUID, request: Request) -> list[AgentChatTurnE
         return agent_chat.list_turn_events(store, turn_id, _request_member_id(request))
     except agent_chat.AgentChatError as error:
         raise _agent_chat_http_error(error) from error
+
+
+# ---- my-agent 实时流（W1.3，消费工作包 C 的 stream_bridge）-----------------------
+#
+# 帧格式 event/data/id：`id:` 帧即游标（turn 流 = agent_turn_events.sequence；会话流 = 桥自增），
+# EventSource 断线重连自动带 Last-Event-ID，服务端从桥重放增量。
+# 两个控制帧：`__gap__`（桥被裁剪、无法完整重放——客户端必须回权威接口全量重同步后重连，
+# 绝不把残缺回放当完整流用）；`__end__`（正常结束；最终 content/stop_reason 以轮次行为准）。
+# 心跳用 SSE 注释帧（`: heartbeat`），不打扰 EventSource 的游标状态。
+
+
+def _agent_sse_frame(event: str, data: str, *, seq: int | None = None) -> str:
+    lines = []
+    if seq is not None:
+        lines.append(f"id: {seq}")
+    lines.append(f"event: {event}")
+    lines.append(f"data: {data}")
+    return chr(10).join(lines) + chr(10) * 2
+
+
+def _agent_stream_after_seq(request: Request, after: int | None) -> int:
+    """续传游标：显式 `?after=` 优先，其次 SSE 标准的 Last-Event-ID 头，都没有从头开始。"""
+
+    if after is not None:
+        return int(after)
+    last_event_id = request.headers.get("Last-Event-ID", "").strip()
+    return int(last_event_id) if last_event_id.isdigit() else 0
+
+
+def _agent_sse_stream(topic: str, after_seq: int) -> StreamingResponse:
+    """把桥订阅包装成 SSE 响应（C 的 subscribe 是同步生成器，线程池直接迭代）。"""
+
+    def generate():
+        for item in agent_chat.bridge().subscribe(topic, after_seq=after_seq):
+            if isinstance(item, stream_bridge.BridgeGap):
+                yield _agent_sse_frame(
+                    "__gap__",
+                    json.dumps(
+                        {
+                            "requested_seq": item.requested_seq,
+                            "earliest_available": item.earliest_available,
+                            "latest_available": item.latest_available,
+                        }
+                    ),
+                )
+                return
+            if item is stream_bridge.END_SENTINEL:
+                yield _agent_sse_frame("__end__", "{}")
+                return
+            if item is stream_bridge.HEARTBEAT_SENTINEL:
+                yield ": heartbeat" + chr(10) + chr(10)
+                continue
+            yield _agent_sse_frame(item.event, json.dumps(item.data, ensure_ascii=False), seq=item.seq)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/my-agent/turns/{turn_id}/events/stream", response_class=StreamingResponse)
+def stream_my_agent_turn_events(
+    turn_id: UUID, request: Request, after: int | None = Query(default=None, ge=0)
+) -> StreamingResponse:
+    """一轮的过程事件流（SSE，增量）。实时层是加速器，权威仍是 `agent_turn_events`。"""
+
+    try:
+        agent_chat.ensure_turn_owned(store, turn_id, _request_member_id(request))
+    except agent_chat.AgentChatError as error:
+        raise _agent_chat_http_error(error) from error
+    return _agent_sse_stream(agent_chat.turn_topic(turn_id), _agent_stream_after_seq(request, after))
+
+
+@app.get("/api/my-agent/conversations/{conversation_id}/stream", response_class=StreamingResponse)
+def stream_my_agent_conversation(
+    conversation_id: UUID, request: Request, after: int | None = Query(default=None, ge=0)
+) -> StreamingResponse:
+    """会话流（SSE）：轮次生命周期信号 `turn.created / turn.finished / turn.cancelled`。
+
+    只承载生命周期，不镜像轮次内容——内容走 `turns/{id}/events/stream`；
+    这里 gap 后客户端全量重取轮次列表即可（会话流的权威就是轮次行本身）。
+    """
+
+    try:
+        agent_chat.get_conversation(store, conversation_id, _request_member_id(request))
+    except agent_chat.AgentChatError as error:
+        raise _agent_chat_http_error(error) from error
+    return _agent_sse_stream(
+        agent_chat.conversation_topic(conversation_id), _agent_stream_after_seq(request, after)
+    )
 
 
 @app.post("/api/my-agent/turns/{turn_id}/stop", response_model=AgentChatTurn)
