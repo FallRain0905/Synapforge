@@ -14,11 +14,17 @@ seq 游标与事件契约一致（``docs/AGENT_EVENT_CONTRACT.md`` 规则 4）�
 线程安全：所有方法可从任意线程调用；``publish`` 不阻塞（满则裁最旧，
 消费方以 gap 察觉）。多进程部署时换成 Redis 实现再谈，接口不变。
 
-topic 约定（软约束，纯字符串）::
+topic 约定（软约束，纯字符串）与 seq 归属（与 A 对齐，2026-09-26）::
 
-    turn:{turn_id}          单轮流式（W1.3）
-    conversation:{id}       会话全量流
-    project:{id}            项目协作流（W2.3 团队视图）
+    turn:{turn_id}       单轮流式（W1.3）；seq 镜像 agent_turn_events.sequence——
+                         权威序列只有一份，桥不二次记账
+    conversation:{id}    会话生命周期信号（开始/结束/轮次边界）；seq 由桥自增。
+                         不承载全量回放：历史一律回 agent_turn_events 分页接口
+    project:{id}         项目协作流（W2.3 团队视图）；seq 镜像事件信封的 seq
+                         （docs/AGENT_EVENT_CONTRACT.md §4）
+
+原则：凡有权威序列的流一律镜像，凡聚合多源（各轮 sequence 各自从 1 起算）
+的流只能桥自增、并把语义收窄到生命周期信号，避免两套 seq 打架。
 """
 
 from __future__ import annotations
