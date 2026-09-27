@@ -9,7 +9,8 @@
  * - Run：RUNNING/SUCCEEDED/FAILED（含 CANCELLED）
  * - Artifact：DRAFT/PENDING_REVIEW/APPROVED/REJECTED
  * - Handoff 交接：PENDING/ACCEPTED/REJECTED；复核结论 PASS/PASS_WITH_ASSUMPTIONS/NEEDS_REVISION/BLOCKED
- * - Gate：PENDING/PASSED/REJECTED/BLOCKED
+ * - Gate：PENDING/PASSED/REJECTED/BLOCKED；验收判定三值结论 HOLDS/NOT_HOLDS/UNVERIFIED
+ *   （fail-closed：UNVERIFIED ≠ 通过，见 apps/api/app/acceptance.py 与 RECEIPT_FORMAT 契约）
  */
 export type StatusDomain = "task" | "run" | "artifact" | "handoff" | "review" | "gate";
 
@@ -57,6 +58,10 @@ export const STATUS_DICTIONARY: Record<StatusDomain, Record<string, string>> = {
     PASSED: "门禁已通过",
     REJECTED: "门禁未通过：按意见处理后重新提交",
     BLOCKED: "门禁阻塞",
+    // 验收判定器（acceptance.py）的三值结论：UNVERIFIED 不等于通过，也不等于不通过
+    HOLDS: "条件成立：门禁通过",
+    NOT_HOLDS: "条件不成立：门禁不通过",
+    UNVERIFIED: "未能验证：证据不足或条件不可判定——按不通过处理，需要补充证据",
   },
 };
 

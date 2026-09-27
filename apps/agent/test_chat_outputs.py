@@ -85,6 +85,26 @@ class ChatOutputCollectorTests(unittest.TestCase):
         self.assertIsNone(payloads["new.md"].get("run_id"))
         self.assertEqual(payloads["new.md"]["status"], "PENDING_REVIEW")
 
+    def test_outputs_carry_receipts_per_receipt_format(self) -> None:
+        """产物溯源（RECEIPT_FORMAT v1 / §5.2 口径）：output_hash 对写入文件的内容字节算。"""
+        import hashlib
+
+        collector = self.collector()
+        collector.snapshot()
+        (self.workspace / "report.md").write_text("溯源正文", encoding="utf-8")
+        result = collector.collect("turn-1")
+
+        self.assertEqual(len(result.outputs), 1)
+        receipt = result.outputs[0].as_payload().get("receipt")
+        self.assertIsInstance(receipt, dict)
+        self.assertEqual(receipt["receipt_version"], 1)
+        self.assertEqual(receipt["tool_name"], "workspace_diff")
+        self.assertEqual(receipt["tool_call_id"], "turn-1")
+        self.assertEqual(receipt["output_hash"], hashlib.sha256("溯源正文".encode("utf-8")).hexdigest()[:16])
+        self.assertEqual(receipt["output_bytes"], len("溯源正文".encode("utf-8")))
+        self.assertEqual(receipt["status"], "success")
+        self.assertRegex(receipt["args_hash"], r"^[0-9a-f]{16}$")
+
     def test_unchanged_files_are_not_re_uploaded(self) -> None:
         collector = self.collector()
         collector.snapshot()

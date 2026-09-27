@@ -21,9 +21,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 try:  # 包内导入（正常运行）
+    from .receipts import build_file_receipt
     from .result_uploader import AgentArtifactClient, DiscoveredOutput, OutputDiscovery
     from .workspace_scan import INPUT_DIR_NAMES, diff, is_excluded, snapshot
 except ImportError:  # 直接脚本执行 / 测试以顶层模块导入
+    from receipts import build_file_receipt  # type: ignore
     from result_uploader import AgentArtifactClient, DiscoveredOutput, OutputDiscovery  # type: ignore
     from workspace_scan import INPUT_DIR_NAMES, diff, is_excluded, snapshot  # type: ignore
 
@@ -35,7 +37,11 @@ MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 
 @dataclass(frozen=True)
 class ChatOutput:
-    """一条对话产出（给平台 `complete` 用；不带内容，内容在成果物里）。"""
+    """一条对话产出（给平台 `complete` 用；不带内容，内容在成果物里）。
+
+    `receipt` 是产物溯源（RECEIPT_FORMAT v1，`docs/RECEIPT_FORMAT.md`）：
+    平台契约落地前 `complete` 请求体里的该字段会被忽略，落地后由 A 校验落库。
+    """
 
     artifact_id: str
     name: str
@@ -43,9 +49,10 @@ class ChatOutput:
     artifact_type: str
     mime_type: str
     relative_path: str = ""
+    receipt: dict[str, Any] | None = None
 
     def as_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "artifact_id": self.artifact_id,
             "name": self.name,
             "size_bytes": int(self.size_bytes),
@@ -53,6 +60,9 @@ class ChatOutput:
             "mime_type": self.mime_type,
             "relative_path": self.relative_path,
         }
+        if self.receipt is not None:
+            payload["receipt"] = self.receipt
+        return payload
 
 
 @dataclass
@@ -187,6 +197,15 @@ class ChatOutputCollector:
         if not artifact_id:
             raise RuntimeError("artifact_create_no_id")
         self._client.upload_content(artifact_id, output)
+        # 产物溯源（RECEIPT_FORMAT v1）：§5.2 口径——output_hash 对"写入文件的内容字节"算
+        # （content_hash 就是该口径的完整 SHA-256），工具名如实写采集通道，调用 id 用轮次。
+        receipt = build_file_receipt(
+            tool_name="workspace_diff",
+            tool_call_id=turn_id,
+            args={"path": output.relative_path},
+            content_sha256_hex=output.content_hash,
+            output_bytes=output.size_bytes,
+        )
         return ChatOutput(
             artifact_id=artifact_id,
             name=output.name,
@@ -194,6 +213,7 @@ class ChatOutputCollector:
             artifact_type=output.artifact_type,
             mime_type=output.mime_type,
             relative_path=output.relative_path,
+            receipt=receipt,
         )
 
 
