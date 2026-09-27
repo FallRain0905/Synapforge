@@ -2712,6 +2712,42 @@ export async function updateMyAgentConversation(
   return response.json();
 }
 
+/** 转入项目生产（W1.2）：本会话轮次的产出 → 任务输入附件 + 新任务。
+ * target_agent_id/handoff_context 非空时，A 会在任务描述里写**结构化交接块**——
+ * 是描述不是硬性钉定：任务仍按能力匹配领取（响应 handoff_note 会原文说明，页面照实展示）。 */
+export type MyAgentPromoteInput = {
+  title: string;
+  description?: string;
+  output_artifact_ids?: string[];
+  target_agent_id?: string | null;
+  handoff_context?: string | null;
+};
+
+export type MyAgentPromoteResult = {
+  task: Task;
+  attached_artifact_ids: string[];
+  handoff_note: string;
+};
+
+export async function promoteMyAgentConversation(
+  conversationId: string,
+  input: MyAgentPromoteInput,
+): Promise<MyAgentPromoteResult> {
+  const response = await apiFetch(`${API_URL}/api/my-agent/conversations/${conversationId}/promote`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: input.title,
+      description: input.description ?? "",
+      output_artifact_ids: input.output_artifact_ids ?? [],
+      target_agent_id: input.target_agent_id ?? null,
+      handoff_context: input.handoff_context ?? null,
+    }),
+  });
+  if (!response.ok) throw await apiError(response, "转入项目生产失败");
+  return response.json();
+}
+
 export async function listMyAgentTurns(conversationId: string): Promise<MyAgentTurn[]> {
   const response = await apiFetch(`${API_URL}/api/my-agent/conversations/${conversationId}/turns`, { cache: "no-store" });
   if (!response.ok) throw await apiError(response, "对话记录读取失败");

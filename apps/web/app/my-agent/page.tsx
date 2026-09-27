@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowDown, ArrowUp, Bot, Brain, Cpu, FileText, Gauge, History, MessageSquare, Paperclip, Play, Plus, RefreshCcw, Send, Server, ShieldAlert, Sparkles, Square, Trash2, Wrench, X } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, Bot, Brain, Cpu, FileText, FolderInput, Gauge, History, MessageSquare, Paperclip, Play, Plus, RefreshCcw, Send, Server, ShieldAlert, Sparkles, Square, Trash2, Wrench, X } from "lucide-react";
 import Link from "next/link";
 import { AgentResponse } from "../../components/agent-response";
 import { Markdown } from "../../components/markdown";
@@ -33,6 +33,8 @@ import {
 import { useAuth } from "../../lib/auth";
 import { useWorkspace } from "../../lib/workspace";
 import { STOP_REASON_LABEL } from "../../lib/status-dictionary";
+import { openAgentConversationStream, openAgentTurnStream } from "../../lib/agent-stream";
+import { PromoteDialog } from "../../components/promote-dialog";
 
 const ACTIVE_STATUSES = new Set(["PENDING", "CLAIMED"]);
 
@@ -196,6 +198,8 @@ export default function MyAgentPage() {
   const [newReply, setNewReply] = useState(false);
   // 「+」展开的添加面板（仿 zcode 的添加区：附件 / 角色 / 执行体）
   const [addOpen, setAddOpen] = useState(false);
+  // 转入项目生产（W1.2）：把这次对话的产出建成正式任务
+  const [promoteOpen, setPromoteOpen] = useState(false);
   const composerRef = useRef<HTMLDivElement | null>(null);
 
   const agent = agents[agentIndex] ?? null;
@@ -353,6 +357,62 @@ export default function MyAgentPage() {
         if (selectedIdRef.current === conversationId) finishingTurn.current = "";
       });
   }, [lastTurn, selectedId]);
+
+  // ---- 实时流（W1.3 B 侧）：轮次事件流 + 会话生命周期流 --------------------
+  // 定位是"加速器"：900ms 轮询效应原样保留（权威兜底），事件按 sequence 去重合并，
+  // 两边谁缺了都能被另一方补上。连接反复失败时静默降级（实时层不可用≠功能不可用）。
+
+  const mergeTurnEvent = useCallback((turnId: string, incoming: MyAgentTurnEvent) => {
+    setEventsByTurn((current) => {
+      const existing = current[turnId] ?? [];
+      if (existing.some((event) => event.sequence === incoming.sequence && incoming.sequence > 0)) return current;
+      const next = [...existing, incoming].sort((a, b) => a.sequence - b.sequence);
+      return { ...current, [turnId]: next };
+    });
+  }, []);
+
+  // 轮次流：跟着"当前活跃轮次"走。依赖用 id 而不是对象——轮询每 900ms 产生新对象，不能跟着重连。
+  const activeTurnId = activeTurn?.id ?? "";
+  useEffect(() => {
+    if (!activeTurnId || activeTurnId.startsWith("local-")) return;
+    const conversationId = selectedIdRef.current;
+    const handle = openAgentTurnStream({
+      turnId: activeTurnId,
+      onEvent: (event) => mergeTurnEvent(activeTurnId, event),
+      onGap: () => {
+        // 桥被裁剪：回权威接口全量重同步（轮询也会补），然后不再续这条流——
+        // 轮询仍在跑，重新开流交给下一个 effect 触发时机
+        void listMyAgentTurnEvents(activeTurnId)
+          .then((fresh) => {
+            if (selectedIdRef.current === conversationId) {
+              setEventsByTurn((current) => ({ ...current, [activeTurnId]: fresh }));
+            }
+          })
+          .catch(() => undefined);
+      },
+      onEnd: () => {
+        // 正常结束：回 GET /turns 取最终 content/stop_reason 覆盖临时流（与 finishing 效应同口径）
+        if (selectedIdRef.current === conversationId) void loadTurns(conversationId);
+      },
+      onGiveUp: () => undefined, // 静默降级轮询
+    });
+    return () => handle.close();
+  }, [activeTurnId, mergeTurnEvent, loadTurns]);
+
+  // 会话流：turn.created / finished / cancelled 生命周期信号 → 立刻重拉轮次列表
+  // （没有活跃轮次时轮询不跑，这条流让"新轮次出现"不再等下一次交互）。
+  useEffect(() => {
+    if (!selectedId || selectedId.startsWith("local-")) return;
+    const conversationId = selectedId;
+    const handle = openAgentConversationStream({
+      conversationId,
+      onSignal: () => {
+        if (selectedIdRef.current === conversationId) void loadTurns(conversationId);
+      },
+      onGiveUp: () => undefined,
+    });
+    return () => handle.close();
+  }, [selectedId, loadTurns]);
 
   const activeEvents = activeTurn ? eventsByTurn[activeTurn.id] ?? [] : [];
   const thinkingLength = useMemo(
@@ -927,6 +987,16 @@ export default function MyAgentPage() {
                     {!agents.length ? <option value={0}>没有可用执行体</option> : null}
                   </select>
                 </label>
+                <button
+                  type="button"
+                  className="button button-secondary"
+                  data-testid="my-agent-promote"
+                  title="转入项目生产：把这次对话的产出建成正式任务（可带交接说明）"
+                  disabled={!selected}
+                  onClick={() => setPromoteOpen(true)}
+                >
+                  <FolderInput size={14} /> 转入项目生产
+                </button>
                 {/* 模型与角色挪到输入框下面的控件行里（仿 zcode：控件事跟输入区在一起），
                     这里只留"这一轮跑在哪台执行体上"和如实标注的动手权限说明。 */}
                 {/* 选中一个能动手的角色时，如实标一句：它会改动执行体的工作目录（不是警告，是事实说明） */}
@@ -1567,6 +1637,17 @@ export default function MyAgentPage() {
             setDeleteTarget(null);
             void handleDelete(target.id);
           }}
+        />
+      ) : null}
+
+      {promoteOpen && selected ? (
+        <PromoteDialog
+          conversationId={selected.id}
+          conversationTitle={selected.title}
+          agents={agents}
+          turns={turns}
+          onClose={() => setPromoteOpen(false)}
+          onError={(message) => notify(message)}
         />
       ) : null}
     </div>
