@@ -2129,6 +2129,22 @@ class AgentChatConversation(APIModel):
     archived_at: datetime | None = None
 
 
+# 一轮对话的**终止原因**（stop_reason，W1.1）：`status` 只说"怎么结束"（DONE/FAILED/CANCELLED），
+# 这一列说"为什么"。平台侧能自己判定的：cancelled（成员停止）与 completed/failed（按回报的
+# success 兜底）；其余靠执行体回报（token_capped/turn_capped 等执行体信号映射，B 侧后补）。
+# 认不出的值平台一律归一化为 `unknown`——宁可诚实说"不知道为什么结束"，也不编一个像模像样的值。
+AGENT_TURN_STOP_REASONS: tuple[str, ...] = (
+    "completed",
+    "failed",
+    "cancelled",
+    "token_capped",
+    "turn_capped",
+    "timeout",
+    "permission_timeout",
+    "unknown",
+)
+
+
 class AgentChatTurn(APIModel):
     """一轮对话：用户消息 + 执行体的回复（同一行，回复由执行体回填）。"""
 
@@ -2151,6 +2167,8 @@ class AgentChatTurn(APIModel):
     artifacts: list["AgentChatInputFile"] = Field(default_factory=list)
     # 这一轮产出的文件（成果物，待审）：由执行体在 complete 时上报（2026-09-24）
     outputs: list["AgentChatTurnOutput"] = Field(default_factory=list)
+    # 为什么结束（W1.1）：AGENT_TURN_STOP_REASONS 之一；历史行为空串（读取层显示"未记录"）
+    stop_reason: str = ""
     created_at: datetime
     completed_at: datetime | None = None
 
@@ -2206,6 +2224,9 @@ class AgentChatTurnComplete(APIModel):
     usage: dict[str, Any] = Field(default_factory=dict)
     error: str = ""
     exit_code: int | None = None
+    # 为什么这轮结束了（W1.1）：执行体知道自己怎么停的就如实报（token_capped/permission_timeout…）。
+    # 留空 = 老执行体，平台按 success 兜底（成功 completed / 失败 failed）；集合外的值归一化为 unknown。
+    stop_reason: str = ""
     # 这一轮**产出**的文件（成果物，待审）：页面据此给出「下载 / 转入云盘」。
     # 与 `artifacts`（输入附件）分开：两者语义相反，混在一起历史就分不清谁进谁出。
     outputs: list["AgentChatTurnOutput"] = Field(default_factory=list)
