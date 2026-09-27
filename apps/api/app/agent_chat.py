@@ -19,6 +19,7 @@ from typing import Any, Sequence
 from uuid import UUID, uuid4
 
 from .contracts import (
+    AGENT_TURN_STOP_REASONS,
     AgentChatConversation,
     AgentChatInputFile,
     AgentChatConversationCreate,
@@ -92,6 +93,9 @@ def ensure_schema(store: Any) -> None:
         store.db.execute("ALTER TABLE agent_turns ADD COLUMN outputs TEXT NOT NULL DEFAULT '[]'")
     if columns and "variant" not in columns:
         store.db.execute("ALTER TABLE agent_turns ADD COLUMN variant TEXT NOT NULL DEFAULT ''")
+    if columns and "stop_reason" not in columns:
+        # W1.1：为什么结束（status 说怎么结束，这列说为什么）。落库口径见 _normalize_stop_reason。
+        store.db.execute("ALTER TABLE agent_turns ADD COLUMN stop_reason TEXT NOT NULL DEFAULT ''")
     conversation_columns = {row[1] for row in store.db.execute("PRAGMA table_info(agent_conversations)")}
     if conversation_columns and "role" not in conversation_columns:
         # M-6：会话上选的角色（空 = 默认，不传 `--agent`）
@@ -134,6 +138,7 @@ def ensure_schema(store: Any) -> None:
             claimed_by TEXT,
             artifact_ids TEXT NOT NULL DEFAULT '[]',
             outputs TEXT NOT NULL DEFAULT '[]',
+            stop_reason TEXT NOT NULL DEFAULT '',
             claim_expires_at TEXT,
             created_at TEXT NOT NULL,
             claimed_at TEXT,
@@ -195,6 +200,17 @@ def _conversation(row: Any, turn_count: int = 0) -> AgentChatConversation:
     )
 
 
+def _normalize_stop_reason(value: str | None) -> str:
+    """终止原因归一化：契约集合内的小写原样收，认不出的存 `unknown`，不编。
+
+    与 `complete_turn` 的约定：执行体**留空** = 老执行体没这个字段，由调用方按 success 兜底；
+    **非空但集合外** = 执行体报了我们不认识的值——照实存 unknown，两回事，不能混。
+    """
+
+    text = str(value or "").strip().lower()
+    return text if text in AGENT_TURN_STOP_REASONS else "unknown"
+
+
 def _turn(row: Any) -> AgentChatTurn:
     return AgentChatTurn(
         id=UUID(str(row["id"])),
@@ -212,6 +228,7 @@ def _turn(row: Any) -> AgentChatTurn:
         claimed_by=str(row["claimed_by"]) if row["claimed_by"] else None,
         artifacts=_artifact_files(row["artifact_ids"]),
         outputs=_turn_outputs(row["outputs"]) if "outputs" in row.keys() else [],
+        stop_reason=str(row["stop_reason"]) if "stop_reason" in row.keys() else "",
         created_at=_parse_time(row["created_at"]),
         completed_at=_parse_time(row["completed_at"]),
     )
@@ -806,8 +823,15 @@ def complete_turn(store: Any, turn_id: UUID, agent_id: str, data: AgentChatTurnC
         return _turn(row)
     timestamp = _now()
     session_key = (data.session_key or "").strip() or (str(row["session_key"]) if row["session_key"] else None)
+    # 为什么结束（W1.1）：执行体报了就用它的（归一化后）；留空（老执行体）按结局兜底，
+    # 但兜底**不掩盖失败**——success=False 又没报原因时是 failed，不是 completed。
+    reported = str(data.stop_reason or "").strip()
+    if reported:
+        stop_reason = _normalize_stop_reason(reported)
+    else:
+        stop_reason = "completed" if data.success else "failed"
     store.db.execute(
-        "UPDATE agent_turns SET status = ?, content = ?, session_key = ?, usage = ?, error = ?, outputs = ?, completed_at = ? WHERE id = ?",
+        "UPDATE agent_turns SET status = ?, content = ?, session_key = ?, usage = ?, error = ?, outputs = ?, stop_reason = ?, completed_at = ? WHERE id = ?",
         (
             "DONE" if data.success else "FAILED",
             data.content,
@@ -816,6 +840,7 @@ def complete_turn(store: Any, turn_id: UUID, agent_id: str, data: AgentChatTurnC
             data.error,
             # 产出清单原样存下（id + 名字 + 大小）：页面读列表时不必再逐条查成果物
             json.dumps([item.model_dump(mode="json") for item in (data.outputs or [])], ensure_ascii=False),
+            stop_reason,
             timestamp,
             str(turn_id),
         ),
@@ -874,7 +899,7 @@ def cancel_turn(store: Any, turn_id: UUID, member_id: str, reason: str = "") -> 
         raise AgentChatError("turn_already_finished")
     timestamp = _now()
     store.db.execute(
-        "UPDATE agent_turns SET status = 'CANCELLED', error = ?, completed_at = ? WHERE id = ?",
+        "UPDATE agent_turns SET status = 'CANCELLED', stop_reason = 'cancelled', error = ?, completed_at = ? WHERE id = ?",
         (reason or "cancelled_by_member", timestamp, str(turn_id)),
     )
     store.db.commit()
