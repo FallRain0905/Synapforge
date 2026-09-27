@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { Activity, AlertTriangle, ArrowUpRight, Box, CheckCircle2, ClipboardCheck, Cloud, Cpu, FileCheck2, FileText, FolderPlus, Inbox, Info, MessagesSquare, PlayCircle, Send, ShieldCheck, TerminalSquare } from "lucide-react";
+import { Activity, AlertTriangle, ArrowUpRight, Box, CheckCircle2, ClipboardCheck, Cloud, Cpu, FileCheck2, FileText, FolderPlus, Inbox, Info, MessagesSquare, PlayCircle, Send, ShieldCheck, Sparkles, TerminalSquare } from "lucide-react";
 import { PageHeading } from "../components/shell";
 import { CreateProjectModal } from "../components/project-create";
 import { EmptyState, LoadingSkeleton, Metric, Panel, Progress, StatusPill } from "../components/ui";
@@ -27,6 +27,37 @@ const QUICK_LINKS = [
   { href: "/delivery", label: "论文交付", description: "装配、检查、编译与提交包", icon: <Send size={18} /> },
   { href: "/tasks", label: "任务与流程", description: "阶段看板与状态推进", icon: <ClipboardCheck size={18} /> },
   { href: "/drive", label: "个人云盘", description: "200MB 私人文件与项目导入", icon: <Cloud size={18} /> },
+];
+
+/**
+ * 三种使用方式（产品重定位阶段 0 / W0.1）：单 Agent 工作台是基础入口，
+ * 多 Agent 协作项目是核心差异，自动化工作流是规模化能力。首屏必须能看懂这三层。
+ */
+const PRODUCT_ENTRIES = [
+  {
+    href: "/my-agent",
+    testId: "overview-entry-agent",
+    label: "开始一个 Agent 工作",
+    description: "像主流 Agent 产品一样：选执行体、输入任务、看真实流式过程、传文件、多轮修改——不必先理解任务板。",
+    icon: <Sparkles size={18} />,
+    accent: "icon-tile-blue",
+  },
+  {
+    href: "/workspace",
+    testId: "overview-entry-project",
+    label: "组建 Agent 协作项目",
+    description: "多人和多个 Agent 分工、并行、交接、审核——团队正在生产什么，一眼可见。",
+    icon: <MessagesSquare size={18} />,
+    accent: "",
+  },
+  {
+    href: "/pack",
+    testId: "overview-entry-workflow",
+    label: "运行一个自动化工作流",
+    description: "数学建模是首个工作流包：一键生成受约束、可中断、可复核的生产流程（生成骨架，不是最终结果）。",
+    icon: <FileCheck2 size={18} />,
+    accent: "",
+  },
 ];
 
 export default function OverviewPage() {
@@ -89,6 +120,18 @@ export default function OverviewPage() {
     return (
       <div className="page-content" id="overview" data-testid="project-overview">
         <PageHeading hint="还没有项目：项目是任务、成果物与知识库的归属边界" />
+        <section className="grid grid-3" aria-label="三种使用方式" data-testid="overview-entries">
+          {PRODUCT_ENTRIES.map((entry) => (
+            <Link key={entry.href} href={entry.href} className="card list-item list-item-static" style={{ gap: 14 }} data-testid={entry.testId}>
+              <span className={`icon-tile ${entry.accent}`.trim()}>{entry.icon}</span>
+              <div className="item-copy">
+                <strong>{entry.label}</strong>
+                <small>{entry.description}</small>
+              </div>
+              <ArrowUpRight size={16} />
+            </Link>
+          ))}
+        </section>
         <section className="panel">
           <div className="empty-cta" data-testid="overview-empty-projects">
             <FolderPlus size={22} />
@@ -122,6 +165,19 @@ export default function OverviewPage() {
       />
 
       {error && <div className="pack-missing"><strong>API 未连接</strong><span>{error}</span></div>}
+
+      <section className="grid grid-3" aria-label="三种使用方式" data-testid="overview-entries">
+        {PRODUCT_ENTRIES.map((entry) => (
+          <Link key={entry.href} href={entry.href} className="card list-item list-item-static" style={{ gap: 14 }} data-testid={entry.testId}>
+            <span className={`icon-tile ${entry.accent}`.trim()}>{entry.icon}</span>
+            <div className="item-copy">
+              <strong>{entry.label}</strong>
+              <small>{entry.description}</small>
+            </div>
+            <ArrowUpRight size={16} />
+          </Link>
+        ))}
+      </section>
 
       <section className="overview-current" data-testid="overview-current">
         <div className="overview-current-copy">

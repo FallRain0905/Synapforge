@@ -4,6 +4,7 @@ import { useState } from "react";
 import { AlertTriangle, CheckCircle2, Eye, Inbox, ShieldCheck, Undo2 } from "lucide-react";
 import { PageHeading, formatTime } from "../../components/shell";
 import { ConfirmDialog, EmptyState, LoadingSkeleton, Modal, Panel, StatusPill } from "../../components/ui";
+import { StatusLegend } from "../../components/status-legend";
 import { Artifact, Gate, RiskRegistryEntry, errorMessage, getArtifactText, submitReview, updateRisk } from "../../lib/api";
 import { useWorkspace } from "../../lib/workspace";
 
@@ -162,6 +163,7 @@ export default function ReviewPage() {
   return (
     <div className="page-content" id="reviews" data-testid="review-center">
       <PageHeading hint={`${pendingArtifacts.length + pendingGates.length} 项需要人工处理 · ${openRisks.length} 个风险未关闭`} />
+      <StatusLegend domains={["review", "gate", "artifact"]} />
 
       <div className="review-priority">
       <Panel

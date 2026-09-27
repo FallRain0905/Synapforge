@@ -26,9 +26,10 @@ import {
 /**
  * 导航与页面元数据的唯一来源：侧边栏、顶栏面包屑、快速跳转面板都从这里读。
  *
- * W-4 起按"日常 / 偶尔"分层：前 5 组是每天要用的（工作区、任务、内容、审核、团队），
- * 建模模板包、论文交付、知识库、图谱、问答、运行、设备、时间线收进最后的「高级工具」——
- * **只隐藏不删除**：路由、页面、深页内的互相跳转全部保持原样，Ctrl+K 也能搜到。
+ * 产品重定位阶段 0（W0.2）起按三层产品结构分组：**工作台 / 项目协作 / 工作流工具**——
+ * 单 Agent 工作台是基础入口，多 Agent 协作是核心差异，数学建模等是首个垂直工作流包；
+ * 旧的六组分层（W-4 的"日常/偶尔"）由此取代。**只隐藏不删除**：路由、页面、
+ * 深页内的互相跳转全部保持原样（/ask 已重定向进工作台，路由仍在），Ctrl+K 也能搜到。
  */
 /** 需要动态数据的角标：具体数值由 shell 用工作区数据算，nav 只声明"这里有提醒"。 */
 export type NavBadge = "tasks" | "pack" | "review" | "projects";
@@ -56,20 +57,36 @@ export type NavSection = {
 
 export const NAV_SECTIONS: NavSection[] = [
   {
-    id: "project",
-    label: "项目",
-    hint: "工作区与总览",
-    icon: Layers3,
+    id: "workbench",
+    label: "工作台",
+    hint: "单 Agent 工作台与执行体接入",
+    icon: Sparkles,
     items: [
       {
         href: "/my-agent",
         label: "我的智能体",
         icon: Sparkles,
         testId: "nav-my-agent",
-        hint: "与接到平台的执行体对话（opencode）；项目工作走任务体系",
+        hint: "Agent 工作台：像主流 Agent 产品一样对话、传文件、看流式过程（单 Agent 主入口）",
         badge: "projects",
-        keywords: ["我的智能体", "对话", "聊天", "chat", "agent", "opencode", "模型", "智能体"],
+        keywords: ["我的智能体", "工作台", "对话", "聊天", "chat", "agent", "opencode", "模型", "智能体"],
       },
+      {
+        href: "/devices",
+        label: "设备与接入",
+        icon: Server,
+        testId: "nav-devices",
+        hint: "配对向导、设备身份与 Token 轮换——没有执行体时从这里接入",
+        keywords: ["设备", "接入", "配对", "令牌", "token", "agent", "授权", "安装"],
+      },
+    ],
+  },
+  {
+    id: "project",
+    label: "项目协作",
+    hint: "多 Agent 协作生产：工作区、任务、成果物、审核与交接",
+    icon: Layers3,
+    items: [
       {
         href: "/workspace",
         label: "项目工作区",
@@ -88,14 +105,6 @@ export const NAV_SECTIONS: NavSection[] = [
         badge: "projects",
         keywords: ["首页", "看板", "dashboard", "home", "概览", "进度"],
       },
-    ],
-  },
-  {
-    id: "flow",
-    label: "任务与流程",
-    hint: "待办、依赖与执行方式",
-    icon: ClipboardCheck,
-    items: [
       {
         href: "/tasks",
         label: "任务与流程",
@@ -113,14 +122,23 @@ export const NAV_SECTIONS: NavSection[] = [
         hint: "派给我的活、我的 Agent 在执行与最近完成",
         keywords: ["我的任务", "指派", "派单", "个人", "待办", "我的 agent", "my"],
       },
-    ],
-  },
-  {
-    id: "content",
-    label: "内容与文档",
-    hint: "成果物、文档版本与云盘",
-    icon: Box,
-    items: [
+      {
+        href: "/review",
+        label: "审核门禁",
+        icon: ShieldCheck,
+        testId: "nav-reviews",
+        hint: "门禁、复核意见、风险登记与交接收据",
+        badge: "review",
+        keywords: ["审核", "门禁", "批准", "复核", "风险", "gate", "把关"],
+      },
+      {
+        href: "/handoffs",
+        label: "交接中心",
+        icon: Inbox,
+        testId: "nav-handoffs",
+        hint: "接力与分发交接及其收据",
+        keywords: ["交接", "接力", "分发", "收据", "handoff"],
+      },
       {
         href: "/artifacts",
         label: "成果物库",
@@ -145,39 +163,6 @@ export const NAV_SECTIONS: NavSection[] = [
         hint: "私人文件暂存（200MB）并一键加入项目",
         keywords: ["云盘", "网盘", "文件", "上传", "暂存", "附件"],
       },
-    ],
-  },
-  {
-    id: "delivery",
-    label: "审核与交付",
-    hint: "门禁与交接",
-    icon: ShieldCheck,
-    items: [
-      {
-        href: "/review",
-        label: "审核门禁",
-        icon: ShieldCheck,
-        testId: "nav-reviews",
-        hint: "门禁、复核意见、风险登记与交接收据",
-        badge: "review",
-        keywords: ["审核", "门禁", "批准", "复核", "风险", "gate", "把关"],
-      },
-      {
-        href: "/handoffs",
-        label: "交接中心",
-        icon: Inbox,
-        testId: "nav-handoffs",
-        hint: "接力与分发交接及其收据",
-        keywords: ["交接", "接力", "分发", "收据", "handoff"],
-      },
-    ],
-  },
-  {
-    id: "workspace",
-    label: "团队与空间",
-    hint: "成员、团队与空间配置",
-    icon: Users,
-    items: [
       {
         href: "/team",
         label: "团队与成员",
@@ -205,9 +190,9 @@ export const NAV_SECTIONS: NavSection[] = [
     ],
   },
   {
-    id: "tools",
-    label: "高级工具",
-    hint: "模板包、交付编译、知识与运行诊断（日常用不到）",
+    id: "workflow",
+    label: "工作流工具",
+    hint: "首个工作流包（数学建模）、交付编译与知识/运行诊断",
     icon: Wrench,
     items: [
       {
@@ -215,9 +200,9 @@ export const NAV_SECTIONS: NavSection[] = [
         label: "建模模板包",
         icon: FileCheck2,
         testId: "nav-pack",
-        hint: "竞赛领域包物化、校验与边界审计",
+        hint: "首个垂直工作流包（数学建模）：物化四问流程与模板骨架",
         badge: "pack",
-        keywords: ["模板", "领域包", "cumcm", "物化", "校验", "题号", "问题一"],
+        keywords: ["模板", "工作流", "领域包", "cumcm", "物化", "校验", "题号", "问题一"],
       },
       {
         href: "/delivery",
@@ -252,14 +237,6 @@ export const NAV_SECTIONS: NavSection[] = [
         keywords: ["运行", "日志", "控制台", "输出", "run", "执行过程"],
       },
       {
-        href: "/devices",
-        label: "设备与接入",
-        icon: Server,
-        testId: "nav-devices",
-        hint: "配对向导、设备身份与 Token 轮换",
-        keywords: ["设备", "接入", "配对", "令牌", "token", "agent", "授权", "安装"],
-      },
-      {
         href: "/timeline",
         label: "项目时间线",
         icon: Activity,
@@ -280,11 +257,11 @@ const PAGE_TITLES: Record<string, { title: string; subtitle: string }> = {
   "/": { title: "项目总览", subtitle: "队伍、Agent 与门禁的当前状态" },
   "/tasks": { title: "任务与流程", subtitle: "按阶段查看待办、依赖与负责人" },
   "/my-tasks": { title: "我的任务", subtitle: "指派给我的、我的 Agent 在执行与最近完成的" },
-  "/pack": { title: "建模模板包", subtitle: "CUMCM 领域包物化、校验与边界审计" },
+  "/pack": { title: "建模模板包", subtitle: "首个垂直工作流包（数学建模）：物化任务与成果骨架——骨架不是最终结果" },
   "/documents": { title: "文档与版本", subtitle: "草稿 / 提交 / 批准三层版本与协作编辑" },
   "/kb": { title: "知识库", subtitle: "文档登记、索引构建与检索状态" },
   "/graph": { title: "图谱可视化", subtitle: "实体邻居子图与向量库浏览（只读）" },
-  "/my-agent": { title: "我的智能体", subtitle: "与接到平台的执行体对话（单纯对话，不建任务）" },
+  "/my-agent": { title: "我的智能体", subtitle: "Agent 工作台：像主流 Agent 产品一样直接对话、传文件、看流式过程" },
   "/ask": { title: "AI 问答（旧入口）", subtitle: "普通对话与知识库检索问答——已在导航中由「我的智能体」取代" },
   "/review": { title: "审核门禁", subtitle: "门禁、复核意见、风险登记与交接收据" },
   "/delivery": { title: "论文交付", subtitle: "装配、检查、编译、提交包与跨部署校验" },

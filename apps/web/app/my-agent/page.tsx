@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowDown, ArrowUp, Bot, Brain, Cpu, FileText, Gauge, History, MessageSquare, Paperclip, Play, Plus, RefreshCcw, Send, ShieldAlert, Sparkles, Square, Trash2, Wrench, X } from "lucide-react";
+import { Activity, ArrowDown, ArrowUp, Bot, Brain, Cpu, FileText, Gauge, History, MessageSquare, Paperclip, Play, Plus, RefreshCcw, Send, Server, ShieldAlert, Sparkles, Square, Trash2, Wrench, X } from "lucide-react";
 import Link from "next/link";
 import { AgentResponse } from "../../components/agent-response";
 import { Markdown } from "../../components/markdown";
@@ -32,6 +32,7 @@ import {
 } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { useWorkspace } from "../../lib/workspace";
+import { STOP_REASON_LABEL } from "../../lib/status-dictionary";
 
 const ACTIVE_STATUSES = new Set(["PENDING", "CLAIMED"]);
 
@@ -58,6 +59,17 @@ const STATUS_LABEL: Record<string, string> = {
   FAILED: "失败",
   CANCELLED: "已停止",
 };
+
+/** 终态补充说明（W1.1）：stop_reason 说明"这轮是怎么结束的"。
+ * 平台响应尚未带上该字段（execute 侧契约未落地）时它就是 undefined，这里自然不显示——
+ * 不伪造、不猜测。FAILED 且 error 文案已在时不再重复"执行失败"。 */
+function stopReasonNote(turn: MyAgentTurn): string {
+  if (ACTIVE_STATUSES.has(turn.status)) return "";
+  const label = STOP_REASON_LABEL[turn.stop_reason ?? ""] ?? "";
+  if (!label) return "";
+  if (turn.status === "FAILED" && turn.stop_reason === "failed") return "";
+  return label;
+}
 type Variant = "" | "minimal" | "high" | "max";
 const VARIANT_LABEL: Record<Variant, string> = {
   "": "默认强度",
@@ -1011,6 +1023,7 @@ export default function MyAgentPage() {
                           <span className="my-agent-status">
                             {ACTIVE_STATUSES.has(turn.status) ? <RefreshCcw size={13} className="spin" /> : null}
                             {STATUS_LABEL[turn.status] ?? turn.status}
+                            {stopReasonNote(turn) ? `（${stopReasonNote(turn)}）` : ""}
                             {turn.error ? `：${turn.error}` : ""}
                           </span>
                         )}
@@ -1260,6 +1273,15 @@ export default function MyAgentPage() {
                         </small>
                       </span>
                     </button>
+                    {!agents.length ? (
+                      <Link className="composer-add-row" href="/devices" data-testid="my-agent-goto-devices">
+                        <Server size={17} />
+                        <span className="composer-add-copy">
+                          <strong>接入执行体</strong>
+                          <small>没有执行体就无法对话：到「设备与接入」配对设备或下载桌面端，接好后回来继续</small>
+                        </span>
+                      </Link>
+                    ) : null}
                     <p className="composer-add-note">历史轮次记着它当时用的角色与模型；切换只影响下一轮。</p>
                   </div>
                 ) : null}

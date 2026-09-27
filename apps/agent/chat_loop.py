@@ -300,7 +300,7 @@ class ChatLoop:
                 variant=turn.get("variant"),
             )
         except ValueError as error:
-            self._finish(token, agent_id, turn_id, success=False, content="", usage={}, session_key=None, error=str(error))
+            self._finish(token, agent_id, turn_id, success=False, content="", usage={}, session_key=None, error=str(error), stop_reason="failed")
             return True
 
         self.log(
@@ -384,6 +384,7 @@ class ChatLoop:
                 session_key=None,
                 error="cancelled_by_member",
                 outputs=await self._collect_outputs(identity, before=False, turn_id=turn_id),
+                stop_reason="cancelled",
             )
             return True
         success = exit_code == 0
@@ -398,6 +399,7 @@ class ChatLoop:
             session_key=str(parsed.get("session_id") or "") or None,
             error=error,
             outputs=await self._collect_outputs(identity, before=False, turn_id=turn_id),
+            stop_reason="completed" if success else "failed",
         )
         if success:
             self._completed += 1
@@ -552,6 +554,7 @@ class ChatLoop:
                 session_key=outcome.session_key or None,
                 error="cancelled_by_member",
                 outputs=await self._collect_outputs(identity, before=False, turn_id=turn_id),
+                stop_reason="cancelled",
             )
             return True
         self._finish(
@@ -562,6 +565,7 @@ class ChatLoop:
             session_key=outcome.session_key or None,
             error=outcome.error,
             outputs=await self._collect_outputs(identity, before=False, turn_id=turn_id),
+            stop_reason="completed" if outcome.ok else "failed",
         )
         if outcome.ok:
             self._completed += 1
@@ -601,6 +605,7 @@ class ChatLoop:
         session_key: str | None,
         error: str,
         outputs: list[dict[str, Any]] | None = None,
+        stop_reason: str = "unknown",
     ) -> None:
         self._call(
             f"/api/agents/{agent_id}/chat-turns/{turn_id}/complete",
@@ -612,6 +617,8 @@ class ChatLoop:
                 "error": error,
                 # 这一轮产出的文件（成果物，待审）：页面据此给出「下载 / 转入云盘」
                 "outputs": outputs or [],
+                # 终态原因（W1.1）：completed/failed/cancelled/…；平台契约落地前会被忽略，落地后入库
+                "stop_reason": stop_reason,
             },
             token,
         )

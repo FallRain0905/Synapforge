@@ -5,6 +5,7 @@ import Link from "next/link";
 import { ArrowUpRight, Ban, CheckCircle2, PlayCircle, Plus, RefreshCcw, ShieldCheck, TerminalSquare } from "lucide-react";
 import { PageHeading, formatTime } from "../../components/shell";
 import { ConfirmDialog, EmptyState, LoadingSkeleton, Modal, Panel, StatusPill } from "../../components/ui";
+import { StatusLegend } from "../../components/status-legend";
 import {
   Agent,
   EvidenceRequirement,
@@ -513,6 +514,7 @@ export default function TasksPage() {
           </>
         }
       />
+      <StatusLegend domains={["task", "run"]} />
 
       {needsExecutor > 0 && (
         <div className="pack-missing" data-testid="tasks-start-hint">

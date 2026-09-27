@@ -169,6 +169,8 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(complete["session_key"], SAMPLE_SESSION)
         self.assertEqual(complete["usage"]["source"], "opencode-jsonl")
         self.assertGreater(complete["usage"]["total_tokens"], 0)
+        # W1.1：终态原因随 complete 上报（正常完成 = completed）
+        self.assertEqual(complete["stop_reason"], "completed")
         # 命令行里模型是从轮次带下来的（-m 插在提示词前）
         self.assertEqual(self.commands[0][5:7], ["-m", "deepseek/deepseek-v4.1-flash"])
         # 这一轮没选角色：命令行里就不该出现 --agent
@@ -368,6 +370,8 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         complete = next(payload for path, payload in self.calls if path.endswith("/complete"))
         self.assertFalse(complete["success"])
         self.assertEqual(complete["error"], "cancelled_by_member")
+        # W1.1：被成员停止时终态原因 = cancelled
+        self.assertEqual(complete["stop_reason"], "cancelled")
 
     async def test_failure_is_reported_not_hidden(self) -> None:
         self.exit_code = 1
@@ -376,6 +380,8 @@ class ChatLoopTests(unittest.IsolatedAsyncioTestCase):
         complete = next(payload for path, payload in self.calls if path.endswith("/complete"))
         self.assertFalse(complete["success"])
         self.assertIn("boom", complete["error"])
+        # W1.1：执行体失败时终态原因 = failed（不假装成功）
+        self.assertEqual(complete["stop_reason"], "failed")
         self.assertEqual(chat.snapshot()["chat_failed"], 1)
 
     async def test_no_pending_turn_means_no_work(self) -> None:

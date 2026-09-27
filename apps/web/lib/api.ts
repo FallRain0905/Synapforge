@@ -2575,6 +2575,10 @@ export type MyAgentTurn = {
   session_key: string | null;
   usage: Record<string, unknown>;
   error: string;
+  /** 终态原因（W1.1）：这轮怎么结束的机器口径——completed/failed/cancelled/
+   * token_capped/turn_capped/timeout/permission_timeout/unknown。执行中的轮次为空；
+   * 平台契约落地前接口不会返回该字段，前端一律按可选处理。 */
+  stop_reason?: string;
   /** 这一轮带的输入文件（名子供气泡显示；执行体会把它们下到工作目录）。 */
   artifacts: { artifact_id: string; name: string }[];
   /** 这一轮**产出**的文件（成果物，待审）：页面据此给出「下载 / 转入云盘」。 */

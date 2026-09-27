@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Archive, Box, Download, FilePlus2, Info } from "lucide-react";
 import { PageHeading, formatTime } from "../../components/shell";
 import { ConfirmDialog, EmptyState, LoadingSkeleton, Metric, Modal, Panel, StatusPill } from "../../components/ui"
+import { StatusLegend } from "../../components/status-legend";
 import { PAGE_GRID } from "../../lib/page-layout";
 import {
   downloadArtifactContent,
@@ -140,6 +141,7 @@ export default function ArtifactsPage() {
           {types.map((type) => <option key={type} value={type}>{type}</option>)}
         </select>
       } />
+      <StatusLegend domains={["artifact"]} />
       <section className="metrics-grid">
         <Metric label="成果物总数" value={dashboard.artifacts.length} detail={`${types.length} 种类型`} />
         <Metric label="已批准" value={dashboard.artifacts.filter((item) => item.status === "APPROVED").length} detail="不可变版本" tone="positive" />
