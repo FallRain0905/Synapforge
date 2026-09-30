@@ -84,7 +84,8 @@
       "inputs": [],
       "outputs": [{"name": "outline_doc", "artifact_type": "document", "path": "outputs/outline.md"}],
       "gate_policy": "outline-gate",
-      "retry_policy": {"max_attempts": 2, "backoff_seconds": 30},
+      "budget": {"max_seconds": 3600, "max_attempts": 2, "max_tokens": 200000},
+      "retry_policy": {"backoff_seconds": 30},
       "on_fail": "escalate_human",
       "human_intervention": "none"
     },

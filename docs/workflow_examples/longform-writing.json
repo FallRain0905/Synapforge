@@ -1,0 +1,206 @@
+{
+  "schema_version": 1,
+  "workflow": {
+    "key": "longform-writing",
+    "name": "长文写作",
+    "description": "大纲 → 初稿 → 修订 → 定稿",
+    "inputs": [
+      {
+        "name": "topic",
+        "required": true,
+        "hint": "写作主题与受众"
+      },
+      {
+        "name": "references",
+        "required": false,
+        "artifact_type": "document"
+      }
+    ]
+  },
+  "stages": [
+    {
+      "id": "outline",
+      "title": "大纲",
+      "goal": "确定结构与论点"
+    },
+    {
+      "id": "draft",
+      "title": "初稿",
+      "goal": "按大纲成文"
+    },
+    {
+      "id": "revise",
+      "title": "修订",
+      "goal": "按复核意见修订"
+    },
+    {
+      "id": "final",
+      "title": "定稿",
+      "goal": "排版与交付"
+    }
+  ],
+  "role_bindings": [
+    {
+      "id": "writer",
+      "role_name": "写作",
+      "description": "负责成文",
+      "capability_requirements": [
+        "files.write"
+      ],
+      "prompt_overrides": {
+        "system": "你是长文作者……"
+      }
+    },
+    {
+      "id": "critic",
+      "role_name": "复核",
+      "description": "独立复核结构与事实",
+      "capability_requirements": [
+        "files.read"
+      ]
+    }
+  ],
+  "handoff_contracts": [
+    {
+      "id": "outline-to-draft",
+      "from_role": "writer",
+      "to_role": "writer",
+      "required_fields": [
+        "outline_ready",
+        "open_questions"
+      ],
+      "artifact_refs": [
+        "outline_doc"
+      ]
+    }
+  ],
+  "gate_policies": [
+    {
+      "id": "outline-gate",
+      "spec": [
+        "file:outputs/outline.md non-empty",
+        {
+          "any": [
+            "artifact:outline approved",
+            "review:critic concluded"
+          ]
+        }
+      ],
+      "on_block": "escalate_human"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "write_outline",
+      "stage_id": "outline",
+      "title": "写大纲",
+      "goal": "产出结构化大纲",
+      "depends_on": [],
+      "mode": "auto",
+      "role_binding": "writer",
+      "prompt": {
+        "task_template": "围绕 {{input.topic}} 写大纲"
+      },
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "outline_doc",
+          "artifact_type": "document",
+          "path": "outputs/outline.md"
+        }
+      ],
+      "gate_policy": "outline-gate",
+      "budget": {
+        "max_seconds": 3600,
+        "max_attempts": 2,
+        "max_tokens": 200000
+      },
+      "retry_policy": {
+        "backoff_seconds": 30
+      },
+      "on_fail": "escalate_human",
+      "human_intervention": "none"
+    },
+    {
+      "id": "write_draft",
+      "stage_id": "draft",
+      "title": "写初稿",
+      "goal": "按大纲成文",
+      "depends_on": [
+        "write_outline"
+      ],
+      "mode": "auto",
+      "role_binding": "writer",
+      "inputs": [
+        {
+          "from_output": "outline_doc"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "draft_doc",
+          "artifact_type": "document",
+          "path": "outputs/draft.md"
+        }
+      ],
+      "handoff_contract": "outline-to-draft",
+      "human_intervention": "none"
+    },
+    {
+      "id": "critique",
+      "stage_id": "revise",
+      "title": "独立复核",
+      "depends_on": [
+        "write_draft"
+      ],
+      "mode": "auto",
+      "role_binding": "critic",
+      "inputs": [
+        {
+          "from_output": "draft_doc"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "review_report",
+          "artifact_type": "review_report"
+        }
+      ],
+      "human_intervention": "none"
+    },
+    {
+      "id": "finalize",
+      "stage_id": "final",
+      "title": "定稿交付",
+      "depends_on": [
+        "critique"
+      ],
+      "mode": "hybrid",
+      "role_binding": "writer",
+      "inputs": [
+        {
+          "from_output": "draft_doc"
+        },
+        {
+          "from_output": "review_report"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "final_doc",
+          "artifact_type": "document",
+          "path": "outputs/final.md"
+        }
+      ],
+      "human_intervention": "approval_gate",
+      "delivery_adapter": "docx_export"
+    }
+  ],
+  "delivery_adapters": [
+    {
+      "id": "docx_export",
+      "kind": "docx_export",
+      "config": {}
+    }
+  ]
+}
