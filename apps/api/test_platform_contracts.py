@@ -69,6 +69,7 @@ class PlatformContractTests(unittest.TestCase):
                 "034_agent_turn_stop_reason.sql",
                 "035_artifact_receipt.sql",
                 "036_workflow_packages.sql",
+                "037_workflow_engine.sql",
             ],
         )
         initial = files[0].read_text(encoding="utf-8").lower()

@@ -192,7 +192,7 @@ from .path_privacy import public_agent, public_artifact, public_run
 from . import archive, drive, drive_grants, file_transfers, llm_channels, workspace_files
 from .cumcm_importer import CumcmHandoffImporter, CumcmImporter
 from .gateway import GatewayProtocolError, GatewayService
-from . import agent_chat, ai_chat, ai_probe, boundary_gate, collaboration, convert_queue, delivery, document_api, kb_gateway, knowledge_base, observability, pack_api, personal_drive, project_team, stream_bridge, workflow_service
+from . import agent_chat, ai_chat, ai_probe, boundary_gate, collaboration, convert_queue, delivery, document_api, kb_gateway, knowledge_base, observability, pack_api, personal_drive, project_team, stream_bridge, workflow_engine, workflow_service
 from .contracts import LlmChannelCreate, LlmChannelUpdate, LlmQuotaSet
 from packages.competition_packs import CompetitionPackError
 
@@ -1372,6 +1372,18 @@ def start_workflow_run(project_id: UUID, data: WorkflowRunStart, request: Reques
 def list_workflow_runs(project_id: UUID) -> list[dict[str, Any]]:
     project_or_404(project_id)
     return workflow_service.list_project_workflow_runs(store, project_id)
+
+
+@app.post("/api/projects/{project_id}/workflow-runs/{run_id}/advance", response_model=dict[str, Any])
+def advance_workflow_run(project_id: UUID, run_id: UUID, request: Request) -> dict[str, Any]:
+    """推进一轮（W3.2）：有界重试 → 门禁评估 → 账本记账 → 完成判定。无变化 = 纯记账（幂等安全）。"""
+
+    project_or_404(project_id)
+    try:
+        return workflow_engine.advance_run(store, project_id, run_id, _request_member_id(request))
+    except workflow_engine.WorkflowEngineError as error:
+        status = {"workflow_run_not_found": 404, "workflow_version_not_found": 404, "workflow_run_not_running": 409}.get(error.code, 400)
+        raise HTTPException(status_code=status, detail=error.code) from error
 
 
 @app.post("/api/projects/{project_id}/tasks", response_model=Task, status_code=201)

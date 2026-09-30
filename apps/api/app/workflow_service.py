@@ -57,6 +57,11 @@ def ensure_schema(store: Any) -> None:
 
     if getattr(store, "_workflow_schema_ready", False):
         return
+    columns = {row[1] for row in store.db.execute("PRAGMA table_info(project_workflow_runs)")}
+    if columns and "node_tasks" not in columns:
+        store.db.execute("ALTER TABLE project_workflow_runs ADD COLUMN node_tasks TEXT NOT NULL DEFAULT '{}'")
+    if columns and "ledger" not in columns:
+        store.db.execute("ALTER TABLE project_workflow_runs ADD COLUMN ledger TEXT NOT NULL DEFAULT '{}'")
     store.db.executescript(
         """
         CREATE TABLE IF NOT EXISTS workflows (
@@ -91,10 +96,17 @@ def ensure_schema(store: Any) -> None:
             inputs TEXT NOT NULL DEFAULT '{}',
             created_by TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            updated_at TEXT NOT NULL,
+            node_tasks TEXT NOT NULL DEFAULT '{}',
+            ledger TEXT NOT NULL DEFAULT '{}'
         );
         """
     )
+    columns = {row[1] for row in store.db.execute("PRAGMA table_info(project_workflow_runs)")}
+    if columns and "node_tasks" not in columns:
+        store.db.execute("ALTER TABLE project_workflow_runs ADD COLUMN node_tasks TEXT NOT NULL DEFAULT '{}'")
+    if columns and "ledger" not in columns:
+        store.db.execute("ALTER TABLE project_workflow_runs ADD COLUMN ledger TEXT NOT NULL DEFAULT '{}'")
     store.db.commit()
     store._workflow_schema_ready = True
 
@@ -442,9 +454,9 @@ def start_workflow_run(
     run_id = str(uuid4())
     timestamp = _now()
     store.db.execute(
-        "INSERT INTO project_workflow_runs (id, project_id, organization_id, workflow_id, workflow_version_id, status, inputs, created_by, created_at, updated_at)"
-        " VALUES (?, ?, ?, ?, ?, 'RUNNING', ?, ?, ?, ?)",
-        (run_id, str(project_id), organization_id, str(workflow_id), version_id, json.dumps(inputs or {}, ensure_ascii=False), actor, timestamp, timestamp),
+        "INSERT INTO project_workflow_runs (id, project_id, organization_id, workflow_id, workflow_version_id, status, inputs, node_tasks, ledger, created_by, created_at, updated_at)"
+        " VALUES (?, ?, ?, ?, ?, 'RUNNING', ?, ?, '{}', ?, ?, ?)",
+        (run_id, str(project_id), organization_id, str(workflow_id), version_id, json.dumps(inputs or {}, ensure_ascii=False), json.dumps({}), actor, timestamp, timestamp),
     )
 
     binding_by_id = {str(b.get("id")): b for b in definition.get("role_bindings", []) if isinstance(b, dict) and b.get("id")}
@@ -482,6 +494,10 @@ def start_workflow_run(
         if not progressed:
             # validate_definition 已保证无环；这里是双保险
             raise WorkflowError("workflow_nodes_unresolvable", [f"nodes: {sorted(pending)}"])
+    store.db.execute(
+        "UPDATE project_workflow_runs SET node_tasks = ?, updated_at = ? WHERE id = ?",
+        (json.dumps(node_tasks, ensure_ascii=False), _now(), run_id),
+    )
     store.db.commit()
     return {
         "run_id": run_id,
