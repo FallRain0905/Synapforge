@@ -1445,6 +1445,21 @@ class EvidenceCreate(APIModel):
     created_by: str = "member-001"
 
 
+class WorkflowUpsert(APIModel):
+    """创建/追加工作流包版本：definition 形状由 docs/WORKFLOW_SCHEMA.md v1 权威定义，
+    服务端按其 §4 八条校验（错误逐条列出，绝不静默丢弃）。"""
+
+    definition: dict[str, Any]
+
+
+class WorkflowRunStart(APIModel):
+    """应用工作流：绑定冻结版本（缺省 = 当前已发布版本）并物化节点为任务骨架。"""
+
+    workflow_id: UUID
+    version_id: UUID | None = None
+    inputs: dict[str, Any] = Field(default_factory=dict)
+
+
 class ArtifactReceipt(APIModel):
     """产物溯源 receipt（W2.4，docs/RECEIPT_FORMAT.md §2，receipt_version=1）。
 

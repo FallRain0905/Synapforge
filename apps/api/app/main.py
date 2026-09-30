@@ -25,6 +25,8 @@ from .contracts import (
     AgentChatMessageCreate,
     AgentConversationPromote,
     AgentConversationPromoteResult,
+    WorkflowRunStart,
+    WorkflowUpsert,
     AgentChatTurn,
     AgentChatTurnApproval,
     AgentChatTurnApprovalDecision,
@@ -190,7 +192,7 @@ from .path_privacy import public_agent, public_artifact, public_run
 from . import archive, drive, drive_grants, file_transfers, llm_channels, workspace_files
 from .cumcm_importer import CumcmHandoffImporter, CumcmImporter
 from .gateway import GatewayProtocolError, GatewayService
-from . import agent_chat, ai_chat, ai_probe, boundary_gate, collaboration, convert_queue, delivery, document_api, kb_gateway, knowledge_base, observability, pack_api, personal_drive, project_team, stream_bridge
+from . import agent_chat, ai_chat, ai_probe, boundary_gate, collaboration, convert_queue, delivery, document_api, kb_gateway, knowledge_base, observability, pack_api, personal_drive, project_team, stream_bridge, workflow_service
 from .contracts import LlmChannelCreate, LlmChannelUpdate, LlmQuotaSet
 from packages.competition_packs import CompetitionPackError
 
@@ -1302,6 +1304,74 @@ def project_production_path(project_id: UUID) -> dict[str, Any]:
 
     project_or_404(project_id)
     return project_team.project_production_path(store, project_id)
+
+
+# ---- 通用垂直工作流包（W3.1；定义形状权威 docs/WORKFLOW_SCHEMA.md v1）----------
+
+
+def _workflow_http_error(error: workflow_service.WorkflowError) -> HTTPException:
+    status = {
+        "workflow_definition_invalid": 422,
+        "workflow_key_exists": 409,
+        "workflow_not_found": 404,
+        "workflow_version_not_found": 404,
+        "workflow_nodes_unresolvable": 422,
+    }.get(error.code, 400)
+    return HTTPException(status_code=status, detail={"code": error.code, "errors": error.errors})
+
+
+@app.post("/api/workflows", response_model=dict[str, Any], status_code=201)
+def create_workflow_package(data: WorkflowUpsert, request: Request) -> dict[str, Any]:
+    """创建工作流包（定义存 JSON 列，服务端按 schema §4 八条校验，错误逐条列出）。"""
+
+    member = _request_member(request)
+    try:
+        return workflow_service.create_workflow(store, member.organization_id, member.id, data.definition)
+    except workflow_service.WorkflowError as error:
+        raise _workflow_http_error(error) from error
+
+
+@app.get("/api/workflows", response_model=list[dict[str, Any]])
+def list_workflow_packages(request: Request) -> list[dict[str, Any]]:
+    return workflow_service.list_workflows(store, _request_member(request).organization_id)
+
+
+@app.get("/api/workflows/{workflow_id}", response_model=dict[str, Any])
+def get_workflow_package(workflow_id: UUID, request: Request) -> dict[str, Any]:
+    try:
+        return workflow_service.get_workflow(store, workflow_id, _request_member(request).organization_id)
+    except workflow_service.WorkflowError as error:
+        raise _workflow_http_error(error) from error
+
+
+@app.post("/api/workflows/{workflow_id}/versions", response_model=dict[str, Any], status_code=201)
+def add_workflow_package_version(workflow_id: UUID, data: WorkflowUpsert, request: Request) -> dict[str, Any]:
+    """追加新版本（旧版本只读，永不改写——schema §1 规则 2）。"""
+
+    try:
+        return workflow_service.add_workflow_version(store, workflow_id, _request_member_id(request), data.definition)
+    except workflow_service.WorkflowError as error:
+        raise _workflow_http_error(error) from error
+
+
+@app.post("/api/projects/{project_id}/workflow-runs", response_model=dict[str, Any], status_code=201)
+def start_workflow_run(project_id: UUID, data: WorkflowRunStart, request: Request) -> dict[str, Any]:
+    """应用工作流：绑定冻结版本并把节点物化为任务骨架（骨架 ≠ 结果）。"""
+
+    project_or_404(project_id)
+    member = _request_member(request)
+    try:
+        return workflow_service.start_workflow_run(
+            store, project_id, member.organization_id, member.id, data.workflow_id, data.inputs, data.version_id
+        )
+    except workflow_service.WorkflowError as error:
+        raise _workflow_http_error(error) from error
+
+
+@app.get("/api/projects/{project_id}/workflow-runs", response_model=list[dict[str, Any]])
+def list_workflow_runs(project_id: UUID) -> list[dict[str, Any]]:
+    project_or_404(project_id)
+    return workflow_service.list_project_workflow_runs(store, project_id)
 
 
 @app.post("/api/projects/{project_id}/tasks", response_model=Task, status_code=201)
