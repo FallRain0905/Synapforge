@@ -26,7 +26,7 @@ from dataclasses import asdict
 from typing import Any
 from uuid import UUID
 
-from . import workflow_gate
+from . import workflow_delivery, workflow_gate
 from .progress_ledger import ProgressLedger
 
 __all__ = ["advance_run", "WorkflowEngineError"]
@@ -172,6 +172,37 @@ def _bounded_retry(store: Any, project_id: UUID, definition: dict, node_tasks: d
     return retried
 
 
+def _run_deliveries(
+    store: Any, project_id: UUID, definition: dict, node_tasks: dict[str, str], engine_state: dict, actor: str, statuses: dict[str, str]
+) -> list[dict[str, Any]]:
+    """节点 APPROVED 后执行交付适配器（W3.6）。每个节点只交付一次；结果入账本，失败如实记。"""
+
+    deliveries: list[dict[str, Any]] = []
+    delivered: list[str] = engine_state.setdefault("delivered", [])
+    recorded: dict[str, Any] = engine_state.setdefault("deliveries", {})
+    # 两层解析：node.delivery_adapter 引用的是定义里 delivery_adapters[].id，
+    # 注册表认的是它的 kind——不解析就变成"拿 id 查注册表"的假失败（测试抓过）。
+    adapters_by_id = {
+        str(item.get("id")): item for item in definition.get("delivery_adapters", []) if isinstance(item, dict)
+    }
+    for node in definition.get("nodes", []):
+        node_id = str(node.get("id") or "")
+        adapter_ref = str(node.get("delivery_adapter") or "")
+        if not adapter_ref or node_id not in node_tasks or node_id in delivered:
+            continue
+        if statuses.get(node_id) != "APPROVED":
+            continue
+        kind = str((adapters_by_id.get(adapter_ref) or {}).get("kind") or adapter_ref)
+        result = workflow_delivery.run_adapter(
+            store, project_id, kind, actor=actor, node_id=node_id, task_id=node_tasks[node_id]
+        )
+        recorded[node_id] = {"kind": kind, **result}
+        if result.get("status") not in {"failed", "unknown"}:
+            delivered.append(node_id)
+        deliveries.append({"node_id": node_id, "kind": kind, **result})
+    return deliveries
+
+
 def _signature(node_tasks: dict[str, str], statuses: dict[str, str]) -> str:
     import hashlib
 
@@ -195,6 +226,7 @@ def advance_run(store: Any, project_id: UUID, run_id: UUID, actor: str) -> dict[
         task_row = store.db.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
         statuses[node_id] = _enum(task_row["status"]) if task_row else "?"
     approved_all = bool(node_tasks) and all(status == "APPROVED" for status in statuses.values())
+    deliveries = _run_deliveries(store, project_id, definition, node_tasks, engine_state, actor, statuses)
 
     previous_signature = (json.loads(row["ledger"] or "{}") or {}).get("last_signature")
     current_signature = _signature(node_tasks, statuses)
@@ -218,7 +250,13 @@ def advance_run(store: Any, project_id: UUID, run_id: UUID, actor: str) -> dict[
         "UPDATE project_workflow_runs SET ledger = ?, status = ?, node_tasks = ?, updated_at = ? WHERE id = ?",
         (
             json.dumps(
-                {"ledger": asdict(ledger), "last_signature": current_signature, "attempts": engine_state.get("attempts", {})},
+                {
+                    "ledger": asdict(ledger),
+                    "last_signature": current_signature,
+                    "attempts": engine_state.get("attempts", {}),
+                    "delivered": engine_state.get("delivered", []),
+                    "deliveries": engine_state.get("deliveries", {}),
+                },
                 ensure_ascii=False,
             ),
             status,
@@ -234,6 +272,7 @@ def advance_run(store: Any, project_id: UUID, run_id: UUID, actor: str) -> dict[
         "node_statuses": statuses,
         "gates": gates,
         "retried": retried,
+        "deliveries": deliveries,
         "round": ledger.round,
         "stall_count": ledger.stall_count,
         "needs_replan": ledger.needs_replan,

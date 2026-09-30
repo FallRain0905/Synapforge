@@ -192,7 +192,7 @@ from .path_privacy import public_agent, public_artifact, public_run
 from . import archive, drive, drive_grants, file_transfers, llm_channels, workspace_files
 from .cumcm_importer import CumcmHandoffImporter, CumcmImporter
 from .gateway import GatewayProtocolError, GatewayService
-from . import agent_chat, ai_chat, ai_probe, boundary_gate, collaboration, convert_queue, delivery, document_api, kb_gateway, knowledge_base, observability, pack_api, personal_drive, project_team, stream_bridge, workflow_engine, workflow_service
+from . import agent_chat, ai_chat, ai_probe, boundary_gate, builtin_workflows, collaboration, convert_queue, delivery, document_api, kb_gateway, knowledge_base, observability, pack_api, personal_drive, project_team, stream_bridge, workflow_engine, workflow_service
 from .contracts import LlmChannelCreate, LlmChannelUpdate, LlmQuotaSet
 from packages.competition_packs import CompetitionPackError
 
@@ -1329,6 +1329,14 @@ def create_workflow_package(data: WorkflowUpsert, request: Request) -> dict[str,
         return workflow_service.create_workflow(store, member.organization_id, member.id, data.definition)
     except workflow_service.WorkflowError as error:
         raise _workflow_http_error(error) from error
+
+
+@app.post("/api/workflows/builtin", response_model=dict[str, Any])
+def seed_builtin_workflows(request: Request) -> dict[str, Any]:
+    """安装内置工作流包（W3.4/W3.5，幂等：按 key 各建一次，已存在跳过）。"""
+
+    member = _request_member(request)
+    return builtin_workflows.ensure_builtin_workflows(store, member.organization_id, member.id)
 
 
 @app.get("/api/workflows", response_model=list[dict[str, Any]])
