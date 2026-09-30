@@ -20,8 +20,14 @@
 
 - 形态：`project.<family>.<action>`，全小写，family ∈
   `task | run | artifact | handoff | review | gate | agent`。
-- **事件名必须先注册**在 `apps/api/app/event_catalog.py`；服务端对未注册名
-  直接拒绝（`UnknownEventError`），前端对未知名按规则 3 忽略。
+- **事件名必须先注册**在 `apps/api/app/event_catalog.py`。执行点是
+  `store._insert_event`（全平台唯一事件出口）：凡**目录形状**的名字
+  （`project.` 前缀且 ≥3 段）必须在目录注册且信封合法，未注册名直接拒绝
+  ——发出侧拦截，绝不发出去让消费方猜。
+- **老轨名豁免（只增不改）**：早于本契约的名字不受强制——
+  `artifact.created`（无前缀）、`project.seeded`（仅两段）、
+  `handoff.created/accepted/rejected`（无前缀）等继续原样发出给既有消费方。
+  **新代码一律用目录里的 `project.*` 名**，不得新增两段名或无前缀新名。
 - 新增事件流程：C 在目录中注册（`version=1`，`CATALOG_VERSION` +1）→ 契约文档
   补一行 → A 才允许发出。没有"临时字符串事件名"。
 
