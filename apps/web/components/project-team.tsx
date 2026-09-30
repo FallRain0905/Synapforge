@@ -248,6 +248,13 @@ export function ProductionPathView({ projectId }: { projectId: string }) {
                         ? " · 待审核"
                         : ""}
                   </small>
+                  {node.receipt ? (
+                    <small style={{ display: "block" }} data-testid={`production-receipt-${node.artifact_id}`}>
+                      溯源：{node.receipt.tool_name} · 调用 {node.receipt.tool_call_id.slice(0, 12)} ·{" "}
+                      {node.receipt.output_bytes} 字节 · 字节指纹 {node.receipt.output_hash}
+                      {node.receipt.truncated ? "（截断）" : ""}
+                    </small>
+                  ) : null}
                   {node.downstream_tasks.length || node.handoffs.length ? (
                     <small style={{ display: "block" }}>
                       {node.handoffs.length ? `经过 ${node.handoffs.length} 个交接（${node.handoffs.map((h) => h.receipt_status).join("、")}）` : ""}

@@ -149,6 +149,98 @@ class TaskLoopClaimTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(loop.snapshot()["claim_errors"], 1)
         self.assertIn("task_already_claimed", loop.snapshot()["last_claim_error"] or "")
 
+    # ---- fencing（A 契约 170e6c8）：按 detail 判租约失效，收到即释放回 claim，不盲目重试 ----
+
+    async def _lease_lost_loop(self, fail_path: str, error: str):
+        http = FakeHttp(_assignment())
+        http.fail_paths[fail_path] = error
+
+        async def execute(task: dict, identity: dict, run_id: str | None = None) -> tuple[bool, str, str, str]:
+            return True, "ok", "", ""
+
+        loop = TaskLoop(_config(), http=http, execute=execute)
+        result = await loop.run_once()
+        return loop, result, http
+
+    async def test_lease_lost_at_progress_aborts_the_round_without_execution(self) -> None:
+        """领取后第一次心跳被拒（被接管/过期）：继续执行只会白跑，中止并回 claim。"""
+
+        loop, result, http = await self._lease_lost_loop(
+            "/api/tasks/task-1/progress", 'http_409:{"detail":"lease_not_active"}'
+        )
+        self.assertIsNone(result)
+        snapshot = loop.snapshot()
+        self.assertEqual(snapshot["lease_lost"], 1)
+        self.assertEqual(snapshot["claimed"], 1)
+        self.assertEqual(snapshot["completed"], 0)
+        # 没有执行、没有建 Run、更没有结果上报（旧 token 连上报都会被拒）
+        self.assertFalse(any(path.endswith("/runs") for path in http.paths()))
+        self.assertFalse(any(path.endswith("/result") for path in http.paths()))
+
+    async def test_lease_lost_at_result_submit_is_not_report_error_nor_retry(self) -> None:
+        """活干完了但 token 已不被承认：如实记 lease_lost，不计 report_errors、不重试上报。"""
+
+        loop, result, http = await self._lease_lost_loop(
+            "/api/tasks/task-1/result", 'http_409:{"detail":"lease_expired"}'
+        )
+        self.assertIsNone(result)
+        snapshot = loop.snapshot()
+        self.assertEqual(snapshot["lease_lost"], 1)
+        self.assertEqual(snapshot["report_errors"], 0)
+        # 结果上报只发生一次（不重试），Run 照常完成（Run 完成端点不校验租约）
+        self.assertEqual([path for path in http.paths() if path.endswith("/result")].count("/api/tasks/task-1/result"), 1)
+
+    async def test_lease_lost_when_work_done_but_token_dead(self) -> None:
+        """执行异常在通道内部转成失败结果后提交，token 已不被承认（404 语义同样命中）：
+        走"租约失效"路径释放——不再重试、不假装任务失败上报成功。"""
+
+        http = FakeHttp(_assignment())
+        http.fail_paths["/api/tasks/task-1/result"] = 'http_404:{"detail":"lease_not_found"}'
+
+        async def execute(task: dict, identity: dict, run_id: str | None = None) -> tuple[bool, str, str, str]:
+            raise RuntimeError("codex_cli_not_found")
+
+        loop = TaskLoop(_config(), http=http, execute=execute)
+        result = await loop.run_once()
+        self.assertIsNone(result)
+        snapshot = loop.snapshot()
+        self.assertEqual(snapshot["lease_lost"], 1)
+        self.assertEqual(snapshot["report_errors"], 0)
+        self.assertEqual(snapshot["failed"], 0)
+        # 结果上报只发生一次，不重试
+        self.assertEqual(len([path for path in http.paths() if path.endswith("/result")]), 1)
+
+    async def test_fallback_failure_report_swallows_lease_loss(self) -> None:
+        """兜底上报本身被拒（租约失效）：留痕、计 lease_lost、不计 report_errors、绝不重试。"""
+
+        http = FakeHttp(_assignment())
+        http.fail_paths["/api/tasks/task-1/result"] = 'http_403:{"detail":"lease_agent_mismatch"}'
+        loop = TaskLoop(_config(), http=http, execute=None)
+        loop._report_failure("task-1", "lease-token-1", "task_loop_error:RuntimeError:boom")
+        snapshot = loop.snapshot()
+        self.assertEqual(snapshot["lease_lost"], 1)
+        self.assertEqual(snapshot["report_errors"], 0)
+        self.assertEqual(len([path for path in http.paths() if path.endswith("/result")]), 1)
+
+    async def test_non_lease_http_errors_keep_the_old_semantics(self) -> None:
+        """不是租约失效的 409/500（如 task_already_claimed、普通 500）走原路径，不受 fencing 误伤。"""
+
+        loop, result, http = await self._lease_lost_loop(
+            "/api/tasks/task-1/result", "http_500:internal_error"
+        )
+        assert result is not None
+        snapshot = loop.snapshot()
+        self.assertEqual(snapshot["lease_lost"], 0)
+        self.assertEqual(snapshot["report_errors"], 1)
+        self.assertEqual(snapshot["completed"], 1)
+        # detail 里含 "lease" 字样但不在契约集合里（如 http_500:lease_released）也不误判
+        loop2, result2, _ = await self._lease_lost_loop(
+            "/api/tasks/task-1/result", "http_500:lease_released"
+        )
+        assert result2 is not None
+        self.assertEqual(loop2.snapshot()["lease_lost"], 0)
+        self.assertEqual(loop2.snapshot()["report_errors"], 1)
+
 
 class TaskLoopRunForeverTests(unittest.IsolatedAsyncioTestCase):
     async def test_gate_blocks_claiming_until_the_platform_connection_is_ready(self) -> None:

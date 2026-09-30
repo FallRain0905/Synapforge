@@ -29,6 +29,32 @@ LogCallable = Callable[[str], None]
 # 不传就只有状态变更（claim/progress/result），执行体内的过程不上报。
 EventSink = Callable[[str, dict[str, Any]], None]
 
+#: 租约失效的稳定错误码（A 的 fencing 契约，170e6c8）：命中任一即"本执行体已不再持有该任务"。
+#: 判定看 `http_{code}:{detail}` 里的 **detail**，不看状态码本身——同一语义会落在
+#: 403/404/409（task_protocol_error 的映射）。收到即释放本地状态、回 claim 轮询；
+#: **不对 409 做无脑重试**（预算墙到顶时重试无意义，被接管后旧 token 的任何写入都会被拒）。
+LEASE_LOST_DETAILS = frozenset(
+    {
+        "lease_not_found",          # 令牌不存在（从未签发/已清理）
+        "lease_agent_mismatch",     # 拿别人的令牌
+        "lease_project_mismatch",   # 跨项目
+        "lease_not_active",         # 曾有效但已被清扫/释放（接管后旧持有者走这里）
+        "lease_expired",            # 心跳面：过期
+        "lease_budget_exhausted",   # 心跳面：预算墙到顶
+    }
+)
+
+
+class LeaseLostError(RuntimeError):
+    """租约已失效（被接管/过期/预算墙）：任务不再属于本执行体，禁止再上报，回 claim 轮询。"""
+
+
+def lease_lost_from_error(error: BaseException) -> bool:
+    """按 detail 判定一次 HTTP 失败是不是"租约失效"（对状态码不敏感，见 LEASE_LOST_DETAILS）。"""
+
+    text = f"{type(error).__name__}:{error}"
+    return any(code in text for code in LEASE_LOST_DETAILS)
+
 
 # 产出采集器（`output_collector.OutputCollector`）：`before` 记快照、`after` 上传并返回成果物 id。
 # 用协议而不是直接依赖具体类：任务循环不该知道 HTTP、对象存储与本地上传队列的存在。
@@ -72,6 +98,7 @@ class TaskLoopStats:
     failed: int = 0
     claim_errors: int = 0
     report_errors: int = 0
+    lease_lost: int = 0
     last_result: dict[str, Any] | None = None
     last_claim_error: str | None = None
     last_outputs: dict[str, Any] | None = None
@@ -143,6 +170,7 @@ class TaskLoop:
             "failed": self._stats.failed,
             "claim_errors": self._stats.claim_errors,
             "report_errors": self._stats.report_errors,
+            "lease_lost": self._stats.lease_lost,
             "current_task": self._current,
             "running_run_ids": sorted(self._running_run_ids),
             # 本机队列长度：串行执行下就是"当前在跑的那个"（0 或 1）。
@@ -203,10 +231,18 @@ class TaskLoop:
         lease_token = str((assignment.get("lease") or {}).get("lease_token") or "")
         task_id = str(task.get("id") or "")
         self._current = {"id": task_id, "title": task.get("title", ""), "started_at": time.time()}
+        self._stats.claimed += 1
         try:
             result = await self._run_assignment(task, lease_token)
         except asyncio.CancelledError:
             raise
+        except LeaseLostError as error:
+            # fencing（A 契约）：租约已失效——任务已不属于本执行体。不做兜底上报（旧 token 连失败
+            # 上报都会被拒，重试只会形成循环），释放本地状态回 claim 轮询；任务行由平台侧
+            # 接管/回 READY 处理（过期清扫是平台的职责，不是这里重试能解决的）。
+            self._stats.lease_lost += 1
+            self._log(f"[{self._label}] 租约失效（{error}）：释放本地状态，回到领取轮询")
+            result = None
         except Exception as error:  # noqa: BLE001 - 任何意外都要变成一条失败结果，而不是打断循环
             summary = f"task_loop_error:{type(error).__name__}:{error}"
             self._log(f"[{self._label}] 执行过程异常：{summary}")
@@ -215,7 +251,8 @@ class TaskLoop:
             result = {"task_id": task_id, "run_id": None, "success": False, "summary": summary}
         finally:
             self._current = None
-        self._stats.claimed += 1
+        if result is None:
+            return None
         if result["success"]:
             self._stats.completed += 1
         else:
@@ -314,6 +351,10 @@ class TaskLoop:
                 self._headers(),
             )
         except Exception as error:  # noqa: BLE001 - 结果提交失败必须留痕（任务会停在 RUNNING）
+            if lease_lost_from_error(error):
+                # 旧 token 已不被承认（接管/过期/预算墙）：结果提交会被拒，重试无意义——
+                # 抛给 run_once 走"租约失效"路径；本地已完成的 Run/产出记录仍在，平台侧会重新派发。
+                raise LeaseLostError(f"result_submit:{error}") from error
             self._stats.report_errors += 1
             self._log(f"[{self._label}] 结果提交失败：{error}")
         result = {
@@ -422,6 +463,11 @@ class TaskLoop:
                 self._headers(),
             )
         except Exception as error:  # noqa: BLE001 - 兜底失败只能留痕
+            if lease_lost_from_error(error):
+                # 兜底上报也被拒：租约失效，任务已不属于本执行体——留痕、不计入上报失败、不重试
+                self._stats.lease_lost += 1
+                self._log(f"[{self._label}] 兜底结果提交被拒（租约失效）：{error}")
+                return
             self._stats.report_errors += 1
             self._log(f"[{self._label}] 兜底结果提交失败：{error}")
 
@@ -441,6 +487,9 @@ class TaskLoop:
                 self._headers(),
             )
         except Exception as error:  # noqa: BLE001 - 进度上报失败不阻塞执行
+            if lease_lost_from_error(error):
+                # 领取后第一次心跳就被拒（过期/被接管/预算墙）：继续执行只会白跑——中止本轮
+                raise LeaseLostError(f"progress:{error}") from error
             self._log(f"[{self._label}] 进度上报失败：{error}")
 
     def _create_run(self, task: dict[str, Any]) -> str | None:
@@ -542,8 +591,11 @@ def task_loop_config_from_identity(
 
 
 __all__ = [
+    "LEASE_LOST_DETAILS",
+    "LeaseLostError",
     "TaskLoop",
     "TaskLoopConfig",
     "TaskLoopStats",
+    "lease_lost_from_error",
     "task_loop_config_from_identity",
 ]

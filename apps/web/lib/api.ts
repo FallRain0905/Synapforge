@@ -2512,6 +2512,16 @@ export type ProductionPathNode = {
   approved_at: string | null;
   source: { task_id: string; title: string; status: string } | null;
   run_id: string | null;
+  /** 产物溯源（RECEIPT_FORMAT v1，平台只保留 7 字段）：哪次工具调用产出的这份字节；
+   * 人工上传/历史行为 null（如实显示，不编）。 */
+  receipt: {
+    tool_name: string;
+    tool_call_id: string;
+    args_hash: string;
+    output_hash: string;
+    output_bytes: number;
+    truncated: boolean;
+  } | null;
   handoffs: { handoff_id: string; task_id: string; status: string; receipt_status: string }[];
   downstream_tasks: TeamTaskBrief[];
 };
