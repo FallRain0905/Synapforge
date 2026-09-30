@@ -4,8 +4,10 @@ from __future__ import annotations
 
 try:
     from .input_fetcher import InputFetchError
+    from .receipts import build_file_receipt
 except ImportError:  # 直接脚本执行 / 顶层模块导入
     from input_fetcher import InputFetchError  # type: ignore
+    from receipts import build_file_receipt  # type: ignore
 
 import hashlib
 import json
@@ -352,8 +354,14 @@ class AgentArtifactClient:
         task_id: str | None,
         run_id: str,
         status: str = "DRAFT",
+        receipt: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """创建成果物。`status` 由调用方决定：常驻任务循环的产出用 `PENDING_REVIEW`（D-CL-1）。"""
+        """创建成果物。`status` 由调用方决定：常驻任务循环的产出用 `PENDING_REVIEW`（D-CL-1）。
+
+        `receipt`（RECEIPT_FORMAT v1）随 artifact-create 一并提交——这是 C 契约的正典载体
+        （平台校验后落库溯源字段并在 project.artifact.uploaded 事件里携带）；
+        平台契约落地前会被忽略（APIModel 默认容忍多余字段）。
+        """
 
         payload = {
             "name": output.name,
@@ -366,6 +374,8 @@ class AgentArtifactClient:
             "status": status,
             "mime_type": output.mime_type,
         }
+        if receipt is not None:
+            payload["receipt"] = receipt
         key_suffix = hashlib.sha256(output.relative_path.encode("utf-8")).hexdigest()[:32]
         return self._request(
             "POST",
@@ -514,8 +524,23 @@ class ResultUploader:
             try:
                 artifact_id = str(item["artifact_id"]) if item.get("artifact_id") else None
                 if artifact_id is None:
+                    # 产物溯源（RECEIPT_FORMAT v1）：§5.2 口径——output_hash 对"写入文件的内容字节"算
+                    # （content_hash 在队列后经 output_file_changed_after_queue 校验仍然一致）；
+                    # 工具名如实写采集通道，调用 id 用 run_id（这次运行就是执行体侧的调用标识）。
+                    receipt = build_file_receipt(
+                        tool_name="task_run",
+                        tool_call_id=run_id,
+                        args={"path": output.relative_path},
+                        content_sha256_hex=output.content_hash,
+                        output_bytes=output.size_bytes,
+                    )
                     artifact = self.client.create(
-                        str(item["project_id"]), output, task_id=task_id, run_id=run_id, status=self.create_status
+                        str(item["project_id"]),
+                        output,
+                        task_id=task_id,
+                        run_id=run_id,
+                        status=self.create_status,
+                        receipt=receipt,
                     )
                     artifact_id = str(artifact["id"])
                     self.state.attach_upload_artifact(item["upload_id"], artifact_id)

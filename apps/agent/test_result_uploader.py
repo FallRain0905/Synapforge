@@ -15,15 +15,17 @@ class FakeArtifactClient:
     def __init__(self) -> None:
         self.created_statuses: list[str] = []
         self.created: list[tuple[str, str]] = []
+        self.created_receipts: list[dict | None] = []
         self.uploaded: list[str] = []
         self.next_id = 1
         self.fail_upload_once = False
 
-    def create(self, project_id: str, output: DiscoveredOutput, *, task_id: str | None, run_id: str, status: str = "DRAFT") -> dict:
+    def create(self, project_id: str, output: DiscoveredOutput, *, task_id: str | None, run_id: str, status: str = "DRAFT", receipt: dict | None = None) -> dict:
         self.created_statuses.append(status)
         artifact_id = f"artifact-{self.next_id:03d}"
         self.next_id += 1
         self.created.append((project_id, output.relative_path))
+        self.created_receipts.append(receipt)
         return {"id": artifact_id}
 
     def upload_content(self, artifact_id: str, output: DiscoveredOutput) -> dict:
@@ -112,6 +114,35 @@ class ResultUploaderTests(unittest.TestCase):
         self.assertEqual(len(uploaded), 1)
         self.assertEqual(len(client.created), 1)
         self.assertEqual(client.created[0][1], "result.json")
+
+    def test_upload_carries_receipt_per_receipt_format(self) -> None:
+        """产物溯源（W2.4 / RECEIPT_FORMAT v1）：任务 Run 通道的 receipt 随 artifact-create 提交。"""
+        import hashlib
+
+        result = self.root / "result.json"
+        result.write_text('{"ok": true}', encoding="utf-8")
+        request = SimpleNamespace(
+            project_id="project-001",
+            task_id="task-009",
+            run_id="run-010",
+            workspace_path=str(self.root),
+            output_paths=("result.json",),
+        )
+        client = FakeArtifactClient()
+        uploader = ResultUploader(self.state, client)
+        outputs = OutputDiscovery(self.root).discover(request.output_paths)
+        uploader.queue_outputs(request.project_id, request.run_id, request, outputs)
+        uploader.upload_pending(task_id=request.task_id, run_id=request.run_id)
+
+        self.assertEqual(len(client.created_receipts), 1)
+        receipt = client.created_receipts[0]
+        self.assertEqual(receipt["receipt_version"], 1)
+        self.assertEqual(receipt["tool_name"], "task_run")
+        self.assertEqual(receipt["tool_call_id"], "run-010")
+        self.assertEqual(receipt["output_hash"], hashlib.sha256('{"ok": true}'.encode("utf-8")).hexdigest()[:16])
+        self.assertEqual(receipt["output_bytes"], len('{"ok": true}'))
+        self.assertEqual(receipt["status"], "success")
+        self.assertRegex(receipt["args_hash"], r"^[0-9a-f]{16}$")
 
     def test_manifest_contains_output_and_stream_digests(self) -> None:
         request = SimpleNamespace(

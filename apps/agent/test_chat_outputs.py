@@ -104,6 +104,9 @@ class ChatOutputCollectorTests(unittest.TestCase):
         self.assertEqual(receipt["output_bytes"], len("溯源正文".encode("utf-8")))
         self.assertEqual(receipt["status"], "success")
         self.assertRegex(receipt["args_hash"], r"^[0-9a-f]{16}$")
+        # 正典载体：同一份 receipt 也随 artifact-create 载荷提交（C 契约"随上传一并提交"）
+        create_payload = next(item["payload"] for item in self.client.created if item["payload"]["name"] == "report.md")
+        self.assertEqual(create_payload.get("receipt"), receipt)
 
     def test_unchanged_files_are_not_re_uploaded(self) -> None:
         collector = self.collector()

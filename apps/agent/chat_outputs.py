@@ -178,6 +178,17 @@ class ChatOutputCollector:
         return f"artifact-create:chat:{turn_id}:{digest}"
 
     def _upload(self, turn_id: str, output: DiscoveredOutput) -> ChatOutput:
+        # 产物溯源（RECEIPT_FORMAT v1）：§5.2 口径——output_hash 对"写入文件的内容字节"算
+        # （content_hash 就是该口径的完整 SHA-256），工具名如实写采集通道，调用 id 用轮次。
+        # receipt 同时挂 artifact-create 载荷（C 契约的正典载体）与 complete 的 outputs[]（平台契约
+        # 落地前都被忽略，落地后 A 校验落库）。
+        receipt = build_file_receipt(
+            tool_name="workspace_diff",
+            tool_call_id=turn_id,
+            args={"path": output.relative_path},
+            content_sha256_hex=output.content_hash,
+            output_bytes=output.size_bytes,
+        )
         payload = {
             "name": output.name,
             "artifact_type": output.artifact_type,
@@ -186,6 +197,7 @@ class ChatOutputCollector:
             "source_path": output.path,
             "status": "PENDING_REVIEW",
             "mime_type": output.mime_type,
+            "receipt": receipt,
         }
         created = self._client._request(  # noqa: SLF001 - 复用同一个鉴权/重试壳，只换幂等键
             "POST",
@@ -197,15 +209,6 @@ class ChatOutputCollector:
         if not artifact_id:
             raise RuntimeError("artifact_create_no_id")
         self._client.upload_content(artifact_id, output)
-        # 产物溯源（RECEIPT_FORMAT v1）：§5.2 口径——output_hash 对"写入文件的内容字节"算
-        # （content_hash 就是该口径的完整 SHA-256），工具名如实写采集通道，调用 id 用轮次。
-        receipt = build_file_receipt(
-            tool_name="workspace_diff",
-            tool_call_id=turn_id,
-            args={"path": output.relative_path},
-            content_sha256_hex=output.content_hash,
-            output_bytes=output.size_bytes,
-        )
         return ChatOutput(
             artifact_id=artifact_id,
             name=output.name,
