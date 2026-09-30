@@ -2463,6 +2463,82 @@ export async function getProjectDeliverables(projectId: string): Promise<Project
   return response.json();
 }
 
+/** ---- 团队视图 / 生产路径（W2.3，A 的 project_team.py 聚合；前端只渲染，不知道的不编）---- */
+
+export type TeamTaskBrief = {
+  task_id: string;
+  title: string;
+  stage: string;
+  status: string;
+  priority: string;
+  blocked_reason: string;
+};
+
+export type ProjectTeamMember = {
+  agent_id: string | null;
+  agent_name: string;
+  device_id: string;
+  device_name: string;
+  model_name: string;
+  online: boolean;
+  device_status: string;
+  capabilities: string[];
+  load: number;
+  current_tasks: TeamTaskBrief[];
+  next_tasks: TeamTaskBrief[];
+  waiting_tasks: TeamTaskBrief[];
+  pending_handoffs: { handoff_id: string; task_id: string; status: string }[];
+};
+
+export type ProjectTeam = {
+  project_id: string;
+  agents: ProjectTeamMember[];
+  agent_count: number;
+  online_count: number;
+  task_status_counts: Record<string, number>;
+  pending_handoff_count: number;
+  generated_at: string;
+};
+
+export type ProductionPathNode = {
+  artifact_id: string;
+  name: string;
+  artifact_type: string;
+  status: string;
+  version: number;
+  created_by: string;
+  created_at: string;
+  approved_by: string | null;
+  approved_at: string | null;
+  source: { task_id: string; title: string; status: string } | null;
+  run_id: string | null;
+  handoffs: { handoff_id: string; task_id: string; status: string; receipt_status: string }[];
+  downstream_tasks: TeamTaskBrief[];
+};
+
+export type ProjectProductionPath = {
+  project_id: string;
+  nodes: ProductionPathNode[];
+  artifact_total: number;
+  task_total: number;
+  handoff_total: number;
+  generated_at: string;
+};
+
+/** 团队视图："谁在做什么"——每 Agent 的身份/能力/在线/当前任务/负载/在等什么。 */
+export async function getProjectTeam(projectId: string): Promise<ProjectTeam> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/team`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "团队视图读取失败");
+  return response.json();
+}
+
+/** 生产路径："东西从哪来到哪去"——成果物 → 交接 → 下游任务的因果链（最近 50 个成果物）。 */
+export async function getProjectProductionPath(projectId: string): Promise<ProjectProductionPath> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/production-path`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "生产路径读取失败");
+  return response.json();
+}
+
 export type TaskBulkAssignResult = {
   updated: number;
   task_ids: string[];

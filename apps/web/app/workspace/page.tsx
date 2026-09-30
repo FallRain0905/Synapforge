@@ -18,8 +18,10 @@ import {
   Send,
   Target,
   Users,
+  Workflow,
 } from "lucide-react";
 import { ArtifactDrawer } from "../../components/artifact-drawer";
+import { ProductionPathView, TeamView } from "../../components/project-team";
 import { PageHeading, formatTime } from "../../components/shell";
 import { ConfirmDialog, EmptyState, LoadingSkeleton, Metric, Modal, Panel, Progress, StatusPill } from "../../components/ui"
 import { FILL_COLUMN } from "../../lib/page-layout";
@@ -51,6 +53,8 @@ import { useWorkspace } from "../../lib/workspace";
 const TABS = [
   { id: "chat", label: "聊天", icon: MessagesSquare, hint: "人和 Agent 的主反馈流" },
   { id: "tasks", label: "任务", icon: ClipboardCheck, hint: "谁在做什么、还差什么" },
+  { id: "team", label: "团队", icon: Users, hint: "每个 Agent 在跑什么、在等什么、下一件" },
+  { id: "production", label: "生产", icon: Workflow, hint: "成果物 → 交接 → 下游任务的因果链" },
   { id: "artifacts", label: "成果空间", icon: Box, hint: "成果物、交接与文档入口" },
   { id: "overview", label: "概览", icon: Info, hint: "立项目标、人数与推进模式" },
 ] as const;
@@ -1175,6 +1179,10 @@ export default function WorkspacePage() {
               </p>
             </Panel>
           ) : null}
+
+          {tab === "team" && projectId ? <TeamView projectId={projectId} /> : null}
+
+          {tab === "production" && projectId ? <ProductionPathView projectId={projectId} /> : null}
 
           {tab === "artifacts" ? (
             <Panel
