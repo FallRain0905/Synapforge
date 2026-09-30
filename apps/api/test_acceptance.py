@@ -17,6 +17,7 @@ from app import acceptance
 from app.acceptance import (
     FileStat,
     GateSpecError,
+    OsFileProbe,
     PathGuardProbe,
     classify_test_output,
     evaluate_all,
@@ -229,7 +230,7 @@ class PathGuardProbeTests(unittest.TestCase):
         (self.root / "outputs").mkdir()
         (self.root / "outputs" / "paper.pdf").write_bytes(b"%PDF-1.4 fake")
         (self.root / "secret.txt").write_bytes(b"top secret")
-        self.probe = PathGuardProbe(str(self.root), _RealProbe())
+        self.probe = PathGuardProbe(str(self.root), OsFileProbe())
 
     def test_relative_path_within_root_holds(self):
         result = evaluate_criterion("file:outputs/paper.pdf non-empty", probe=self.probe)
@@ -257,22 +258,35 @@ class PathGuardProbeTests(unittest.TestCase):
         self.assertFalse(result.checked)
 
 
-class _RealProbe:
-    """基于真实文件系统的探针（配合 PathGuardProbe 的集成测试用）。"""
+class OsFileProbeTests(unittest.TestCase):
+    """正式探针的真实文件系统语义（以前由测试私有的 _RealProbe 承担）。"""
 
-    def stat(self, path: str) -> FileStat | None:
-        if not os.path.exists(path):
-            return FileStat(exists=False, size=None)
-        if os.path.isfile(path):
-            return FileStat(exists=True, size=os.path.getsize(path))
-        return FileStat(exists=True, size=None)
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        (self.root / "data.bin").write_bytes(b"\x00\x01\x02\x03")
+        (self.root / "subdir").mkdir()
+        self.probe = OsFileProbe()
 
-    def read(self, path: str, max_bytes: int) -> bytes | None:
-        try:
-            with open(path, "rb") as handle:
-                return handle.read(max_bytes)
-        except OSError:
-            return None
+    def test_missing_file_is_exists_false(self):
+        stat = self.probe.stat(str(self.root / "nope.bin"))
+        self.assertIsNotNone(stat)
+        self.assertFalse(stat.exists)
+
+    def test_regular_file_reports_size(self):
+        stat = self.probe.stat(str(self.root / "data.bin"))
+        self.assertTrue(stat.exists)
+        self.assertEqual(stat.size, 4)
+
+    def test_directory_is_exists_but_size_unknown(self):
+        stat = self.probe.stat(str(self.root / "subdir"))
+        self.assertTrue(stat.exists)
+        self.assertIsNone(stat.size)  # 判定器据此落 UNVERIFIED
+
+    def test_read_respects_cap_and_missing_returns_none(self):
+        self.assertEqual(self.probe.read(str(self.root / "data.bin"), 2), b"\x00\x01")
+        self.assertIsNone(self.probe.read(str(self.root / "nope.bin"), 10))
 
 
 class CompositeGateTests(unittest.TestCase):

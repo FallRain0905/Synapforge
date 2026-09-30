@@ -39,6 +39,7 @@ __all__ = [
     "DecisionQuery",
     "TestRunLookup",
     "PathGuardProbe",
+    "OsFileProbe",
     "CriterionResult",
     "GateResult",
     "GateSpecError",
@@ -456,3 +457,32 @@ class PathGuardProbe:
         if scoped is None:
             return None
         return self._inner.read(scoped, max_bytes)
+
+
+class OsFileProbe:
+    """基于真实文件系统的 FileProbe——W3.3 门禁接线的内层探针。
+
+    推荐组合：``PathGuardProbe(workspace_root, OsFileProbe())``——
+    PathGuardProbe 负责根目录圈界（相对路径、禁绝对路径与 ``..``），
+    本探针负责真实 OS 语义。一切"读不了/测不准"都返回 None 或
+    ``size=None``，让判定器落 UNVERIFIED——本模块的探针**从不抛异常**，
+    失败即证据不足，不是错误。
+    """
+
+    def stat(self, path: str) -> FileStat | None:
+        try:
+            if not os.path.exists(path):
+                return FileStat(exists=False)
+            if os.path.isfile(path):
+                return FileStat(exists=True, size=os.path.getsize(path))
+            # 目录/特殊文件：存在但"大小不可测"，由判定器降级 UNVERIFIED
+            return FileStat(exists=True, size=None)
+        except OSError:
+            return None
+
+    def read(self, path: str, max_bytes: int) -> bytes | None:
+        try:
+            with open(path, "rb") as handle:
+                return handle.read(max(1, int(max_bytes)))
+        except (OSError, ValueError):
+            return None

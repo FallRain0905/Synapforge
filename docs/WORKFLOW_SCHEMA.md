@@ -221,6 +221,10 @@ stage/outputs：`problem_analysis / modeling / coding / review / paper / deliver
 现有 `cumcm_importer.py` 的骨架生成逻辑改为产出本 schema 的 JSON，
 老入口保留不删。
 
+**参考预案 fixture**：`workflow_examples/cumcm-four-questions.json`（四问
+并行建模、手工收口节点、交付适配器的完整形状示例，已过 `validate_definition`
+实测）——W3.4 权威导入物的形状对照物；规范程度见 `workflow_examples/README.md`。
+
 ## 7. 演进规则
 
 - 本 schema 与事件契约同规：**只增不改**。新增可选字段允许；改字段语义、
