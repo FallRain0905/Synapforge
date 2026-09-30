@@ -1445,6 +1445,24 @@ class EvidenceCreate(APIModel):
     created_by: str = "member-001"
 
 
+class ArtifactReceipt(APIModel):
+    """产物溯源 receipt（W2.4，docs/RECEIPT_FORMAT.md §2，receipt_version=1）。
+
+    回答"这个成果物是哪次工具调用产出的"：B（agentd）上传时随 ArtifactCreate 提交，
+    平台校验结构后落库并在 `project.artifact.uploaded` 事件的 payload.receipt 里携带。
+    哈希是 SHA-256 前 16 位小写 hex——字段名如实叫 `*_hash`（纠正 deer-flow 的
+    `*_sha256` 名实不符），长度进文档不进名字。
+    """
+
+    receipt_version: int = 1
+    tool_name: str = Field(min_length=1, max_length=128)
+    tool_call_id: str = Field(default="", max_length=128)
+    args_hash: str = Field(pattern=r"^[0-9a-f]{16}$")
+    output_hash: str = Field(pattern=r"^[0-9a-f]{16}$")
+    output_bytes: int = Field(default=0, ge=0)
+    truncated: bool = False
+
+
 class ArtifactCreate(APIModel):
     name: str = Field(min_length=1, max_length=240)
     artifact_type: ArtifactType
@@ -1458,6 +1476,8 @@ class ArtifactCreate(APIModel):
     input_artifact_ids: list[UUID] = Field(default_factory=list)
     git_commit: str | None = None
     snapshot_ref: str | None = None
+    # 溯源 receipt（W2.4）：执行体产出时带上；人工上传没有就留空（历史行为零变化）。
+    receipt: ArtifactReceipt | None = None
     mime_type: str | None = None
 
 
@@ -1487,6 +1507,8 @@ class Artifact(APIModel):
     size_bytes: int | None = None
     mime_type: str | None = None
     immutable: bool = False
+    # 溯源（W2.4）：receipt_version=0/None 表示没有 receipt（历史行、人工上传、receipt 被拒收）
+    receipt: ArtifactReceipt | None = None
     parent_artifact_id: UUID | None = None
     archived_at: datetime | None = None
 

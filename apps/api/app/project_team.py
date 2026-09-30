@@ -180,6 +180,20 @@ def project_production_path(store: Any, project_id: UUID, *, limit: int = 50) ->
                     else None
                 ),
                 "run_id": str(artifact.run_id) if getattr(artifact, "run_id", None) else None,
+                # W2.4 溯源位（B 预留）：哪次工具调用产出的；人工上传/历史行为 None
+                "receipt": (
+                    {
+                        "receipt_version": artifact.receipt.receipt_version,
+                        "tool_name": artifact.receipt.tool_name,
+                        "tool_call_id": artifact.receipt.tool_call_id,
+                        "args_hash": artifact.receipt.args_hash,
+                        "output_hash": artifact.receipt.output_hash,
+                        "output_bytes": artifact.receipt.output_bytes,
+                        "truncated": artifact.receipt.truncated,
+                    }
+                    if getattr(artifact, "receipt", None)
+                    else None
+                ),
                 "handoffs": linked_handoffs,
                 "downstream_tasks": downstream,
             }

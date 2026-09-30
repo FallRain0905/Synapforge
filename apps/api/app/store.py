@@ -34,6 +34,7 @@ from .contracts import (
     AgentRegister,
     Artifact,
     ArtifactCreate,
+    ArtifactReceipt,
     Evidence,
     EvidenceCreate,
     Event,
@@ -470,7 +471,14 @@ class Store:
                 mime_type TEXT,
                 immutable INTEGER NOT NULL DEFAULT 0,
                 parent_artifact_id TEXT,
-                archived_at TEXT
+                archived_at TEXT,
+                receipt_version INTEGER NOT NULL DEFAULT 0,
+                tool_name TEXT NOT NULL DEFAULT '',
+                tool_call_id TEXT NOT NULL DEFAULT '',
+                args_hash TEXT NOT NULL DEFAULT '',
+                output_hash TEXT NOT NULL DEFAULT '',
+                output_bytes INTEGER NOT NULL DEFAULT 0,
+                truncated INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS artifact_multipart_uploads (
                 upload_id TEXT PRIMARY KEY,
@@ -779,6 +787,19 @@ class Store:
             },
         )
         self._ensure_columns("handoffs", {"schema_version": "TEXT NOT NULL DEFAULT '1.0'"})
+        self._ensure_columns(
+            "artifacts",
+            {
+                # W2.4 溯源 receipt（迁移 035 同款；老 dev 库补列）
+                "receipt_version": "INTEGER NOT NULL DEFAULT 0",
+                "tool_name": "TEXT NOT NULL DEFAULT ''",
+                "tool_call_id": "TEXT NOT NULL DEFAULT ''",
+                "args_hash": "TEXT NOT NULL DEFAULT ''",
+                "output_hash": "TEXT NOT NULL DEFAULT ''",
+                "output_bytes": "INTEGER NOT NULL DEFAULT 0",
+                "truncated": "INTEGER NOT NULL DEFAULT 0",
+            },
+        )
         self._ensure_columns(
             "handoffs",
             {
@@ -4366,6 +4387,17 @@ class Store:
 
     def _expire_leases(self) -> None:
         self.db.execute("UPDATE task_leases SET status = 'EXPIRED' WHERE status = 'ACTIVE' AND expires_at <= ?", (now(),))
+        # W2.5 接管（deer-flow worker lease 语义）：租约过期的任务必须回到可领取态，
+        # 否则执行体失联后任务卡死在 CLAIMED/RUNNING——B 领不了（task_not_claimable），
+        # A 又已经不在了。排除仍有 ACTIVE 租约的任务（刚被接管、旧租约行还留在表里）；
+        # 只动 CLAIMED/RUNNING——WAITING_REVIEW 等审核态的产出归属与复核流程，
+        # 不因执行体失联而回滚（那是"成果未入库"类异常，由团队视图暴露）。
+        self.db.execute(
+            "UPDATE tasks SET status = 'READY', updated_at = ? WHERE status IN ('CLAIMED', 'RUNNING')"
+            " AND id IN (SELECT task_id FROM task_leases WHERE status = 'EXPIRED' AND expires_at <= ?)"
+            " AND id NOT IN (SELECT task_id FROM task_leases WHERE status = 'ACTIVE')",
+            (now(), now()),
+        )
         self.db.commit()
 
     def _active_lease_for_task(self, task_id: UUID) -> sqlite3.Row | None:
@@ -4404,6 +4436,9 @@ class Store:
 
     def claim_task(self, task_id: UUID, data: TaskClaimRequest) -> tuple[Task, TaskLease]:
         self._validate_agent(data.agent_id)
+        # 先清扫过期租约（W2.5 接管）：否则下面按清扫前的任务行判状态，
+        # 过期任务还顶着 CLAIMED，接管者永远撞 task_not_claimable。
+        self._expire_leases()
         previous = self._operation(data.idempotency_key, "task.claim")
         if previous:
             return self._claim_result_from_operation(previous)
@@ -4951,6 +4986,19 @@ class Store:
         values["parent_artifact_id"] = UUID(values["parent_artifact_id"]) if values.get("parent_artifact_id") else None
         values["archived_at"] = parse_time(values["archived_at"]) if values.get("archived_at") else None
         values["created_at"] = parse_time(values["created_at"])
+        # W2.4：溯源 receipt 组装（receipt_version=0 = 没有）
+        if int(values.get("receipt_version") or 0) >= 1:
+            values["receipt"] = ArtifactReceipt(
+                receipt_version=int(values["receipt_version"]),
+                tool_name=str(values.get("tool_name") or ""),
+                tool_call_id=str(values.get("tool_call_id") or ""),
+                args_hash=str(values.get("args_hash") or ""),
+                output_hash=str(values.get("output_hash") or ""),
+                output_bytes=int(values.get("output_bytes") or 0),
+                truncated=bool(values.get("truncated", 0)),
+            )
+        else:
+            values.pop("receipt", None)
         return Artifact(**values)
 
     def list_artifacts(self, project_id: UUID) -> list[Artifact]:
@@ -4990,8 +5038,15 @@ class Store:
         timestamp = now()
         content_hash = data.content_hash or self._hash(f"{data.name}:{data.description}:{timestamp}")
         version = int(self.db.execute("SELECT COALESCE(MAX(version), 0) + 1 FROM artifacts WHERE project_id = ? AND name = ?", (str(project_id), data.name)).fetchone()[0])
+        # W2.4：receipt 落库（RECEIPT_FORMAT §3）。未知 receipt_version → **软拒收**：
+        # artifact 照常收下但不带溯源，拒收原因进 project.artifact.uploaded 事件——不静默丢弃。
+        receipt = data.receipt
+        receipt_rejected = ""
+        if receipt is not None and receipt.receipt_version != 1:
+            receipt_rejected = f"receipt_version_unknown:{receipt.receipt_version}"
+            receipt = None
         try:
-            self.db.execute("INSERT INTO artifacts (id, project_id, name, artifact_type, description, content_hash, version, status, source_path, task_id, run_id, created_by, created_at, data_policy, input_artifact_ids, git_commit, snapshot_ref, created_by_kind, approved_by, approved_at, downstream_allowed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (artifact_id, str(project_id), data.name, data.artifact_type, data.description, content_hash, version, data.status, data.source_path, str(data.task_id) if data.task_id else None, str(data.run_id) if data.run_id else None, created_by, timestamp, json.dumps(data.data_policy), json.dumps([str(value) for value in data.input_artifact_ids]), data.git_commit, data.snapshot_ref, created_by_kind, None, None, 0))
+            self.db.execute("INSERT INTO artifacts (id, project_id, name, artifact_type, description, content_hash, version, status, source_path, task_id, run_id, created_by, created_at, data_policy, input_artifact_ids, git_commit, snapshot_ref, created_by_kind, approved_by, approved_at, downstream_allowed, receipt_version, tool_name, tool_call_id, args_hash, output_hash, output_bytes, truncated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (artifact_id, str(project_id), data.name, data.artifact_type, data.description, content_hash, version, data.status, data.source_path, str(data.task_id) if data.task_id else None, str(data.run_id) if data.run_id else None, created_by, timestamp, json.dumps(data.data_policy), json.dumps([str(value) for value in data.input_artifact_ids]), data.git_commit, data.snapshot_ref, created_by_kind, None, None, 0, receipt.receipt_version if receipt else 0, receipt.tool_name if receipt else "", receipt.tool_call_id if receipt else "", receipt.args_hash if receipt else "", receipt.output_hash if receipt else "", receipt.output_bytes if receipt else 0, int(receipt.truncated) if receipt else 0))
             if data.mime_type:
                 self.db.execute("UPDATE artifacts SET mime_type = ? WHERE id = ?", (data.mime_type, artifact_id))
             self._insert_event(
@@ -5005,18 +5060,24 @@ class Store:
             )
             # 目录族事件（W2.1）：含内容哈希——这是 B 侧 receipt 契约（RECEIPT_FORMAT.md）
             # 在平台侧的对应物；工具级 receipt 随 agentd 上报在溯源期接入。
+            upload_payload = {
+                "artifact_id": artifact_id,
+                "name": data.name,
+                "artifact_type": data.artifact_type,
+                "version": version,
+                "status": data.status,
+                "content_hash": content_hash,
+            }
+            if receipt is not None:
+                upload_payload["receipt"] = receipt.model_dump(mode="json")
+            if receipt_rejected:
+                # 软拒收不静默：拒收原因进事件流（C 契约 §3 的"不静默丢弃"）。
+                upload_payload["receipt_rejected"] = receipt_rejected
             self._insert_event(
                 project_id,
                 "project.artifact.uploaded",
                 created_by,
-                {
-                    "artifact_id": artifact_id,
-                    "name": data.name,
-                    "artifact_type": data.artifact_type,
-                    "version": version,
-                    "status": data.status,
-                    "content_hash": content_hash,
-                },
+                upload_payload,
                 actor_kind=created_by_kind,
                 object_type="artifact",
                 object_id=UUID(artifact_id),

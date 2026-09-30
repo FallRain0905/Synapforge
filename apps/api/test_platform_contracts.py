@@ -67,6 +67,7 @@ class PlatformContractTests(unittest.TestCase):
                 "032_file_transfer_parts.sql",
                 "033_llm_channels.sql",
                 "034_agent_turn_stop_reason.sql",
+                "035_artifact_receipt.sql",
             ],
         )
         initial = files[0].read_text(encoding="utf-8").lower()
