@@ -36,6 +36,16 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey 
 
 from device_test_support import registration_request  # noqa: E402
 
+from multi_agent_assertions import (  # noqa: E402
+    check_artifact_feeds_task,
+    check_artifact_version_bump,
+    check_event_stream,
+    check_production_path,
+    check_receipt_shape,
+    check_task_lifecycle,
+    check_team_view,
+)
+
 
 def free_port() -> int:
     with socket.socket() as sock:
@@ -150,10 +160,12 @@ def main() -> int:
         }, token=member_token)
         check("创建任务 T1", status == 201, f"HTTP {status}")
         t1 = json.loads(raw)["id"]
+        t1_steps = ["READY"]
 
         status, raw = call(base, f"/api/tasks/{t1}/claim", "POST", {
             "agent_id": "e2e-agent-a", "lease_seconds": 900, "idempotency_key": "e2e-claim-t1",
         }, token=member_token, agent=as_agent("e2e-agent-a", token_a))
+        t1_steps.append(json.loads(raw)["task"]["status"] if status == 200 else f"http-{status}")
         check("A 领取 T1（能力令牌）", status == 200 and json.loads(raw)["task"]["status"] == "CLAIMED", f"HTTP {status}")
         lease_a = json.loads(raw)["lease"]
 
@@ -161,6 +173,7 @@ def main() -> int:
             "agent_id": "e2e-agent-a", "lease_token": lease_a["lease_token"], "status": "RUNNING",
             "idempotency_key": "e2e-prog-t1",
         }, token=member_token, agent=as_agent("e2e-agent-a", token_a))
+        t1_steps.append(json.loads(raw)["status"] if status == 200 else f"http-{status}")
         check("A 推进 T1 → RUNNING", status == 200, f"HTTP {status}")
 
         status, raw = call(base, f"/api/projects/{project_id}/artifacts", "POST", {
@@ -171,11 +184,14 @@ def main() -> int:
         check("A 上传产物（带 receipt）", status == 201, f"HTTP {status}")
         artifact_a = json.loads(raw)
         check("产物带溯源 receipt", artifact_a["receipt"]["tool_name"] == "workspace_diff")
+        ok, extra = check_receipt_shape(artifact_a["receipt"])
+        check("receipt 形状符合 RECEIPT_FORMAT §2（契约断言）", ok, extra)
 
         status, raw = call(base, f"/api/tasks/{t1}/result", "POST", {
             "agent_id": "e2e-agent-a", "lease_token": lease_a["lease_token"], "idempotency_key": "e2e-result-t1",
             "success": True, "output_artifact_ids": [artifact_a["id"]], "summary": "题面事实已整理",
         }, token=member_token, agent=as_agent("e2e-agent-a", token_a))
+        t1_steps.append(json.loads(raw)["task"]["status"] if status == 200 else f"http-{status}")
         check("A 交付 T1 → 待审", status == 200 and json.loads(raw)["task"]["status"] == "WAITING_REVIEW", f"HTTP {status}")
 
         status, raw = call(base, f"/api/projects/{project_id}/reviews", "POST", {
@@ -189,10 +205,12 @@ def main() -> int:
             "title": "建立模型并求解", "stage": "modeling", "input_artifacts": [artifact_a["id"]],
         }, token=member_token)
         t2 = json.loads(raw)["id"]
+        t2_steps = ["READY"]
 
         status, raw = call(base, f"/api/tasks/{t2}/claim", "POST", {
             "agent_id": "e2e-agent-b", "lease_seconds": 900, "idempotency_key": "e2e-claim-t2",
         }, token=member_token, agent=as_agent("e2e-agent-b", token_b))
+        t2_steps.append(json.loads(raw)["task"]["status"] if status == 200 else f"http-{status}")
         check("B 领取下游任务 T2", status == 200, f"HTTP {status} {raw[:160]}")
         lease_b = json.loads(raw)["lease"]
 
@@ -200,13 +218,16 @@ def main() -> int:
             "agent_id": "e2e-agent-b", "lease_token": lease_b["lease_token"], "idempotency_key": "e2e-result-t2-fail",
             "success": False, "output_artifact_ids": [], "summary": "求解器崩溃（第一次）",
         }, token=member_token, agent=as_agent("e2e-agent-b", token_b))
+        t2_steps.append(json.loads(raw)["task"]["status"] if status == 200 else f"http-{status}")
         check("B 第一次交付失败 → FAILED", status == 200 and json.loads(raw)["task"]["status"] == "FAILED", f"HTTP {status}")
 
         status, raw = call(base, f"/api/tasks/{t2}?status=READY", "PATCH", token=member_token)
+        t2_steps.append(json.loads(raw)["status"] if status == 200 else f"http-{status}")
         check("负责人把 T2 放回 READY（重试）", status == 200, f"HTTP {status} {raw[:160]}")
         status, raw = call(base, f"/api/tasks/{t2}/claim", "POST", {
             "agent_id": "e2e-agent-b", "lease_seconds": 900, "idempotency_key": "e2e-claim-t2-retry",
         }, token=member_token, agent=as_agent("e2e-agent-b", token_b))
+        t2_steps.append(json.loads(raw)["task"]["status"] if status == 200 else f"http-{status}")
         check("B 重试领取 T2", status == 200, f"HTTP {status} {raw[:160]}")
         lease_b2 = json.loads(raw)["lease"]
 
@@ -220,6 +241,7 @@ def main() -> int:
             "agent_id": "e2e-agent-b", "lease_token": lease_b2["lease_token"], "idempotency_key": "e2e-result-t2-ok",
             "success": True, "output_artifact_ids": [artifact_b["id"]], "summary": "模型与求解完成",
         }, token=member_token, agent=as_agent("e2e-agent-b", token_b))
+        t2_steps.append(json.loads(raw)["task"]["status"] if status == 200 else f"http-{status}")
         check("B 重试后交付成功", status == 200 and json.loads(raw)["task"]["status"] == "WAITING_REVIEW", f"HTTP {status}")
 
         # ---- ⑤ 退回 → 修订新版本 → 再批准 --------------------------------
@@ -248,15 +270,29 @@ def main() -> int:
             "summary": "模型求解与产出完整", "idempotency_key": "e2e-review-t2",
         }, token=member_token)
         check("人工批准 T2 任务本身", status == 201, f"HTTP {status} {raw[:160]}")
+        status, raw = call(base, f"/api/tasks/{t2}", token=member_token)
+        observed = json.loads(raw)["task"]["status"]  # TaskDetail 包装（task + 预算执行态）
+        t2_steps.append(observed)
+        check("任务级收口推进 T2 → APPROVED", observed == "APPROVED", f"HTTP {status}")
 
         # ---- ⑥ 聚合视图与事件可追溯 --------------------------------------
         status, raw = call(base, f"/api/projects/{project_id}/team", token=member_token)
         team = json.loads(raw)
-        check("团队视图列出两个 Agent", team["agent_count"] == 2, f"agents={team['agent_count']}")
+        ok, extra = check_team_view(team, expect_agent_ids=["e2e-agent-a", "e2e-agent-b"])
+        check("团队视图结构与计数一致（契约断言）", ok, extra)
         check("团队视图任务状态全景含已批准", team["task_status_counts"].get("APPROVED", 0) >= 1, str(team["task_status_counts"]))
 
         status, raw = call(base, f"/api/projects/{project_id}/production-path", token=member_token)
-        nodes = json.loads(raw)["nodes"]
+        production = json.loads(raw)
+        nodes = production["nodes"]
+        ok, extra = check_production_path(
+            production, expect_artifact_ids=[artifact_a["id"], artifact_b["id"], artifact_b2["id"]]
+        )
+        check("生产路径结构契约断言", ok, extra)
+        ok, extra = check_artifact_version_bump(artifact_b["version"], artifact_b2["version"])
+        check("退回修订恰好 +1（契约断言）", ok, extra)
+        ok, extra = check_artifact_feeds_task(production, artifact_a["id"], t2)
+        check("因果链断言：A 产物喂给 T2", ok, extra)
         node_a = next((n for n in nodes if n["artifact_id"] == artifact_a["id"]), None)
         check("生产路径：A 产物带 receipt 溯源", bool(node_a and node_a["receipt"] and node_a["receipt"]["tool_call_id"] == "turn-t1"))
         check("生产路径：A 产物喂给了 B 的任务", any(item["task_id"] == t2 for item in (node_a or {}).get("downstream_tasks", [])))
@@ -264,10 +300,21 @@ def main() -> int:
         check("生产路径：修订版已批准且版本+1", bool(node_b2 and node_b2["status"] == "APPROVED" and node_b2["version"] == artifact_b["version"] + 1))
 
         status, raw = call(base, f"/api/projects/{project_id}/events", token=member_token)
-        events_text = raw
-        check("事件流含目录族 project.task.created", "project.task.created" in events_text)
-        check("事件流含 project.artifact.uploaded（含 receipt）", '"project.artifact.uploaded"' in events_text and "workspace_diff" in events_text)
-        check("事件流含老轨 task.created（只增不改）", '"task.created"' in events_text)
+        # /events 返回 Event 契约（event_type/sequence），映射成契约信封形状再校验
+        envelopes = [
+            {"event": item.get("event_type"), "seq": item.get("sequence")}
+            for item in json.loads(raw)
+            if isinstance(item, dict)
+        ]
+        ok, extra = check_event_stream(envelopes)
+        check("事件目录与 seq 严格递增（契约断言）", ok, extra)
+        check("事件流含 receipt 溯源字段", "workspace_diff" in raw)
+
+        # ---- 状态机总断言（fail-closed 白名单）---------------------------
+        ok, extra = check_task_lifecycle(t1_steps)
+        check("T1 状态机全程合法", ok, extra)
+        ok, extra = check_task_lifecycle(t2_steps)
+        check("T2 状态机全程合法（含失败重试）", ok, extra)
 
         # ---- 收尾 --------------------------------------------------------
         print()
