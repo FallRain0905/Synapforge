@@ -1,7 +1,7 @@
 # 工作流定义 Schema（WORKFLOW_SCHEMA）
 
-> 状态：v1 草案（对应实施计划 W3.1/W4.1；落库形态按 D4 冻结：**定义存 JSON 列**，
-> 校验靠服务端）。所有者：工作包 C。
+> 状态：**v1 定稿**（2026-09-30，§7 三问已由 A 回签；落库形态按 D4 冻结：
+> **定义存 JSON 列**，校验靠服务端）。所有者：工作包 C。
 > 设计依据：autogen"编排策略 = 数据 + 一个函数"（三种群聊只差 select_speaker →
 > 我们把编排做成版本化数据而非硬编码）；deer-flow 确定性验收做门禁判定器。
 
@@ -153,10 +153,10 @@
 | `id` / `stage_id` / `title` / `goal` | ✓ | id 全工作流唯一 |
 | `depends_on[]` | ✓（可为空数组） | 引用其他 node id；**必须无环** |
 | `mode` | ✓ | `manual / hybrid / auto`（沿用平台三模式语义；auto=受约束派发，不承诺无人值守） |
-| `role_binding` | auto/hybrid 必填 | 引用 role_bindings.id |
+| `role_binding` | **互斥校验** | `auto/hybrid` **必须有**；`manual` **必须没有**（见 §4 规则 6——互斥，不是可选缺省） |
 | `prompt` | 可选 | `task_template` 支持 `{{input.<name>}}` 与 `{{input.from_output}}` 插值 |
 | `inputs[]` | 可选 | `{from_output: <node 输出名>}` 或 `{input: <workflow.inputs.name>}` |
-| `outputs[]` | ≥0 | `{name, artifact_type, path?}`；name 节点内唯一 |
+| `outputs[]` | ≥0 | `{name, artifact_type, path?}`；name 节点内唯一。**`path` 相对项目工作区根**（与 workspace_files API 同边界），禁止绝对路径与 `..`（探针越界一律 UNVERIFIED）；`outputs/` 是约定子目录，模板建议这么写但不是边界 |
 | `gate_policy` / `retry_policy` / `handoff_contract` / `delivery_adapter` | 可选 | 引用对应定义 |
 | `on_fail` | 默认 `escalate_human` | `retry` / `handoff:<role_binding_id>` / `escalate_human` |
 | `human_intervention` | 默认 `none` | `none` / `before` / `after` / `approval_gate`（人工批准是一等介入点，对应 autogen `HandoffTermination` 语义） |
@@ -168,9 +168,16 @@
 - `on_block`：`blocked`（停下来等输入）或 `escalate_human`（升级人工，
   发 `project.gate.escalated` 事件）。
 
-### 3.4 retry_policy
+### 3.4 budget 与 retry_policy（任务治理，§7① 定稿）
 
-- `max_attempts`（≥1）、`backoff_seconds`（≥0）、可选 `budget_tokens`。
+- 节点预算字段 `budget: {max_seconds, max_attempts, max_tokens}`，
+  **直接映射平台既有 `TaskBudget`**（contracts.py）：领取（claim）与心跳两处
+  硬校验、超限拒领并写一次性告警事件；用量来自 `runs.usage` 回报。
+- **不接 `llm_member_quotas`**：那是"渠道免费额度"线（按成员记账、代理对话
+  扣减）；节点预算是任务治理语义。两套额度不许搅在一起。
+- `retry_policy` 只保留重试节奏与失败处置：`backoff_seconds`（≥0）、
+  节点级 `on_fail`（`retry` / `handoff:<role_binding_id>` / `escalate_human`）；
+  `max_attempts` 统一放 `budget`（避免两处表达同一约束）。
 - 重试不清洗失败现场：`project.task.failed` 事件已记录 `stop_reason`，
   重试是**新尝试**（`project.task.retried` 带尝试序号），不覆盖历史。
 
@@ -183,7 +190,11 @@
 4. DAG 无环 + 所有节点可达（从零入度节点出发）。
 5. gate spec 逐条可被 acceptance 解析（调用 `evaluate_criterion` 做干跑：
    全部探针/查询传 None，不出现 `undecidable` 之外的异常）。
-6. `mode=auto/hybrid` 的节点必须有 `role_binding`。
+6. **role_binding 互斥校验（§7③ 定稿）**：`auto/hybrid` 节点**必须**有
+   `role_binding`；`manual` 节点**必须没有**（人工节点路由到成员
+   `assignee_member_id` 或公共派单队列，不设 required_capabilities）。
+   这是互斥校验，不是可选缺省。`budget` 字段形状须匹配
+   `TaskBudget`（`max_seconds / max_attempts / max_tokens`）。
 7. 交付节点（无下游消费者且声明 `delivery_adapter`）至少一个输出。
 8. 校验错误**逐条列出**（id + 原因），绝不静默丢弃——沿用
    `cumcm_importer` 的"未识别资产单列"纪律。
@@ -214,6 +225,11 @@ stage/outputs：`problem_analysis / modeling / coding / review / paper / deliver
 - 本 schema 与事件契约同规：**只增不改**。新增可选字段允许；改字段语义、
   删字段、改校验语义 = 新 schema_version + 新 workflow key 或显式迁移。
 - 模板内容修改 = 新 `workflow_version`；运行绑定不迁移。
-- 开放问题（留给 A/B 确认）：①`budget_tokens` 是否接 llm_member_quotas；
-  ②`path` 相对哪个根（建议项目工作区 `outputs/`，由 PathGuardProbe 圈界）；
-  ③`manual` 节点是否允许无 role_binding（建议允许，人工任务挂成员）。
+- **定稿记录（2026-09-30，A 回签）**：
+  ① `budget` 不接 `llm_member_quotas`（那是渠道免费额度线）；节点预算直接
+  映射平台 `TaskBudget`（claim/心跳硬校验、超限拒领+一次性告警事件），
+  用量来自 `runs.usage`——见 §3.4。
+  ② `path` 相对根 = **项目工作区根**（与 workspace_files API 同边界、
+  RLS 语义一致），不是 `outputs/`；`outputs/` 降级为约定子目录；
+  探针禁绝对路径与 `..`，越界一律 UNVERIFIED（`PathGuardProbe` 已按此实现）。
+  ③ `manual` 节点允许且必须无 `role_binding`（互斥校验，见 §4 规则 6）。

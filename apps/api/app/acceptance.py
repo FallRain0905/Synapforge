@@ -426,8 +426,9 @@ def evaluate_all(
 class PathGuardProbe:
     """把任意 FileProbe 约束在指定根目录内的包装器。
 
-    相对路径相对 root 解析；解析后的真实路径必须仍落在 root 内，
-    否则 stat/read 返回 None（判定器据此给 UNVERIFIED，而不是报错）。
+    **只接受相对路径**（W3.3 定稿口径：与 workspace_files API 的相对路径同边界）：
+    绝对路径、含 ``..`` 的逃逸、空路径、NUL 字节一律返回 None，
+    判定器据此给 UNVERIFIED 而不是报错或猜结论。
     """
 
     def __init__(self, root: str, inner: FileProbe) -> None:
@@ -437,8 +438,9 @@ class PathGuardProbe:
     def _scoped(self, path: str) -> str | None:
         if not path or "\x00" in path:
             return None
-        candidate = path if os.path.isabs(path) else os.path.join(self._root, path)
-        resolved = os.path.realpath(candidate)
+        if os.path.isabs(path):
+            return None
+        resolved = os.path.realpath(os.path.join(self._root, path))
         if resolved != self._root and not resolved.startswith(self._root + os.sep):
             return None
         return resolved

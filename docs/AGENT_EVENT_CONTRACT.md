@@ -82,7 +82,7 @@ data: {"event":"project.task.claimed","seq":43,...}
 | run | `project.run.started` | run_id, task_id |
 | run | `project.run.finished` | run_id, stop_reason, usage |
 | run | `project.run.failed` | run_id, error{code,message} |
-| artifact | `project.artifact.uploaded` | artifact_id, receipt{...RECEIPT_FORMAT} |
+| artifact | `project.artifact.uploaded` | artifact_id, receipt{...RECEIPT_FORMAT §2.1 七列}，`receipt_rejected`（可选，软拒收时 = `"receipt_version_unknown:<N>"`，artifact 照常入库但不带溯源） |
 | artifact | `project.artifact.version_created` | artifact_id, parent_artifact_id |
 | artifact | `project.artifact.approved` | artifact_id, approved_by |
 | artifact | `project.artifact.rejected` | artifact_id, reason |

@@ -245,10 +245,12 @@ class PathGuardProbeTests(unittest.TestCase):
         result = evaluate_criterion(f"file:{outside} exists", probe=self.probe)
         self.assertFalse(result.checked)
 
-    def test_absolute_path_inside_root_holds(self):
+    def test_absolute_path_rejected_even_inside_root(self):
+        # W3.3 定稿口径：探针只接受相对路径，根内绝对路径也一律 UNVERIFIED
         target = self.root / "secret.txt"
         result = evaluate_criterion(f"file:{target} exists", probe=self.probe)
-        self.assertTrue(result.checked and result.holds, result.detail)
+        self.assertFalse(result.checked)
+        self.assertEqual(result.verdict, acceptance.VERDICT_UNVERIFIED)
 
     def test_null_byte_path_is_unverified(self):
         result = evaluate_criterion("file:out\x00put/x exists", probe=self.probe)
