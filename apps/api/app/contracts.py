@@ -1253,6 +1253,8 @@ class CompetitionPackApplyRequest(APIModel):
 
     problem_code: str | None = Field(default=None, max_length=8)
     questions: list[int] | None = None
+    # 已弃用、服务端忽略（W2.2 可信归属）：物化者身份由登录会话注入，
+    # 保留字段只为兼容既有客户端，传什么都不改变归属。
     created_by: str = "pack-materializer"
     idempotency_key: str | None = Field(default=None, min_length=8, max_length=160)
 

@@ -146,7 +146,7 @@ class CumcmImporter:
                 ("论文编译与提交交付", "生成论文、编译 PDF 并完成提交包检查。", "delivery", ["paper_source", "compiled_pdf", "submission_bundle"]),
             ]
             for title, description, stage, output_types in task_specs:
-                self.store.create_task(project_id, TaskCreate(title=title, description=description, stage=stage, output_types=output_types, allow_future_data=False))
+                self.store.create_task(project_id, TaskCreate(title=title, description=description, stage=stage, output_types=output_types, allow_future_data=False), actor=created_by)
                 created_tasks += 1
         return ImportSummary(project_id=project_id, source_path=str(root), discovered_files=len(candidates), imported_artifacts=imported, skipped_artifacts=skipped, created_tasks=created_tasks, artifact_ids=artifact_ids, warnings=warnings)
 
@@ -306,7 +306,7 @@ class CumcmHandoffImporter:
                 ("论文编译与提交交付", "生成论文、编译 PDF 并完成提交包检查。", "delivery", ["paper_source", "compiled_pdf", "submission_bundle"]),
             ]
             for title, description, stage, output_types in task_specs:
-                self.store.create_task(project_id, TaskCreate(title=title, description=description, stage=stage, output_types=output_types, allow_future_data=False))
+                self.store.create_task(project_id, TaskCreate(title=title, description=description, stage=stage, output_types=output_types, allow_future_data=False), actor=created_by)
                 created_tasks += 1
 
         # 无损 = 参与导入的每个文件都已入库且哈希一致（未分类文件走回退登记，

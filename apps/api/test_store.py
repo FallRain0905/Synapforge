@@ -122,17 +122,22 @@ class StoreContractTests(unittest.TestCase):
             self.project.id,
             ArtifactCreate(name="lock-expiry.json", artifact_type="result_table"),
         )
-        first = self.store.claim_event_outbox(limit=1, lock_seconds=60)
-        self.assertEqual(len(first), 1)
-        self.assertEqual(first[0].status, "PROCESSING")
-        self.assertEqual(self.store.claim_event_outbox(limit=1, lock_seconds=60), [])
+        # 一次物化可能发出多条事件（W2.1 起 artifact.created 与 project.artifact.uploaded 各一行）——
+        # 本测试盯的是锁回收语义，不绑行数：先把全部可领的领走锁住，再验证"锁到期可被回收"。
+        first = self.store.claim_event_outbox(limit=100, lock_seconds=60)
+        self.assertGreaterEqual(len(first), 1)
+        self.assertTrue(all(item.status == "PROCESSING" for item in first))
+        self.assertEqual(self.store.claim_event_outbox(limit=100, lock_seconds=60), [])
         expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
-        self.store.db.execute("UPDATE event_outbox SET lock_expires_at = ? WHERE id = ?", (expired, str(first[0].id)))
+        self.store.db.execute(
+            "UPDATE event_outbox SET lock_expires_at = ? WHERE id IN (" + ",".join("?" for _ in first) + ")",
+            (expired, *[str(item.id) for item in first]),
+        )
         self.store.db.commit()
-        reclaimed = self.store.claim_event_outbox(limit=1, lock_seconds=60)
-        self.assertEqual(len(reclaimed), 1)
-        self.assertEqual(reclaimed[0].id, first[0].id)
-        self.assertEqual(reclaimed[0].status, "PROCESSING")
+        reclaimed = self.store.claim_event_outbox(limit=100, lock_seconds=60)
+        self.assertEqual(len(reclaimed), len(first))
+        self.assertEqual({item.id for item in reclaimed}, {item.id for item in first})
+        self.assertTrue(all(item.status == "PROCESSING" for item in reclaimed))
 
     def test_task_status_update_is_recorded(self) -> None:
         task = self.store.create_task(self.project.id, TaskCreate(title="状态测试"))

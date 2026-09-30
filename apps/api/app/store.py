@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from . import skill_match
+from . import event_catalog, skill_match
 
 from .contracts import (
     Agent,
@@ -3964,7 +3964,7 @@ class Store:
         rows = self.db.execute("SELECT * FROM tasks WHERE project_id = ? ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 ELSE 2 END, updated_at DESC", (str(project_id),))
         return [self._task(row) for row in rows]
 
-    def create_task(self, project_id: UUID, data: TaskCreate) -> Task:
+    def create_task(self, project_id: UUID, data: TaskCreate, *, actor: str | None = None) -> Task:
         self.get_project(project_id)
         self._validate_dispatch_target(project_id, data.assignee_member_id)
         if data.parent_task_id:
@@ -4004,7 +4004,18 @@ class Store:
         evidence_requirements = self._validated_evidence_requirements(data.evidence_requirements)
         self.db.execute("INSERT INTO tasks (id, project_id, title, description, stage, status, assignee, assignee_member_id, priority, requires_review, allow_future_data, input_artifacts, input_handoff_ids, output_types, parent_task_id, dependency_task_ids, acceptance_criteria, required_capabilities, budget, evidence_requirements, deadline, information_boundary, resource_policy, requires_human_approval, blocked_reason, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (task_id, str(project_id), data.title, data.description, data.stage, "READY", data.assignee, data.assignee_member_id, data.priority, int(data.requires_review), int(data.allow_future_data), json.dumps(data.input_artifacts), json.dumps([str(value) for value in data.input_handoff_ids]), json.dumps(data.output_types), str(data.parent_task_id) if data.parent_task_id else None, json.dumps([str(value) for value in dependency_ids]), json.dumps(data.acceptance_criteria, ensure_ascii=False), json.dumps(skill_match.normalize_capability_list(data.required_capabilities)), json.dumps(budget, ensure_ascii=False), json.dumps(evidence_requirements, ensure_ascii=False), data.deadline.isoformat() if data.deadline else None, json.dumps(data.information_boundary, ensure_ascii=False), json.dumps(data.resource_policy, ensure_ascii=False), int(requires_human_approval), None, timestamp))
         self.db.commit()
-        self.add_event(project_id, "task.created", "member-001", {"task_id": task_id, "title": data.title})
+        event_actor = actor or "member-001"
+        self.add_event(project_id, "task.created", event_actor, {"task_id": task_id, "title": data.title})
+        # 目录族事件（W2.1，只增不改）：老事件名保留给既有消费方，新族供项目流/团队视图用。
+        self.add_event(
+            project_id,
+            "project.task.created",
+            event_actor,
+            {"task_id": task_id, "title": data.title, "stage": data.stage, "priority": data.priority},
+            actor_kind="member" if actor else "system",
+            object_type="task",
+            object_id=UUID(task_id),
+        )
         return self._task(self.db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone())
 
     @staticmethod
@@ -4988,6 +4999,24 @@ class Store:
                 "artifact.created",
                 created_by,
                 {"artifact_id": artifact_id, "name": data.name, "artifact_type": data.artifact_type},
+                actor_kind=created_by_kind,
+                object_type="artifact",
+                object_id=UUID(artifact_id),
+            )
+            # 目录族事件（W2.1）：含内容哈希——这是 B 侧 receipt 契约（RECEIPT_FORMAT.md）
+            # 在平台侧的对应物；工具级 receipt 随 agentd 上报在溯源期接入。
+            self._insert_event(
+                project_id,
+                "project.artifact.uploaded",
+                created_by,
+                {
+                    "artifact_id": artifact_id,
+                    "name": data.name,
+                    "artifact_type": data.artifact_type,
+                    "version": version,
+                    "status": data.status,
+                    "content_hash": content_hash,
+                },
                 actor_kind=created_by_kind,
                 object_type="artifact",
                 object_id=UUID(artifact_id),
@@ -6621,6 +6650,24 @@ class Store:
         next_sequence = self.db.execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events WHERE project_id = ?", (str(project_id),)).fetchone()[0]
         event_id = str(uuid4())
         timestamp = now()
+        if str(event_type).startswith("project.") and str(event_type).count(".") >= 2:
+            # 目录咽喉（W2.1）：保留命名空间是**目录形状** `project.<family>.<action>`（≥3 段）。
+            # 落在这里的事件必须在 event_catalog 注册且信封合法，未注册名直接拒绝
+            # （工作包 C 的契约：发出侧拦截，绝不发出去让消费方猜）。
+            # 老轨名字不受影响：`artifact.created`（无前缀）与 `project.seeded`（两段，种子事件）
+            # 都只是碰巧长得像，不进目录——只增不改。
+            spec = event_catalog.EVENTS.get(str(event_type))
+            problems = event_catalog.validate_envelope(
+                {
+                    "event": event_type,
+                    "seq": next_sequence,
+                    "schema_version": spec.version if spec else 1,
+                    "occurred_at": timestamp,
+                    "payload": payload if isinstance(payload, dict) else {},
+                }
+            )
+            if problems:
+                raise ValueError("project_event_catalog_rejected:" + "; ".join(problems))
         self.db.execute("INSERT INTO events (id, project_id, sequence, event_type, actor, payload, created_at, actor_kind, object_type, object_id, idempotency_key, schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (event_id, str(project_id), next_sequence, event_type, actor, json.dumps(payload, ensure_ascii=False), timestamp, actor_kind, object_type, str(object_id) if object_id else None, idempotency_key, schema_version))
         self.db.execute("INSERT INTO event_outbox (id, event_id, project_id, status, attempts, available_at, locked_at, lock_expires_at, delivered_at, last_error, created_at, updated_at) VALUES (?, ?, ?, 'PENDING', 0, ?, NULL, NULL, NULL, NULL, ?, ?)", (str(uuid4()), event_id, str(project_id), timestamp, timestamp, timestamp))
         event = Event(id=UUID(event_id), project_id=project_id, sequence=next_sequence, event_type=event_type, actor=actor, payload=payload, created_at=parse_time(timestamp), actor_kind=actor_kind, object_type=object_type, object_id=object_id, idempotency_key=idempotency_key, schema_version=schema_version)

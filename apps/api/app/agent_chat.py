@@ -1046,6 +1046,7 @@ def promote_conversation(
             description=description,
             input_artifacts=[str(a) for a in requested],
         ),
+        actor=member_id,
     )
     return AgentConversationPromoteResult(
         task=task,

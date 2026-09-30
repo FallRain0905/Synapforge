@@ -190,7 +190,7 @@ from .path_privacy import public_agent, public_artifact, public_run
 from . import archive, drive, drive_grants, file_transfers, llm_channels, workspace_files
 from .cumcm_importer import CumcmHandoffImporter, CumcmImporter
 from .gateway import GatewayProtocolError, GatewayService
-from . import agent_chat, ai_chat, ai_probe, boundary_gate, collaboration, convert_queue, delivery, document_api, kb_gateway, knowledge_base, observability, pack_api, personal_drive, stream_bridge
+from . import agent_chat, ai_chat, ai_probe, boundary_gate, collaboration, convert_queue, delivery, document_api, kb_gateway, knowledge_base, observability, pack_api, personal_drive, project_team, stream_bridge
 from .contracts import LlmChannelCreate, LlmChannelUpdate, LlmQuotaSet
 from packages.competition_packs import CompetitionPackError
 
@@ -1288,10 +1288,27 @@ def project_deliverables(project_id: UUID) -> ProjectDeliverables:
     return ProjectDeliverables(**store.project_deliverables(project_id))
 
 
-@app.post("/api/projects/{project_id}/tasks", response_model=Task, status_code=201)
-def create_task(project_id: UUID, data: TaskCreate) -> Task:
+@app.get("/api/projects/{project_id}/team", response_model=dict[str, Any])
+def project_team_overview(project_id: UUID) -> dict[str, Any]:
+    """团队视图（W2.3）：每个 Agent 的身份/能力/在线/当前任务/负载/在等什么/下一件。"""
+
     project_or_404(project_id)
-    task = store.create_task(project_id, data)
+    return project_team.project_team(store, project_id)
+
+
+@app.get("/api/projects/{project_id}/production-path", response_model=dict[str, Any])
+def project_production_path(project_id: UUID) -> dict[str, Any]:
+    """生产路径（W2.3）：成果物 → 交接 → 下游任务的因果链（最近 50 个成果物）。"""
+
+    project_or_404(project_id)
+    return project_team.project_production_path(store, project_id)
+
+
+@app.post("/api/projects/{project_id}/tasks", response_model=Task, status_code=201)
+def create_task(project_id: UUID, data: TaskCreate, request: Request) -> Task:
+    project_or_404(project_id)
+    # actor 服务端注入（W2.2 口径）：任务是谁建的由会话决定，不信请求体里的自报字段。
+    task = store.create_task(project_id, data, actor=_request_member_id(request))
     publish_chat_after(project_id)
     return task
 
@@ -3250,7 +3267,8 @@ def apply_project_competition_pack(
                 project,
                 problem_code=data.problem_code,
                 questions=data.questions,
-                created_by=data.created_by or _request_member_id(request),
+                # 身份服务端注入（W2.2）：请求体里的 created_by 一律忽略，不信任自报字段。
+                created_by=_request_member_id(request),
             ),
         )
         if project.task_mode == "auto":
