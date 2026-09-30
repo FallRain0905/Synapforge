@@ -260,6 +260,11 @@ Windows 侧的 Session Worker、ConPTY、Machine Service 安装与运行属于�
 
 本仓库先实现完整目标架构的核心契约和可运行纵向链路：项目、任务、交接、成果物、Agent、事件、审核、CUMCM 工作区导入、任务租约和 Run Manifest。生产环境切换 PostgreSQL、对象存储、NATS、Temporal 和正式身份服务时，API 契约保持不变。
 
+多 Agent 协作与流程可视化的后续基线见：
+
+- [`docs/MULTI_AGENT_COLLABORATION_DEVELOPMENT_PLAN.md`](docs/MULTI_AGENT_COLLABORATION_DEVELOPMENT_PLAN.md)：阶段 0–9 协作生命周期、通信协议、实现缺口和 D0–D6 实施计划；
+- [`docs/WORKFLOW_VISUALIZATION_DESIGN.md`](docs/WORKFLOW_VISUALIZATION_DESIGN.md)：阶段泳道、DAG、成果物/交接/审核/门禁节点、实时更新和 V1–V4 前端验收。
+
 现有 `C题工作区`、`C题四问完整交接包` 和 `competition-workflow` 不会被修改；后续通过导入适配器接入。
 
 ## 改动须知（Demo 1.0 期间）
@@ -269,7 +274,7 @@ Windows 侧的 Session Worker、ConPTY、Machine Service 安装与运行属于�
 
 **禁区**（本阶段禁止改动，理由见计划书 §6.4）：`apps/api/app/collaboration.py` 的中继语义、`apps/api/app/gateway.py` 的逐帧应答模型、`packages/agent_protocol/` 的信封与序号语义、`packages/competition_packs/` 的内置包内容、`apps/api/app/kb_gateway.py` 的错误码映射、`infra/docker-compose.yml`、**既有** PostgreSQL 迁移脚本（新增迁移文件不受此限，但必须同步 SQLite 侧表结构与契约测试，并更新 `apps/api/test_platform_contracts.py` 的迁移清单）。
 
-**基线**（改动后必须仍然成立）：Agent `python -X utf8 -m unittest discover -s . -p "test_*.py"` ≥ 473（12 skipped）；后端同命令 ≥ 727（15 skipped；其中 2 项 `test_latex_compile` 是**本机环境**失败——没装 xelatex，与代码无关）；前端 `npm run build` 通过且路由数不少于 26；`scripts/demo-1.0.ps1 -AutoApprove` 17 项全过。
+**基线**（改动后必须仍然成立）：Agent `python -X utf8 -m unittest discover -s . -p "test_*.py"` ≥ 489（12 skipped）；后端同命令 ≥ 914（15 skipped；其中 2 项 `test_latex_compile` 是**本机环境**失败——没装 xelatex，与代码无关）；前端 `npm run build` 通过且路由数不少于 27；`scripts/demo-1.0.ps1 -AutoApprove` 17 项全过。
 
 **前端改动后必须重建并重启 Web 进程**（见上文「Web」小节）：`next start` 会缓存构建清单，只重建文件不重启会持续发旧 HTML。
 
