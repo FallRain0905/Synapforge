@@ -1376,6 +1376,16 @@ def start_workflow_run(project_id: UUID, data: WorkflowRunStart, request: Reques
         raise _workflow_http_error(error) from error
 
 
+@app.get("/api/projects/{project_id}/workflow-runs/{run_id}", response_model=dict[str, Any])
+def get_workflow_run(project_id: UUID, run_id: UUID) -> dict[str, Any]:
+    """运行详情（W3.1）：node↔task 映射、账本快照（stall/交付结果）、冻结的定义。"""
+
+    project_or_404(project_id)
+    try:
+        return workflow_service.get_workflow_run(store, project_id, run_id)
+    except workflow_service.WorkflowError as error:
+        raise HTTPException(status_code=404, detail=error.code) from error
+
 @app.get("/api/projects/{project_id}/workflow-runs", response_model=list[dict[str, Any]])
 def list_workflow_runs(project_id: UUID) -> list[dict[str, Any]]:
     project_or_404(project_id)

@@ -28,6 +28,7 @@ __all__ = [
     "get_workflow",
     "list_workflows",
     "start_workflow_run",
+    "get_workflow_run",
     "list_project_workflow_runs",
 ]
 
@@ -511,20 +512,51 @@ def start_workflow_run(
     }
 
 
+def _run_view(row: Any) -> dict[str, Any]:
+    return {
+        "run_id": str(row["id"]),
+        "project_id": str(row["project_id"]),
+        "workflow_id": str(row["workflow_id"]),
+        "workflow_version_id": str(row["workflow_version_id"]),
+        "status": str(row["status"]),  # RUNNING / COMPLETED / STALLED
+        "inputs": json.loads(row["inputs"] or "{}"),
+        # node_id → task_id（引擎的状态权威）：前端把任务状态映射回节点靠它
+        "node_tasks": json.loads(row["node_tasks"] or "{}"),
+        "created_by": str(row["created_by"] or ""),
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
+def get_workflow_run(store: Any, project_id: UUID, run_id: UUID) -> dict[str, Any]:
+    """运行详情（含 node_tasks 映射与账本快照：gates/deliveries 的持久结果）。"""
+
+    ensure_schema(store)
+    row = store.db.execute(
+        "SELECT * FROM project_workflow_runs WHERE id = ? AND project_id = ?", (str(run_id), str(project_id))
+    ).fetchone()
+    if row is None:
+        raise WorkflowError("workflow_run_not_found")
+    view = _run_view(row)
+    state = json.loads(row["ledger"] or "{}") or {}
+    view["deliveries"] = state.get("deliveries", {})
+    view["attempts"] = state.get("attempts", {})
+    ledger = state.get("ledger") or {}
+    view["ledger"] = {
+        "round": ledger.get("round", 0),
+        "stall_count": ledger.get("stall_count", 0),
+        "needs_replan": ledger.get("needs_replan", False),
+    }
+    version_row = store.db.execute(
+        "SELECT definition FROM workflow_versions WHERE id = ?", (row["workflow_version_id"],)
+    ).fetchone()
+    view["definition"] = json.loads(version_row["definition"]) if version_row else None
+    return view
+
+
 def list_project_workflow_runs(store: Any, project_id: UUID) -> list[dict[str, Any]]:
     ensure_schema(store)
     rows = store.db.execute(
         "SELECT * FROM project_workflow_runs WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", (str(project_id),)
     ).fetchall()
-    return [
-        {
-            "run_id": str(row["id"]),
-            "workflow_id": str(row["workflow_id"]),
-            "workflow_version_id": str(row["workflow_version_id"]),
-            "status": str(row["status"]),
-            "inputs": json.loads(row["inputs"] or "{}"),
-            "created_by": str(row["created_by"] or ""),
-            "created_at": str(row["created_at"]),
-        }
-        for row in rows
-    ]
+    return [_run_view(row) for row in rows]
