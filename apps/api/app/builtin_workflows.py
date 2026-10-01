@@ -7,8 +7,10 @@
 
 诚实边界：CUMCM 的**四问分支**仍是老轨 pack（`competition_pack/apply` 的四问 DAG），
 本定义的 questions 是输入参数（进模板插值），不做 per-question 动态节点生成——
-schema v1 没有动态节点，需要时走 additive 演进。本模块只产定义与幂等种子，
-应用仍走 workflow_service.start_workflow_run（生成的永远是**任务骨架**）。
+schema v1 没有动态节点，需要时走 additive 演进。另一处词表收窄（W3.4 对照核验回执
+48bba40 ②2 记录在案）：老轨 comp-prob-analysis 产 `problem_analysis`，本定义收窄为
+`problem_facts`（语义覆盖：事实+数据画像），老轨消费者按此对应。本模块只产定义与
+幂等种子，应用仍走 workflow_service.start_workflow_run（生成的永远是**任务骨架**）。
 """
 
 from __future__ import annotations
@@ -19,14 +21,22 @@ from . import workflow_service
 
 __all__ = ["cumcm_definition", "longform_definition", "ensure_builtin_workflows"]
 
+# 角色预设对照（W3.4 对照核验回执 48bba40）：六个角色全部挂 roles/mm-*.md（平台有角色
+# 指纹漂移检测，不挂预设的角色享受不到）；coder/compiler 补 shell.run——可复现计算与
+# LaTeX 编译没有执行能力就是三次重试撞同一堵墙（对照清单③）。
 _CUMCM_ROLES = [
     {"id": "analyst", "role_name": "赛题分析", "description": "题面事实、数据画像与问题拆解",
      "capability_requirements": ["files.read"], "prompt_overrides": {"system": "角色预设见 deploy/cloud-agent/roles/mm-analysis.md"}},
-    {"id": "modeler", "role_name": "建模", "capability_requirements": ["files.read", "files.write"]},
-    {"id": "coder", "role_name": "编程与实验", "capability_requirements": ["files.read", "files.write"]},
-    {"id": "reviewer", "role_name": "独立复核", "capability_requirements": ["files.read"]},
-    {"id": "paper_writer", "role_name": "论文写作", "capability_requirements": ["files.read", "files.write"]},
-    {"id": "compiler", "role_name": "编译与交付", "capability_requirements": ["files.read"]},
+    {"id": "modeler", "role_name": "建模", "capability_requirements": ["files.read", "files.write"],
+     "prompt_overrides": {"system": "角色预设见 deploy/cloud-agent/roles/mm-modeling.md"}},
+    {"id": "coder", "role_name": "编程与实验", "capability_requirements": ["files.read", "files.write", "shell.run"],
+     "prompt_overrides": {"system": "角色预设见 deploy/cloud-agent/roles/mm-coding.md"}},
+    {"id": "reviewer", "role_name": "独立复核", "capability_requirements": ["files.read"],
+     "prompt_overrides": {"system": "角色预设见 deploy/cloud-agent/roles/mm-critique.md"}},
+    {"id": "paper_writer", "role_name": "论文写作", "capability_requirements": ["files.read", "files.write"],
+     "prompt_overrides": {"system": "角色预设见 deploy/cloud-agent/roles/mm-paper-zh.md"}},
+    {"id": "compiler", "role_name": "编译与交付", "capability_requirements": ["files.read", "shell.run"],
+     "prompt_overrides": {"system": "角色预设见 deploy/cloud-agent/roles/mm-compile.md"}},
 ]
 
 
@@ -83,15 +93,17 @@ def cumcm_definition() -> dict[str, Any]:
                 "goal": "可复现计算，登记参数、种子与结果", "depends_on": ["model"], "mode": "auto",
                 "role_binding": "coder",
                 "inputs": [{"from_output": "model_spec"}],
-                "outputs": [{"name": "result_table", "artifact_type": "result_table"}],
+                "outputs": [{"name": "code", "artifact_type": "code"},
+                            {"name": "result_table", "artifact_type": "result_table"}],
                 "budget": {"max_attempts": 3},
-                "retry_policy": {"backoff_seconds": 30, "on_fail": "retry"},
+                "on_fail": "retry",
+                "retry_policy": {"backoff_seconds": 30},
             },
             {
                 "id": "review", "stage_id": "review", "title": "独立复核与信息边界审计",
                 "goal": "重复计量、未来信息与跨问一致性检查", "depends_on": ["code"], "mode": "auto",
                 "role_binding": "reviewer",
-                "inputs": [{"from_output": "result_table"}],
+                "inputs": [{"from_output": "result_table"}, {"from_output": "code"}],
                 "outputs": [{"name": "audit_report", "artifact_type": "audit_report"}],
                 "gate_policy": "cumcm-review-gate",
             },

@@ -270,11 +270,14 @@ def validate_definition(definition: Any) -> list[str]:
             if not isinstance(retry_policy, dict):
                 errors.append(f"node:{node_id}: retry_policy 必须是对象")
             else:
+                # 封闭键集（schema §3.4 定稿 48bba40）：只允许 backoff_seconds；
+                # on_fail 是**节点级**字段，写进 retry_policy 属位置错误，逐键点名。
+                unknown = sorted(set(retry_policy.keys()) - {"backoff_seconds"})
+                if unknown:
+                    errors.append(f"node:{node_id}: retry_policy 只允许 backoff_seconds（多余键 {unknown}；on_fail 是节点级字段，max_attempts 归 budget）")
                 backoff = retry_policy.get("backoff_seconds")
                 if "backoff_seconds" in retry_policy and (not isinstance(backoff, int) or isinstance(backoff, bool) or backoff < 0):
                     errors.append(f"node:{node_id}: retry_policy.backoff_seconds 必须 ≥0 整数")
-                if "max_attempts" in retry_policy:
-                    errors.append(f"node:{node_id}: max_attempts 统一放 budget（retry_policy 不再表达该约束，schema §3.4）")
         for item in node.get("outputs") or []:
             path = item.get("path") if isinstance(item, dict) else None
             if path is not None and (str(path).startswith("/") or str(path).startswith("\\") or ".." in str(path).replace("\\", "/").split("/")):
@@ -541,6 +544,14 @@ def get_workflow_run(store: Any, project_id: UUID, run_id: UUID) -> dict[str, An
     state = json.loads(row["ledger"] or "{}") or {}
     view["deliveries"] = state.get("deliveries", {})
     view["attempts"] = state.get("attempts", {})
+    # 逐节点任务状态（B 期五回签：详情页刷新就能画状态桶，不必等一次 advance）
+    node_statuses: dict[str, str] = {}
+    for node_id, task_id in view["node_tasks"].items():
+        task_row = store.db.execute("SELECT status FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if task_row is not None:
+            status = task_row["status"]
+            node_statuses[node_id] = str(status.value if hasattr(status, "value") else status)
+    view["node_statuses"] = node_statuses
     ledger = state.get("ledger") or {}
     view["ledger"] = {
         "round": ledger.get("round", 0),

@@ -71,6 +71,7 @@ gate_policies/handoff_contracts/delivery_adapters）。**前端不要从响应�
                                  "detail": {…}, "error": "仅失败时" } },
   "attempts": { "<node_id>": 2 },
   "ledger": { "round": 3, "stall_count": 0, "needs_replan": false },
+  "node_statuses": { "<node_id>": "APPROVED" },
   "definition": { "…冻结版本的定义…" }
 }
 ```
