@@ -20,6 +20,7 @@ import {
   Sparkles,
   TerminalSquare,
   Users,
+  Workflow,
   Wrench,
 } from "lucide-react";
 
@@ -196,6 +197,14 @@ export const NAV_SECTIONS: NavSection[] = [
     icon: Wrench,
     items: [
       {
+        href: "/workflows",
+        label: "工作流包",
+        icon: Workflow,
+        testId: "nav-workflows",
+        hint: "通用工作流包：内置包安装、定义编辑、应用到项目物化任务骨架",
+        keywords: ["工作流", "包", "workflow", "编排", "内置包", "模板", "阶段", "节点"],
+      },
+      {
         href: "/pack",
         label: "建模模板包",
         icon: FileCheck2,
@@ -274,6 +283,7 @@ const PAGE_TITLES: Record<string, { title: string; subtitle: string }> = {
   "/team": { title: "团队与成员", subtitle: "成员工作量、项目成员管理与团队" },
   "/settings": { title: "空间设置", subtitle: "平台 API 凭据（LLM / Embedding / MinerU）与空间配额" },
   "/channels": { title: "LLM 渠道", subtitle: "平台代管的 OpenAI 兼容上游与全员免费额度" },
+  "/workflows": { title: "工作流包", subtitle: "通用工作流包：定义阶段、角色、门禁与交付，应用到项目物化任务骨架" },
 };
 
 export function findSection(pathname: string): NavSection | undefined {

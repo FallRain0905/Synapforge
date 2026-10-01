@@ -2549,6 +2549,245 @@ export async function getProjectProductionPath(projectId: string): Promise<Proje
   return response.json();
 }
 
+/** ---- 工作流包（W3.7/W4.2；definition 字段集以 docs/WORKFLOW_SCHEMA.md v1 §3 为准，不从响应反推）---- */
+
+export type WorkflowGateLeaf = string | { all: unknown[] } | { any: unknown[] };
+
+export type WorkflowInputSpec = { name: string; required?: boolean; hint?: string; artifact_type?: string };
+
+export type WorkflowStageSpec = { id: string; title: string; goal?: string };
+
+export type WorkflowRoleBindingSpec = {
+  id: string;
+  role_name: string;
+  description?: string;
+  capability_requirements?: string[];
+  prompt_overrides?: Record<string, string>;
+};
+
+export type WorkflowHandoffContractSpec = {
+  id: string;
+  from_role: string;
+  to_role: string;
+  required_fields?: string[];
+  artifact_refs?: string[];
+};
+
+export type WorkflowGatePolicySpec = {
+  id: string;
+  /** acceptance.py 五类字面语法（字符串叶子 + {"all":[]}/{"any":[]} 组合），fail-closed 到 UNVERIFIED */
+  spec: WorkflowGateLeaf[];
+  on_block: "blocked" | "escalate_human";
+};
+
+export type WorkflowNodeSpec = {
+  id: string;
+  stage_id: string;
+  title: string;
+  goal?: string;
+  depends_on: string[];
+  mode: "manual" | "hybrid" | "auto";
+  /** 互斥校验（schema §4 规则 6）：auto/hybrid 必须有；manual 必须没有——不是可选缺省 */
+  role_binding?: string;
+  prompt?: { task_template?: string };
+  inputs?: ({ from_output: string } | { input: string })[];
+  outputs?: { name: string; artifact_type: string; path?: string }[];
+  gate_policy?: string;
+  /** 只允许 {max_seconds, max_attempts, max_tokens}（映射平台 TaskBudget；不接渠道额度） */
+  budget?: { max_seconds?: number; max_attempts?: number; max_tokens?: number };
+  /** 只允许重试节奏（backoff_seconds）；max_attempts 归 budget，写了服务端会报错 */
+  retry_policy?: { backoff_seconds?: number };
+  on_fail?: string;
+  handoff_contract?: string;
+  delivery_adapter?: string;
+  human_intervention?: "none" | "before" | "after" | "approval_gate";
+};
+
+export type WorkflowDeliveryAdapterSpec = { id: string; kind: string; config: Record<string, unknown> };
+
+export type WorkflowDefinition = {
+  schema_version: number;
+  workflow: { key: string; name: string; description?: string; inputs?: WorkflowInputSpec[] };
+  stages: WorkflowStageSpec[];
+  role_bindings: WorkflowRoleBindingSpec[];
+  nodes: WorkflowNodeSpec[];
+  handoff_contracts?: WorkflowHandoffContractSpec[];
+  gate_policies?: WorkflowGatePolicySpec[];
+  delivery_adapters?: WorkflowDeliveryAdapterSpec[];
+};
+
+export type WorkflowPackage = {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  current_version_id: string | null;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  /** 仅单包详情/创建/加版本响应携带；列表不含 */
+  definition?: WorkflowDefinition;
+};
+
+export type WorkflowRunStatus = "RUNNING" | "COMPLETED" | "STALLED";
+
+export type WorkflowRunView = {
+  run_id: string;
+  project_id: string;
+  workflow_id: string;
+  workflow_version_id: string;
+  status: WorkflowRunStatus;
+  inputs: Record<string, unknown>;
+  node_tasks: Record<string, string>;
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+  /** 仅运行详情携带 */
+  deliveries?: Record<string, { kind: string; adapter: string; status: string; detail?: Record<string, unknown>; error?: string }>;
+  attempts?: Record<string, number>;
+  ledger?: { round: number; stall_count: number; needs_replan: boolean };
+  /** 冻结版本的定义（仅详情） */
+  definition?: WorkflowDefinition;
+};
+
+export type WorkflowStartResult = {
+  run_id: string;
+  workflow_id: string;
+  workflow_version_id: string;
+  workflow_key: string;
+  status: string;
+  tasks: { node_id: string; task_id: string; mode: string }[];
+  /** 服务端给的如实说明（"已生成任务骨架…应用模板不等于得到结果"），页面原文展示 */
+  note: string;
+};
+
+export type WorkflowGateEvaluation = {
+  node_id: string;
+  task_id: string;
+  gate_policy: string;
+  verdict: "HOLDS" | "NOT_HOLDS" | "UNVERIFIED";
+  all_hold: boolean;
+  leaves: { criterion: string; family: string; verdict: string; detail: string }[];
+  unchecked: string[];
+  on_block: string;
+};
+
+export type WorkflowAdvanceResult = {
+  run_id: string;
+  status: WorkflowRunStatus;
+  node_statuses: Record<string, string>;
+  gates: WorkflowGateEvaluation[];
+  retried: string[];
+  deliveries: { node_id: string; kind: string; adapter: string; status: string; detail?: Record<string, unknown>; error?: string }[];
+  round: number;
+  stall_count: number;
+  needs_replan: boolean;
+};
+
+export async function listWorkflows(): Promise<WorkflowPackage[]> {
+  const response = await apiFetch(`${API_URL}/api/workflows`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "工作流包列表读取失败");
+  return response.json();
+}
+
+export async function getWorkflow(workflowId: string): Promise<WorkflowPackage> {
+  const response = await apiFetch(`${API_URL}/api/workflows/${workflowId}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "工作流包详情读取失败");
+  return response.json();
+}
+
+/** 工作流定义校验失败（422 workflow_definition_invalid）：服务端已按 schema §4 八条校验，
+ * errors 逐条 "id: 原因"——编辑器只做展示，不重复实现规则。 */
+export class WorkflowValidationError extends Error {
+  code: string;
+  errors: string[];
+  constructor(code: string, errors: string[]) {
+    super(`工作流定义校验失败：${code}`);
+    this.code = code;
+    this.errors = errors;
+  }
+}
+
+/** 工作流 create/versions 的统一提交：错误形状 {"detail":{code,errors:[...]}}，
+ * 结构化错误抛 WorkflowValidationError，其余走 apiError。 */
+async function submitWorkflowDefinition(url: string, definition: WorkflowDefinition, failLabel: string): Promise<WorkflowPackage> {
+  const response = await apiFetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(definition),
+  });
+  if (!response.ok) {
+    try {
+      const body = (await response.json()) as { detail?: unknown };
+      if (body?.detail && typeof body.detail === "object" && Array.isArray((body.detail as { errors?: unknown }).errors)) {
+        const detail = body.detail as { code?: unknown; errors: unknown[] };
+        throw new WorkflowValidationError(
+          String(detail.code ?? "workflow_error"),
+          detail.errors.map((item) => String(item)),
+        );
+      }
+    } catch (error) {
+      if (error instanceof WorkflowValidationError) throw error;
+      // 响应体不是 JSON / 形状不符：落回扁平错误
+    }
+    throw await apiError(response, failLabel);
+  }
+  return response.json();
+}
+
+/** 创建工作流包（definition 全量校验）。422 时抛 WorkflowValidationError（编辑器渲染 errors 数组）。 */
+export function createWorkflow(definition: WorkflowDefinition): Promise<WorkflowPackage> {
+  return submitWorkflowDefinition(`${API_URL}/api/workflows`, definition, "工作流包创建失败");
+}
+
+/** 追加新版本（旧版本只读，运行绑定不迁移）。 */
+export function createWorkflowVersion(workflowId: string, definition: WorkflowDefinition): Promise<WorkflowPackage> {
+  return submitWorkflowDefinition(`${API_URL}/api/workflows/${workflowId}/versions`, definition, "新版本发布失败");
+}
+
+/** 安装内置包（CUMCM 七节点主线 + 长文四节点；幂等，重复安装返回 skipped）。 */
+export async function installBuiltinWorkflows(): Promise<{ created: string[]; skipped: string[] }> {
+  const response = await apiFetch(`${API_URL}/api/workflows/builtin`, { method: "POST" });
+  if (!response.ok) throw await apiError(response, "内置包安装失败");
+  return response.json();
+}
+
+/** 应用工作流：物化任务骨架。
+ * 【待 A 回签】形状文档未给 start 请求体，B 按 {workflow_id, workflow_version_id?, inputs} 实现：
+ * version 缺省 = 当前版本；inputs 是 definition.workflow.inputs 的 name→值。 */
+export async function startWorkflowRun(
+  projectId: string,
+  input: { workflow_id: string; workflow_version_id?: string; inputs?: Record<string, string> },
+): Promise<WorkflowStartResult> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/workflow-runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw await apiError(response, "应用工作流失败");
+  return response.json();
+}
+
+export async function listWorkflowRuns(projectId: string): Promise<WorkflowRunView[]> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/workflow-runs`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "工作流运行列表读取失败");
+  return response.json();
+}
+
+export async function getWorkflowRun(projectId: string, runId: string): Promise<WorkflowRunView> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/workflow-runs/${runId}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "工作流运行详情读取失败");
+  return response.json();
+}
+
+export async function advanceWorkflowRun(projectId: string, runId: string): Promise<WorkflowAdvanceResult> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/workflow-runs/${runId}/advance`, {
+    method: "POST",
+  });
+  if (!response.ok) throw await apiError(response, "工作流推进失败");
+  return response.json();
+}
+
 export type TaskBulkAssignResult = {
   updated: number;
   task_ids: string[];
