@@ -348,6 +348,7 @@ export default function WorkflowsPage() {
               {Object.entries(runDetail.node_tasks).map(([nodeId, taskId]) => {
                 const node = runDetail.definition?.nodes.find((item) => item.id === nodeId);
                 const delivery = runDetail.deliveries?.[nodeId];
+                const status = runDetail.node_statuses?.[nodeId] ?? "";
                 return (
                   <div className="list-item list-item-static" key={nodeId}>
                     <div className="item-copy" style={{ minWidth: 0 }}>
@@ -358,8 +359,8 @@ export default function WorkflowsPage() {
                         {delivery ? ` · 交付 ${delivery.status}` : ""}
                       </small>
                     </div>
-                    {/* 详情形状（§2）不含逐节点任务状态：如实只给任务映射与交付状态，
-                        状态桶在推进响应后展示；逐节点状态去任务板看 */}
+                    {/* node_statuses（8330f77）是真实任务表状态：有则如实进状态桶；未知原样显示 */}
+                    <StatusPill status={status || "PENDING"} label={bucketOf(status || "PENDING")} />
                     <Link className="text-button" href="/tasks">任务板 <ArrowUpRight size={12} /></Link>
                   </div>
                 );

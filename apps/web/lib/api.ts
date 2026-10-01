@@ -2639,6 +2639,8 @@ export type WorkflowRunView = {
   status: WorkflowRunStatus;
   inputs: Record<string, unknown>;
   node_tasks: Record<string, string>;
+  /** 逐节点任务状态（8330f77 补进详情；真实任务表状态，非引擎臆造）——详情页状态桶靠它 */
+  node_statuses?: Record<string, string>;
   created_by: string;
   created_at: string;
   updated_at: string;
