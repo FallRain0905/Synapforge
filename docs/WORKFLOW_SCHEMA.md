@@ -176,9 +176,9 @@
   硬校验、超限拒领并写一次性告警事件；用量来自 `runs.usage` 回报。
 - **不接 `llm_member_quotas`**：那是"渠道免费额度"线（按成员记账、代理对话
   扣减）；节点预算是任务治理语义。两套额度不许搅在一起。
-- `retry_policy` 只保留重试节奏与失败处置：`backoff_seconds`（≥0）、
-  节点级 `on_fail`（`retry` / `handoff:<role_binding_id>` / `escalate_human`）；
-  `max_attempts` 统一放 `budget`（避免两处表达同一约束）。
+- `retry_policy` 只允许 `backoff_seconds`（≥0 整数）；**`on_fail` 是节点级字段**
+  （见 §3.2 节点表），不在 retry_policy 里——`max_attempts` 统一放 `budget`
+  （避免三处表达同一约束）。校验器建议收紧为封闭键集（additive，A 定）。
 - 重试不清洗失败现场：`project.task.failed` 事件已记录 `stop_reason`，
   重试是**新尝试**（`project.task.retried` 带尝试序号），不覆盖历史。
 

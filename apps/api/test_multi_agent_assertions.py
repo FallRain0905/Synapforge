@@ -232,5 +232,85 @@ class EventStreamTests(unittest.TestCase):
         self.assertTrue(ok, detail)
 
 
+class GateEventTests(unittest.TestCase):
+    """形状取自 workflow_engine.py 的真实 wire 格式（2026-09-30 对齐）。"""
+
+    def _leaf(self, verdict="HOLDS", criterion="file:outputs/x.md non-empty"):
+        return {"criterion": criterion, "family": "file_non_empty", "verdict": verdict, "detail": "3 bytes"}
+
+    def test_evaluated_holds_consistent(self):
+        payload = {"task_id": "t1", "node_id": "n1", "verdict": "HOLDS", "leaves": [self._leaf()]}
+        ok, detail = maa.check_gate_evaluated_payload(payload)
+        self.assertTrue(ok, detail)
+
+    def test_evaluated_holds_with_unverified_leaf_contradiction(self):
+        payload = {"task_id": "t1", "node_id": "n1", "verdict": "HOLDS",
+                   "leaves": [self._leaf(), self._leaf("UNVERIFIED", "tests_passed:x")]}
+        ok, detail = maa.check_gate_evaluated_payload(payload)
+        self.assertFalse(ok)
+        self.assertIn("contradiction" if "contradiction" in detail else "HOLDS", detail)
+
+    def test_evaluated_unverified_needs_a_unverified_leaf(self):
+        payload = {"task_id": "t1", "node_id": "n1", "verdict": "UNVERIFIED", "leaves": [self._leaf()]}
+        self.assertFalse(maa.check_gate_evaluated_payload(payload)[0])
+        payload = {"task_id": "t1", "node_id": "n1", "verdict": "UNVERIFIED",
+                   "leaves": [self._leaf("UNVERIFIED", "tests_passed:x")]}
+        self.assertTrue(maa.check_gate_evaluated_payload(payload)[0])
+
+    def test_evaluated_not_holds_needs_a_false_leaf(self):
+        payload = {"task_id": "t1", "node_id": "n1", "verdict": "NOT_HOLDS",
+                   "leaves": [self._leaf("UNVERIFIED", "artifact:paper approved")]}
+        self.assertFalse(maa.check_gate_evaluated_payload(payload)[0])
+        payload = {"task_id": "t1", "node_id": "n1", "verdict": "NOT_HOLDS",
+                   "leaves": [self._leaf("NOT_HOLDS", "file:missing.md non-empty")]}
+        self.assertTrue(maa.check_gate_evaluated_payload(payload)[0])
+
+    def test_evaluated_structure_failures(self):
+        base = {"task_id": "t1", "node_id": "n1", "verdict": "HOLDS", "leaves": [self._leaf()]}
+        self.assertFalse(maa.check_gate_evaluated_payload({**base, "verdict": "MAYBE"})[0])
+        self.assertFalse(maa.check_gate_evaluated_payload({**base, "leaves": []})[0])
+        bad_leaf = {"family": "file_non_empty", "verdict": "HOLDS", "detail": "x"}
+        self.assertFalse(maa.check_gate_evaluated_payload({**base, "leaves": [bad_leaf]})[0])
+
+    def test_blocked_payload(self):
+        ok, detail = maa.check_gate_blocked_payload(
+            {"task_id": "t1", "node_id": "n1", "on_block": "escalate_human", "unchecked": ["tests_passed:x"]}
+        )
+        self.assertTrue(ok, detail)
+        # 硬失败阻塞允许 unchecked 为空
+        self.assertTrue(maa.check_gate_blocked_payload(
+            {"task_id": "t1", "node_id": "n1", "on_block": "blocked", "unchecked": []}
+        )[0])
+        self.assertFalse(maa.check_gate_blocked_payload({"on_block": "maybe", "unchecked": []})[0])
+        self.assertFalse(maa.check_gate_blocked_payload({"on_block": "blocked", "unchecked": [""]})[0])
+        self.assertFalse(maa.check_gate_blocked_payload({"on_block": "blocked"})[0])
+
+
+class LedgerSeriesTests(unittest.TestCase):
+    def test_stall_series_legal(self):
+        ok, detail = maa.check_stall_series([0, 1, 2, 1, 0, 0, 1])
+        self.assertTrue(ok, detail)
+
+    def test_stall_series_illegal_jumps(self):
+        for bad in ([0, 2], [1, 3], [2, 0], [0, -1]):
+            ok, detail = maa.check_stall_series(bad)
+            self.assertFalse(ok, bad)
+            self.assertIn("illegal stall transition", detail)
+
+    def test_ledger_snapshot_roundtrip(self):
+        ledger = {
+            "task": "t", "facts": [], "plan": [], "round": 3, "stall_count": 1,
+            "done": False, "needs_replan": False, "last_next_speaker": "engine", "last_instruction": "go",
+        }
+        ok, detail = maa.check_ledger_snapshot(ledger)
+        self.assertTrue(ok, detail)
+        self.assertIn("round=3", detail)
+
+    def test_ledger_snapshot_invalid(self):
+        ok, detail = maa.check_ledger_snapshot({"round": "not-an-int"})
+        self.assertFalse(ok)
+        self.assertIn("invalid ledger snapshot", detail)
+
+
 if __name__ == "__main__":
     unittest.main()

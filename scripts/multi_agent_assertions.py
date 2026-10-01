@@ -27,6 +27,7 @@ from typing import Iterable, Mapping, Sequence
 __all__ = [
     "KNOWN_TASK_STATUSES",
     "TASK_TRANSITIONS",
+    "GATE_VERDICTS",
     "check_task_transition",
     "check_task_lifecycle",
     "check_receipt_shape",
@@ -35,6 +36,10 @@ __all__ = [
     "check_artifact_version_bump",
     "check_artifact_feeds_task",
     "check_event_stream",
+    "check_gate_evaluated_payload",
+    "check_gate_blocked_payload",
+    "check_stall_series",
+    "check_ledger_snapshot",
 ]
 
 
@@ -278,3 +283,92 @@ def check_event_stream(events: Sequence[Mapping], *, catalog: Mapping | None = N
         detail += f" ({sorted(set(legacy))})"
     detail += f", seq {events[0].get('seq')}..{last_seq}" if events and last_seq is not None else ", empty"
     return True, detail
+
+
+# ==========================================================================
+# 5. 工作流引擎事件与账本（W3.2/W3.3 接线后的 e2e 断言；形状对齐
+#    workflow_engine.py 的真实 wire 格式，2026-09-30）
+# ==========================================================================
+
+GATE_VERDICTS = frozenset({"HOLDS", "NOT_HOLDS", "UNVERIFIED"})
+
+
+def check_gate_evaluated_payload(payload: Mapping) -> tuple[bool, str]:
+    """``project.gate.evaluated`` payload 的一致性断言。
+
+    wire 形状：``{task_id, node_id, verdict, leaves:[{criterion, family, verdict, detail}]}``
+    （leaf 的 checked/holds 折叠进 verdict——acceptance.py 的 Kleene 三值）。
+    一致性规则：verdict=HOLDS ⇔ 没有任何叶子 NOT_HOLDS/UNVERIFIED；
+    verdict=NOT_HOLDS ⇔ 至少一个叶子 NOT_HOLDS；verdict=UNVERIFIED ⇔
+    无 NOT_HOLDS 且至少一个 UNVERIFIED。
+    """
+    verdict = payload.get("verdict")
+    if verdict not in GATE_VERDICTS:
+        return False, f"gate verdict must be one of {sorted(GATE_VERDICTS)}, got {verdict!r}"
+    for key in ("task_id", "node_id"):
+        if not isinstance(payload.get(key), str) or not payload[key]:
+            return False, f"gate payload missing {key}"
+    leaves = payload.get("leaves")
+    if not isinstance(leaves, list) or not leaves:
+        return False, "gate.evaluated must carry a non-empty leaves list"
+    counts = {"HOLDS": 0, "NOT_HOLDS": 0, "UNVERIFIED": 0}
+    for index, leaf in enumerate(leaves):
+        if not isinstance(leaf, Mapping):
+            return False, f"leaf #{index} is not an object"
+        leaf_verdict = leaf.get("verdict")
+        if leaf_verdict not in GATE_VERDICTS:
+            return False, f"leaf #{index} verdict invalid: {leaf_verdict!r}"
+        counts[leaf_verdict] += 1
+        for key in ("criterion", "family"):
+            if not isinstance(leaf.get(key), str) or not leaf[key]:
+                return False, f"leaf #{index} missing {key}"
+    if verdict == "HOLDS" and (counts["NOT_HOLDS"] or counts["UNVERIFIED"]):
+        return False, f"HOLDS gate has failing leaves: {counts}"
+    if verdict == "NOT_HOLDS" and counts["NOT_HOLDS"] == 0:
+        return False, "NOT_HOLDS gate has no NOT_HOLDS leaf"
+    if verdict == "UNVERIFIED" and (counts["NOT_HOLDS"] or counts["UNVERIFIED"] == 0):
+        return False, f"UNVERIFIED gate inconsistent with leaves: {counts}"
+    return True, f"{verdict}: {counts['HOLDS']}H/{counts['NOT_HOLDS']}F/{counts['UNVERIFIED']}U"
+
+
+def check_gate_blocked_payload(payload: Mapping) -> tuple[bool, str]:
+    """``project.gate.blocked`` payload：``unchecked[]`` 必须是字符串列表
+    （硬失败触发的阻塞允许为空——NOT_HOLDS 而非 UNVERIFIED 也算 blocked），
+    ``on_block`` ∈ {blocked, escalate_human}。"""
+    on_block = payload.get("on_block")
+    if on_block not in {"blocked", "escalate_human"}:
+        return False, f"on_block must be blocked|escalate_human, got {on_block!r}"
+    unchecked = payload.get("unchecked")
+    if not isinstance(unchecked, list):
+        return False, "unchecked must be a list (possibly empty for hard-fail blocks)"
+    if not all(isinstance(item, str) and item for item in unchecked):
+        return False, "unchecked entries must be non-empty strings"
+    return True, f"blocked ({on_block}), {len(unchecked)} unchecked"
+
+
+def check_stall_series(series: Sequence[int]) -> tuple[bool, str]:
+    """账本 stall_count 序列合法性（progress_ledger 的记账规则的可观测投影）：
+    每步只能 +1（不进步/在循环）或 -1（进步，地板 0）。"""
+    if not series:
+        return True, "empty series"
+    for prev, nxt in zip(series, series[1:]):
+        if nxt == prev + 1:
+            continue
+        if prev > 0 and nxt == prev - 1:
+            continue
+        if prev == 0 and nxt == 0:
+            continue
+        return False, f"illegal stall transition {prev}→{nxt} (only +1 or -1 with floor 0)"
+    return True, f"stall {series[0]}..{series[-1]} over {len(series)} rounds"
+
+
+def check_ledger_snapshot(data: Mapping) -> tuple[bool, str]:
+    """账本 JSON 快照结构断言——直接复用 progress_ledger.ProgressLedger 的
+    加载规则（单一权威，不在这里重写一遍结构清单）。"""
+    try:
+        from app.progress_ledger import ProgressLedger, LedgerUpdateError  # noqa: PLC0415
+
+        ledger = ProgressLedger.from_json(data)
+    except Exception as exc:  # LedgerUpdateError 或字段类型错——断言失败即结构非法
+        return False, f"invalid ledger snapshot: {exc}"
+    return True, f"round={ledger.round} stall={ledger.stall_count} done={ledger.done}"

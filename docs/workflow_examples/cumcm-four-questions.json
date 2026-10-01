@@ -5,55 +5,121 @@
     "name": "CUMCM 四问全流程（参考预案）",
     "description": "审题 → 四问并行建模 → 求解实现 → 独立复核 → 论文 → 人工收口 → 编译交付。非规范参考：权威版本由 cumcm_importer（W3.4）生成。",
     "inputs": [
-      {"name": "problem_statement", "required": true, "hint": "赛题原文"},
-      {"name": "data_files", "required": false, "artifact_type": "data", "hint": "附件数据"}
+      {
+        "name": "problem_statement",
+        "required": true,
+        "hint": "赛题原文"
+      },
+      {
+        "name": "data_files",
+        "required": false,
+        "artifact_type": "data",
+        "hint": "附件数据"
+      }
     ]
   },
   "stages": [
-    {"id": "problem_analysis", "title": "审题", "goal": "题面事实与问题拆解"},
-    {"id": "modeling", "title": "建模", "goal": "四问各自的模型与求解方案"},
-    {"id": "coding", "title": "编程", "goal": "统一实现与求解"},
-    {"id": "review", "title": "复核", "goal": "假设、代码与结果的独立复核"},
-    {"id": "paper", "title": "论文", "goal": "中文论文成稿"},
-    {"id": "delivery", "title": "交付", "goal": "人工收口与编译提交包"}
+    {
+      "id": "problem_analysis",
+      "title": "审题",
+      "goal": "题面事实与问题拆解"
+    },
+    {
+      "id": "modeling",
+      "title": "建模",
+      "goal": "四问各自的模型与求解方案"
+    },
+    {
+      "id": "coding",
+      "title": "编程",
+      "goal": "统一实现与求解"
+    },
+    {
+      "id": "review",
+      "title": "复核",
+      "goal": "假设、代码与结果的独立复核"
+    },
+    {
+      "id": "paper",
+      "title": "论文",
+      "goal": "中文论文成稿"
+    },
+    {
+      "id": "delivery",
+      "title": "交付",
+      "goal": "人工收口与编译提交包"
+    }
   ],
   "role_bindings": [
     {
       "id": "mm-analysis",
       "role_name": "审题",
       "description": "题面事实提取、问题拆解、数据画像",
-      "capability_requirements": ["files.read"],
-      "prompt_overrides": {"system": "roles/mm-analysis.md 的职责与纪律（权威文本见 deploy/cloud-agent/roles/）"}
+      "capability_requirements": [
+        "files.read"
+      ],
+      "prompt_overrides": {
+        "system": "roles/mm-analysis.md 的职责与纪律（权威文本见 deploy/cloud-agent/roles/）"
+      }
     },
     {
       "id": "mm-modeling",
       "role_name": "建模",
       "description": "单问的模型假设、建立与求解方案",
-      "capability_requirements": ["files.read", "files.write"]
+      "capability_requirements": [
+        "files.read",
+        "files.write"
+      ],
+      "prompt_overrides": {
+        "system": "roles/mm-modeling.md 的职责与纪律（权威文本见 deploy/cloud-agent/roles/）"
+      }
     },
     {
       "id": "mm-coding",
       "role_name": "编程",
       "description": "统一代码实现、运行求解、结果表",
-      "capability_requirements": ["files.read", "files.write", "shell.run"]
+      "capability_requirements": [
+        "files.read",
+        "files.write",
+        "shell.run"
+      ],
+      "prompt_overrides": {
+        "system": "roles/mm-coding.md 的职责与纪律（权威文本见 deploy/cloud-agent/roles/）"
+      }
     },
     {
       "id": "mm-critique",
       "role_name": "复核",
       "description": "独立复核假设、代码与结果，只提问题不改动",
-      "capability_requirements": ["files.read"]
+      "capability_requirements": [
+        "files.read"
+      ],
+      "prompt_overrides": {
+        "system": "roles/mm-critique.md 的职责与纪律（权威文本见 deploy/cloud-agent/roles/）"
+      }
     },
     {
       "id": "mm-paper-zh",
       "role_name": "论文",
       "description": "中文论文撰写与图表编排",
-      "capability_requirements": ["files.read", "files.write"]
+      "capability_requirements": [
+        "files.read",
+        "files.write"
+      ],
+      "prompt_overrides": {
+        "system": "roles/mm-paper-zh.md 的职责与纪律（权威文本见 deploy/cloud-agent/roles/）"
+      }
     },
     {
       "id": "mm-compile",
       "role_name": "编译",
       "description": "LaTeX 编译与提交包装配",
-      "capability_requirements": ["shell.run"]
+      "capability_requirements": [
+        "shell.run"
+      ],
+      "prompt_overrides": {
+        "system": "roles/mm-compile.md 的职责与纪律（权威文本见 deploy/cloud-agent/roles/）"
+      }
     }
   ],
   "handoff_contracts": [
@@ -61,15 +127,29 @@
       "id": "hc-analysis-to-modeling",
       "from_role": "mm-analysis",
       "to_role": "mm-modeling",
-      "required_fields": ["problem_facts_ready", "assumptions", "open_questions"],
-      "artifact_refs": ["problem_facts"]
+      "required_fields": [
+        "problem_facts_ready",
+        "assumptions",
+        "open_questions"
+      ],
+      "artifact_refs": [
+        "problem_facts"
+      ]
     },
     {
       "id": "hc-modeling-to-coding",
       "from_role": "mm-modeling",
       "to_role": "mm-coding",
-      "required_fields": ["model_specs_complete", "solver_choice"],
-      "artifact_refs": ["model_spec_q1", "model_spec_q2", "model_spec_q3", "model_spec_q4"]
+      "required_fields": [
+        "model_specs_complete",
+        "solver_choice"
+      ],
+      "artifact_refs": [
+        "model_spec_q1",
+        "model_spec_q2",
+        "model_spec_q3",
+        "model_spec_q4"
+      ]
     }
   ],
   "gate_policies": [
@@ -103,12 +183,28 @@
       "depends_on": [],
       "mode": "auto",
       "role_binding": "mm-analysis",
-      "prompt": {"task_template": "围绕 {{input.problem_statement}} 完成审题：事实清单、假设、四问拆解。"},
-      "inputs": [{"input": "problem_statement"}],
-      "outputs": [{"name": "problem_facts", "artifact_type": "problem_facts", "path": "outputs/problem_facts.md"}],
+      "prompt": {
+        "task_template": "围绕 {{input.problem_statement}} 完成审题：事实清单、假设、四问拆解。"
+      },
+      "inputs": [
+        {
+          "input": "problem_statement"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "problem_facts",
+          "artifact_type": "problem_facts",
+          "path": "outputs/problem_facts.md"
+        }
+      ],
       "handoff_contract": "hc-analysis-to-modeling",
       "gate_policy": "gate-analysis",
-      "budget": {"max_seconds": 1800, "max_attempts": 2, "max_tokens": 100000},
+      "budget": {
+        "max_seconds": 1800,
+        "max_attempts": 2,
+        "max_tokens": 100000
+      },
       "on_fail": "escalate_human",
       "human_intervention": "none"
     },
@@ -117,14 +213,32 @@
       "stage_id": "modeling",
       "title": "问题一建模",
       "goal": "问题一的模型假设与求解方案",
-      "depends_on": ["analyze"],
+      "depends_on": [
+        "analyze"
+      ],
       "mode": "auto",
       "role_binding": "mm-modeling",
-      "inputs": [{"from_output": "problem_facts"}],
-      "outputs": [{"name": "model_spec_q1", "artifact_type": "model_spec", "path": "outputs/model_spec_q1.md"}],
-      "budget": {"max_seconds": 1800, "max_attempts": 2, "max_tokens": 100000},
+      "inputs": [
+        {
+          "from_output": "problem_facts"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model_spec_q1",
+          "artifact_type": "model_spec",
+          "path": "outputs/model_spec_q1.md"
+        }
+      ],
+      "budget": {
+        "max_seconds": 1800,
+        "max_attempts": 2,
+        "max_tokens": 100000
+      },
       "on_fail": "retry",
-      "retry_policy": {"backoff_seconds": 60},
+      "retry_policy": {
+        "backoff_seconds": 60
+      },
       "human_intervention": "none"
     },
     {
@@ -132,14 +246,32 @@
       "stage_id": "modeling",
       "title": "问题二建模",
       "goal": "问题二的模型假设与求解方案",
-      "depends_on": ["analyze"],
+      "depends_on": [
+        "analyze"
+      ],
       "mode": "auto",
       "role_binding": "mm-modeling",
-      "inputs": [{"from_output": "problem_facts"}],
-      "outputs": [{"name": "model_spec_q2", "artifact_type": "model_spec", "path": "outputs/model_spec_q2.md"}],
-      "budget": {"max_seconds": 1800, "max_attempts": 2, "max_tokens": 100000},
+      "inputs": [
+        {
+          "from_output": "problem_facts"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model_spec_q2",
+          "artifact_type": "model_spec",
+          "path": "outputs/model_spec_q2.md"
+        }
+      ],
+      "budget": {
+        "max_seconds": 1800,
+        "max_attempts": 2,
+        "max_tokens": 100000
+      },
       "on_fail": "retry",
-      "retry_policy": {"backoff_seconds": 60},
+      "retry_policy": {
+        "backoff_seconds": 60
+      },
       "human_intervention": "none"
     },
     {
@@ -147,14 +279,32 @@
       "stage_id": "modeling",
       "title": "问题三建模",
       "goal": "问题三的模型假设与求解方案",
-      "depends_on": ["analyze"],
+      "depends_on": [
+        "analyze"
+      ],
       "mode": "auto",
       "role_binding": "mm-modeling",
-      "inputs": [{"from_output": "problem_facts"}],
-      "outputs": [{"name": "model_spec_q3", "artifact_type": "model_spec", "path": "outputs/model_spec_q3.md"}],
-      "budget": {"max_seconds": 1800, "max_attempts": 2, "max_tokens": 100000},
+      "inputs": [
+        {
+          "from_output": "problem_facts"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model_spec_q3",
+          "artifact_type": "model_spec",
+          "path": "outputs/model_spec_q3.md"
+        }
+      ],
+      "budget": {
+        "max_seconds": 1800,
+        "max_attempts": 2,
+        "max_tokens": 100000
+      },
       "on_fail": "retry",
-      "retry_policy": {"backoff_seconds": 60},
+      "retry_policy": {
+        "backoff_seconds": 60
+      },
       "human_intervention": "none"
     },
     {
@@ -162,14 +312,32 @@
       "stage_id": "modeling",
       "title": "问题四建模",
       "goal": "问题四的模型假设与求解方案",
-      "depends_on": ["analyze"],
+      "depends_on": [
+        "analyze"
+      ],
       "mode": "auto",
       "role_binding": "mm-modeling",
-      "inputs": [{"from_output": "problem_facts"}],
-      "outputs": [{"name": "model_spec_q4", "artifact_type": "model_spec", "path": "outputs/model_spec_q4.md"}],
-      "budget": {"max_seconds": 1800, "max_attempts": 2, "max_tokens": 100000},
+      "inputs": [
+        {
+          "from_output": "problem_facts"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model_spec_q4",
+          "artifact_type": "model_spec",
+          "path": "outputs/model_spec_q4.md"
+        }
+      ],
+      "budget": {
+        "max_seconds": 1800,
+        "max_attempts": 2,
+        "max_tokens": 100000
+      },
       "on_fail": "retry",
-      "retry_policy": {"backoff_seconds": 60},
+      "retry_policy": {
+        "backoff_seconds": 60
+      },
       "human_intervention": "none"
     },
     {
@@ -177,25 +345,54 @@
       "stage_id": "coding",
       "title": "统一求解实现",
       "goal": "按四问模型实现代码并产出结果表",
-      "depends_on": ["model_q1", "model_q2", "model_q3", "model_q4"],
+      "depends_on": [
+        "model_q1",
+        "model_q2",
+        "model_q3",
+        "model_q4"
+      ],
       "mode": "auto",
       "role_binding": "mm-coding",
-      "prompt": {"task_template": "按 {{input.model_spec_q1}}～{{input.model_spec_q4}} 实现统一求解，结果写入结果表。"},
+      "prompt": {
+        "task_template": "按 {{input.model_spec_q1}}～{{input.model_spec_q4}} 实现统一求解，结果写入结果表。"
+      },
       "inputs": [
-        {"from_output": "model_spec_q1"},
-        {"from_output": "model_spec_q2"},
-        {"from_output": "model_spec_q3"},
-        {"from_output": "model_spec_q4"}
+        {
+          "from_output": "model_spec_q1"
+        },
+        {
+          "from_output": "model_spec_q2"
+        },
+        {
+          "from_output": "model_spec_q3"
+        },
+        {
+          "from_output": "model_spec_q4"
+        }
       ],
       "handoff_contract": "hc-modeling-to-coding",
       "outputs": [
-        {"name": "code", "artifact_type": "code", "path": "outputs/model_solution.py"},
-        {"name": "result_table", "artifact_type": "result_table", "path": "outputs/result_table.csv"}
+        {
+          "name": "code",
+          "artifact_type": "code",
+          "path": "outputs/model_solution.py"
+        },
+        {
+          "name": "result_table",
+          "artifact_type": "result_table",
+          "path": "outputs/result_table.csv"
+        }
       ],
       "gate_policy": "gate-code",
-      "budget": {"max_seconds": 7200, "max_attempts": 3, "max_tokens": 300000},
+      "budget": {
+        "max_seconds": 7200,
+        "max_attempts": 3,
+        "max_tokens": 300000
+      },
       "on_fail": "retry",
-      "retry_policy": {"backoff_seconds": 60},
+      "retry_policy": {
+        "backoff_seconds": 60
+      },
       "human_intervention": "none"
     },
     {
@@ -203,12 +400,31 @@
       "stage_id": "review",
       "title": "独立复核",
       "goal": "复核假设、代码与结果，只提问题不改动",
-      "depends_on": ["implement"],
+      "depends_on": [
+        "implement"
+      ],
       "mode": "auto",
       "role_binding": "mm-critique",
-      "inputs": [{"from_output": "code"}, {"from_output": "result_table"}],
-      "outputs": [{"name": "review_report", "artifact_type": "review_report", "path": "outputs/review_report.md"}],
-      "budget": {"max_seconds": 1800, "max_attempts": 2, "max_tokens": 100000},
+      "inputs": [
+        {
+          "from_output": "code"
+        },
+        {
+          "from_output": "result_table"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "review_report",
+          "artifact_type": "review_report",
+          "path": "outputs/review_report.md"
+        }
+      ],
+      "budget": {
+        "max_seconds": 1800,
+        "max_attempts": 2,
+        "max_tokens": 100000
+      },
       "on_fail": "escalate_human",
       "human_intervention": "none"
     },
@@ -217,13 +433,32 @@
       "stage_id": "paper",
       "title": "中文论文成稿",
       "goal": "按复核意见完成论文",
-      "depends_on": ["review"],
+      "depends_on": [
+        "review"
+      ],
       "mode": "auto",
       "role_binding": "mm-paper-zh",
-      "inputs": [{"from_output": "problem_facts"}, {"from_output": "review_report"}],
-      "outputs": [{"name": "paper_source", "artifact_type": "paper_source", "path": "outputs/paper.tex"}],
+      "inputs": [
+        {
+          "from_output": "problem_facts"
+        },
+        {
+          "from_output": "review_report"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "paper_source",
+          "artifact_type": "paper_source",
+          "path": "outputs/paper.tex"
+        }
+      ],
       "gate_policy": "gate-paper",
-      "budget": {"max_seconds": 7200, "max_attempts": 2, "max_tokens": 400000},
+      "budget": {
+        "max_seconds": 7200,
+        "max_attempts": 2,
+        "max_tokens": 400000
+      },
       "on_fail": "escalate_human",
       "human_intervention": "none"
     },
@@ -232,7 +467,9 @@
       "stage_id": "delivery",
       "title": "人工收口",
       "goal": "负责人确认论文与结果后方可编译提交",
-      "depends_on": ["paper"],
+      "depends_on": [
+        "paper"
+      ],
       "mode": "manual",
       "human_intervention": "approval_gate"
     },
@@ -241,21 +478,45 @@
       "stage_id": "delivery",
       "title": "编译与提交包",
       "goal": "产出可提交的 PDF 与提交包",
-      "depends_on": ["final_confirm"],
+      "depends_on": [
+        "final_confirm"
+      ],
       "mode": "auto",
       "role_binding": "mm-compile",
-      "inputs": [{"from_output": "paper_source"}],
+      "inputs": [
+        {
+          "from_output": "paper_source"
+        }
+      ],
       "outputs": [
-        {"name": "compiled_pdf", "artifact_type": "compiled_pdf", "path": "outputs/paper.pdf"},
-        {"name": "submission_bundle", "artifact_type": "submission_bundle", "path": "outputs/submission_bundle.zip"}
+        {
+          "name": "compiled_pdf",
+          "artifact_type": "compiled_pdf",
+          "path": "outputs/paper.pdf"
+        },
+        {
+          "name": "submission_bundle",
+          "artifact_type": "submission_bundle",
+          "path": "outputs/submission_bundle.zip"
+        }
       ],
       "delivery_adapter": "paper_compile",
-      "budget": {"max_seconds": 1800, "max_attempts": 3, "max_tokens": 50000},
+      "budget": {
+        "max_seconds": 1800,
+        "max_attempts": 3,
+        "max_tokens": 50000
+      },
       "on_fail": "escalate_human",
       "human_intervention": "none"
     }
   ],
   "delivery_adapters": [
-    {"id": "paper_compile", "kind": "paper_compile", "config": {"engine": "xelatex"}}
+    {
+      "id": "paper_compile",
+      "kind": "paper_compile",
+      "config": {
+        "engine": "xelatex"
+      }
+    }
   ]
 }
