@@ -88,14 +88,14 @@
       }
     },
     {
-      "id": "mm-critique",
-      "role_name": "复核",
-      "description": "独立复核假设、代码与结果，只提问题不改动",
+      "id": "mm-review",
+      "role_name": "逻辑对抗复核",
+      "description": "独立视角挑方向反、重复计量、外推过硬、漏变量、跨问矛盾等逻辑硬伤，裁定 fatal/major/minor",
       "capability_requirements": [
         "files.read"
       ],
       "prompt_overrides": {
-        "system": "roles/mm-critique.md 的职责与纪律（权威文本见 deploy/cloud-agent/roles/）"
+        "system": "roles/mm-review.md 的职责与纪律（权威文本见 deploy/cloud-agent/roles/）"
       }
     },
     {
@@ -404,7 +404,7 @@
         "implement"
       ],
       "mode": "auto",
-      "role_binding": "mm-critique",
+      "role_binding": "mm-review",
       "inputs": [
         {
           "from_output": "code"
