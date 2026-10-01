@@ -14,6 +14,8 @@
 | GET | `/api/workflows` | 本组织的包列表（不含 definition） | 200 |
 | GET | `/api/workflows/{workflow_id}` | 单包详情（含当前 definition） | 200 |
 | POST | `/api/workflows/{workflow_id}/versions` | 追加新版本（旧版本只读） | 201 |
+| POST | `/api/workflows/preview` | 试运行（W4.3）：展开任务图，不创建任何对象 | 200 |
+| GET | `/api/projects/{project_id}/workflow-draft` | 反向草稿（W4.4）：从项目任务图抽定义 | 200 |
 | POST | `/api/projects/{project_id}/workflow-runs` | 应用工作流（物化任务骨架） | 201 |
 | GET | `/api/projects/{project_id}/workflow-runs` | 运行列表（最近 50） | 200 |
 | GET | `/api/projects/{project_id}/workflow-runs/{run_id}` | 运行详情 | 200 |
@@ -132,6 +134,8 @@ gate_policies/handoff_contracts/delivery_adapters）。**前端不要从响应�
   - 422 `workflow_nodes_unresolvable`
 - 推进错误：`{"detail": "<code>"}`，404 `workflow_run_not_found` / `workflow_version_not_found`，
   409 `workflow_run_not_running`。
+- 试运行（preview）：`{"valid": bool, "errors": [...], "warnings": [...], "plan": {workflow, inputs_provided, nodes[{node_id,title,stage_id,mode,role_binding,resolved_prompt,depends_on,outputs,gate_policy,budget,on_fail,human_intervention,delivery_adapter,requires_human}], edges}}`；定义非法时 valid=false + plan=null（**HTTP 200**，错误在结果体里）。
+- 反向草稿：`{"definition", "validation_errors": [], "task_count", "note"}`（草稿过 schema §4 校验，发布走 `POST /api/workflows`）；空项目 422 `workflow_draft_empty`。
 
 ## 6. 页面状态映射建议（W3.7）
 

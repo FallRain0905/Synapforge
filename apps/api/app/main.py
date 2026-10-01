@@ -25,6 +25,7 @@ from .contracts import (
     AgentChatMessageCreate,
     AgentConversationPromote,
     AgentConversationPromoteResult,
+    WorkflowPreviewRequest,
     WorkflowRunStart,
     WorkflowUpsert,
     AgentChatTurn,
@@ -1316,6 +1317,7 @@ def _workflow_http_error(error: workflow_service.WorkflowError) -> HTTPException
         "workflow_not_found": 404,
         "workflow_version_not_found": 404,
         "workflow_nodes_unresolvable": 422,
+        "workflow_draft_empty": 422,
     }.get(error.code, 400)
     return HTTPException(status_code=status, detail={"code": error.code, "errors": error.errors})
 
@@ -1337,6 +1339,21 @@ def seed_builtin_workflows(request: Request) -> dict[str, Any]:
 
     member = _request_member(request)
     return builtin_workflows.ensure_builtin_workflows(store, member.organization_id, member.id)
+
+
+@app.post("/api/workflows/preview", response_model=dict[str, Any])
+def preview_workflow(data: WorkflowPreviewRequest, request: Request) -> dict[str, Any]:
+    """试运行（W4.3）：展开任务图、列出校验与运行期警告，**不创建任何对象**。"""
+
+    member = _request_member(request)
+    try:
+        if data.definition is not None:
+            return workflow_service.preview_definition(data.definition, data.inputs)
+        if data.workflow_id is None:
+            raise HTTPException(status_code=422, detail={"code": "workflow_preview_target_missing", "errors": ["definition 与 workflow_id 至少给一个"]})
+        return workflow_service.preview_workflow_version(store, member.organization_id, data.workflow_id, data.inputs, data.version_id)
+    except workflow_service.WorkflowError as error:
+        raise _workflow_http_error(error) from error
 
 
 @app.get("/api/workflows", response_model=list[dict[str, Any]])
@@ -1390,6 +1407,17 @@ def get_workflow_run(project_id: UUID, run_id: UUID) -> dict[str, Any]:
 def list_workflow_runs(project_id: UUID) -> list[dict[str, Any]]:
     project_or_404(project_id)
     return workflow_service.list_project_workflow_runs(store, project_id)
+
+
+@app.get("/api/projects/{project_id}/workflow-draft", response_model=dict[str, Any])
+def workflow_draft_from_project(project_id: UUID) -> dict[str, Any]:
+    """反向保存（W4.4）：从项目真实任务图抽 workflow 定义草稿（待编辑器补全后发布）。"""
+
+    project_or_404(project_id)
+    try:
+        return workflow_service.draft_from_project(store, project_id)
+    except workflow_service.WorkflowError as error:
+        raise _workflow_http_error(error) from error
 
 
 @app.post("/api/projects/{project_id}/workflow-runs/{run_id}/advance", response_model=dict[str, Any])

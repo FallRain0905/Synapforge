@@ -1452,6 +1452,15 @@ class WorkflowUpsert(APIModel):
     definition: dict[str, Any]
 
 
+class WorkflowPreviewRequest(APIModel):
+    """试运行（W4.3）：给 definition 直接预览，或给 workflow_id(+version_id) 预览已发布版本。"""
+
+    definition: dict[str, Any] | None = None
+    workflow_id: UUID | None = None
+    version_id: UUID | None = None
+    inputs: dict[str, Any] = Field(default_factory=dict)
+
+
 class WorkflowRunStart(APIModel):
     """应用工作流：绑定冻结版本（缺省 = 当前已发布版本）并物化节点为任务骨架。"""
 

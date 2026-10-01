@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -30,12 +31,16 @@ __all__ = [
     "start_workflow_run",
     "get_workflow_run",
     "list_project_workflow_runs",
+    "preview_definition",
+    "preview_workflow_version",
+    "draft_from_project",
 ]
 
 KNOWN_SCHEMA_VERSION = 1
 NODE_MODES = {"manual", "hybrid", "auto"}
 BUDGET_KEYS = {"max_seconds", "max_attempts", "max_tokens"}
 _KEY_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789-"
+_TEMPLATE_VAR_RE = re.compile(r"\{\{input\.([A-Za-z0-9_-]+)\}\}")
 
 
 class WorkflowError(RuntimeError):
@@ -45,6 +50,10 @@ class WorkflowError(RuntimeError):
         super().__init__(code if not errors else f"{code}:{' | '.join(errors[:3])}")
         self.code = code
         self.errors = errors or []
+
+
+def _enum(value: Any) -> str:
+    return str(value.value if hasattr(value, "value") else value)
 
 
 def _now() -> str:
@@ -571,3 +580,234 @@ def list_project_workflow_runs(store: Any, project_id: UUID) -> list[dict[str, A
         "SELECT * FROM project_workflow_runs WHERE project_id = ? ORDER BY created_at DESC LIMIT 50", (str(project_id),)
     ).fetchall()
     return [_run_view(row) for row in rows]
+
+
+# ---- W4.3 试运行（dry-run 预览：只展开任务图，不创建对象、不派发）-------------
+
+
+def _interpolate(template: str, inputs: dict[str, Any]) -> str:
+    result = str(template or "")
+    for name, value in (inputs or {}).items():
+        result = result.replace("{{input." + str(name) + "}}", str(value))
+    return result
+
+
+def preview_definition(definition: Any, inputs: dict[str, Any] | None = None) -> dict[str, Any]:
+    """试运行（W4.3）：展开任务图给用户看"应用之后会有什么"，**不创建任何对象**。
+
+    与 start_workflow_run 的区别只有一个：不写库、不建任务、不进运行列表。
+    warnings 收集"运行期才会变成问题"的事（输入缺失、人工节点、v1 判定边界），
+    防"误以为已得到结果"（规划 §7：应用模板 ≠ 得到结果）。
+    """
+
+    inputs = inputs or {}
+    errors = validate_definition(definition)
+    warnings: list[str] = []
+    if errors:
+        return {"valid": False, "errors": errors, "warnings": warnings, "plan": None}
+
+    nodes = definition.get("nodes", [])
+    provided = set(str(k) for k in inputs.keys())
+    plan_nodes: list[dict[str, Any]] = []
+    edges: list[list[str]] = []
+    manual_count = 0
+    tests_gates = 0
+    for node in nodes:
+        node_id = str(node.get("id"))
+        template = str((node.get("prompt") or {}).get("task_template") or node.get("goal") or "")
+        resolved = _interpolate(template, inputs)
+        leftover = sorted({match for match in _TEMPLATE_VAR_RE.findall(resolved)})
+        if leftover:
+            warnings.append(f"node:{node_id}: 模板引用了未提供的输入 {leftover}（运行时将保留占位符原样）")
+        mode = str(node.get("mode") or "")
+        if mode == "manual":
+            manual_count += 1
+        for dep in node.get("depends_on") or []:
+            edges.append([str(dep), node_id])
+        budget = node.get("budget") or {}
+        policy_id = node.get("gate_policy")
+        policy = next((p for p in definition.get("gate_policies", []) if isinstance(p, dict) and str(p.get("id")) == str(policy_id)), None)
+        gate_spec = (policy or {}).get("spec")
+        for leaf in _flat_leaves(gate_spec):
+            if str(leaf).lower().startswith("tests_passed:"):
+                tests_gates += 1
+        plan_nodes.append(
+            {
+                "node_id": node_id,
+                "title": str(node.get("title") or node_id),
+                "stage_id": str(node.get("stage_id") or ""),
+                "mode": mode,
+                "role_binding": node.get("role_binding"),
+                "resolved_prompt": resolved,
+                "depends_on": [str(dep) for dep in (node.get("depends_on") or [])],
+                "outputs": [
+                    {"name": out.get("name"), "artifact_type": out.get("artifact_type"), "path": out.get("path")}
+                    for out in (node.get("outputs") or [])
+                    if isinstance(out, dict)
+                ],
+                "gate_policy": policy_id,
+                "budget": budget,
+                "on_fail": str(node.get("on_fail") or "escalate_human"),
+                "human_intervention": str(node.get("human_intervention") or "none"),
+                "delivery_adapter": node.get("delivery_adapter"),
+                "requires_human": mode == "manual" or str(node.get("human_intervention") or "none") != "none",
+            }
+        )
+    if manual_count:
+        warnings.append(f"{manual_count} 个 manual 节点需要人工处理（路由到成员或公共派单队列）")
+    if tests_gates:
+        warnings.append(f"{tests_gates} 个 tests_passed 门禁条件 v1 恒 UNVERIFIED（平台没有测试输出记录）")
+    adapters = [str(n.get("delivery_adapter")) for n in nodes if n.get("delivery_adapter")]
+    if adapters:
+        warnings.append(f"交付适配器 {sorted(set(adapters))} 在节点批准后执行，失败会如实记账不阻塞完成")
+    return {
+        "valid": True,
+        "errors": [],
+        "warnings": warnings,
+        "plan": {
+            "workflow": {
+                "key": str(definition.get("workflow", {}).get("key") or ""),
+                "name": str(definition.get("workflow", {}).get("name") or ""),
+            },
+            "inputs_provided": sorted(provided),
+            "nodes": plan_nodes,
+            "edges": edges,
+        },
+    }
+
+
+def _flat_leaves(spec: Any) -> list[str]:
+    if isinstance(spec, list):
+        leaves: list[str] = []
+        for child in spec:
+            leaves.extend(_flat_leaves(child))
+        return leaves
+    if isinstance(spec, dict):
+        for key in ("all", "any"):
+            if key in spec:
+                return _flat_leaves(spec[key])
+        return []
+    return [str(spec)]
+
+
+def preview_workflow_version(
+    store: Any, organization_id: str, workflow_id: UUID, inputs: dict[str, Any] | None, version_id: UUID | None = None
+) -> dict[str, Any]:
+    """按已发布版本试运行（org 隔离与 start 同口径）。"""
+
+    ensure_schema(store)
+    organization_id = str(organization_id)
+    workflow_row = store.db.execute(
+        "SELECT * FROM workflows WHERE id = ? AND organization_id = ?", (str(workflow_id), organization_id)
+    ).fetchone()
+    if workflow_row is None:
+        raise WorkflowError("workflow_not_found")
+    version_id = str(version_id) if version_id else str(workflow_row["current_version_id"])
+    version_row = store.db.execute(
+        "SELECT * FROM workflow_versions WHERE id = ? AND workflow_id = ?", (version_id, str(workflow_id))
+    ).fetchone()
+    if version_row is None:
+        raise WorkflowError("workflow_version_not_found")
+    result = preview_definition(json.loads(version_row["definition"]), inputs)
+    result["workflow_id"] = str(workflow_id)
+    result["workflow_version_id"] = version_id
+    return result
+
+
+# ---- W4.4 反向保存（从成功项目抽 workflow 定义草稿）---------------------------
+
+
+def draft_from_project(store: Any, project_id: UUID) -> dict[str, Any]:
+    """从项目的真实任务图抽 workflow 定义**草稿**（W4.4）。
+
+    草稿是待补全的起点，不是可直接发布的模板：gate_policy 按历史批准情况**建议**、
+    handoff_contract/delivery_adapter 历史数据里不存在留空、key/name 给建议值——
+    都要经编辑器人工确认。取消的任务不进草稿；历史批准的产物类型 → 建议门禁。
+    """
+
+    ensure_schema(store)
+    project = store.get_project(project_id)
+    tasks = [t for t in store.list_tasks(project_id) if _enum(t.status) != "CANCELLED"]
+    if not tasks:
+        raise WorkflowError("workflow_draft_empty", ["project: 没有可抽取的任务（取消的任务不计入）"])
+
+    task_ids = {str(t.id) for t in tasks}
+    agents = {
+        str(row["agent_id"]): str(row["display_name"] or row["agent_id"])
+        for row in store.db.execute("SELECT agent_id, display_name FROM agents")
+    }
+    role_caps: dict[str, set[str]] = {}
+    role_for_task: dict[str, str] = {}
+    for t in tasks:
+        assignee = str(getattr(t, "assignee", "") or "")
+        if assignee and assignee != "Unassigned" and assignee in agents:
+            role_for_task[str(t.id)] = assignee
+            role_caps.setdefault(assignee, set()).update(str(c) for c in (t.required_capabilities or []))
+
+    role_bindings = [
+        {
+            "id": rid,
+            "role_name": agents[rid],
+            "capability_requirements": sorted(caps),
+            "prompt_overrides": {"system": f"沿用 {agents[rid]} 在原项目中的执行方式（草稿，请人工校对）"},
+        }
+        for rid, caps in sorted(role_caps.items())
+    ]
+
+    gate_policies: list[dict[str, Any]] = []
+    stage_order: list[str] = []
+    nodes: list[dict[str, Any]] = []
+    for t in tasks:
+        tid = str(t.id)
+        node_id = "task-" + tid[:8]
+        stage = str(t.stage or "delivery")
+        if stage not in stage_order:
+            stage_order.append(stage)
+        depends = ["task-" + str(d)[:8] for d in (t.dependency_task_ids or []) if str(d) in task_ids]
+        node: dict[str, Any] = {
+            "id": node_id,
+            "stage_id": stage,
+            "title": t.title,
+            "goal": (t.description or t.title)[:200],
+            "depends_on": depends,
+            "mode": "auto" if role_for_task.get(tid) else "manual",
+        }
+        if role_for_task.get(tid):
+            node["role_binding"] = role_for_task[tid]
+        outs: list[dict[str, Any]] = []
+        for row in store.db.execute(
+            "SELECT artifact_type, COUNT(*) AS c FROM artifacts WHERE task_id = ? GROUP BY artifact_type ORDER BY artifact_type",
+            (tid,),
+        ):
+            artifact_type = str(row["artifact_type"])
+            outs.append({"name": f"{artifact_type}_{row['c']}_{len(outs) + 1}", "artifact_type": artifact_type})
+        if outs:
+            node["outputs"] = outs
+            if _enum(t.status) == "APPROVED":
+                gate_id = f"gate-{node_id}"
+                gate_policies.append(
+                    {"id": gate_id, "spec": [f"artifact:{outs[0]['artifact_type']} approved"], "on_block": "escalate_human"}
+                )
+                node["gate_policy"] = gate_id
+        nodes.append(node)
+
+    definition = {
+        "schema_version": 1,
+        "workflow": {
+            "key": f"from-project-{str(project_id)[:8]}",
+            "name": f"{project.name}（草稿）",
+            "description": "从成功项目反向抽取的草稿（W4.4）：门禁为历史批准建议，交接与交付需人工补全",
+            "inputs": [],
+        },
+        "stages": [{"id": stage, "title": stage} for stage in stage_order],
+        "role_bindings": role_bindings,
+        "gate_policies": gate_policies,
+        "nodes": nodes,
+    }
+    validation = validate_definition(definition)
+    return {
+        "definition": definition,
+        "validation_errors": validation,
+        "task_count": len(tasks),
+        "note": "草稿需在编辑器补全（交接/交付/输入插值）后经 /api/workflows 发布；发布前不会影响任何运行",
+    }
