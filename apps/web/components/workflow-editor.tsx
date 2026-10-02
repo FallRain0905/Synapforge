@@ -53,6 +53,7 @@ function Row({ label, children, required }: { label: string; children: React.Rea
 export function WorkflowEditor({
   editing,
   initialDefinition,
+  draftNote,
   onClose,
   onSaved,
   notify,
@@ -60,6 +61,8 @@ export function WorkflowEditor({
   /** 发布新版本时传已有包（key 锁定）；新建传 null */
   editing: WorkflowPackage | null;
   initialDefinition: WorkflowDefinition | null;
+  /** 反向草稿的如实说明（W4.4：草稿不是已发布模板，发布需过服务端校验） */
+  draftNote?: string;
   onClose: () => void;
   onSaved: (pkg: WorkflowPackage) => void;
   notify: (message: string) => void;
@@ -95,7 +98,8 @@ export function WorkflowEditor({
       return;
     }
     const definition: WorkflowDefinition = {
-      schema_version: 1,
+      // schema v2：任一节点带 condition 时必须声明 schema_version=2（服务端校验会拒绝 v1+condition）
+      schema_version: nodes.some((node) => node.condition) ? 2 : 1,
       workflow: { key: key.trim(), name: name.trim(), description: description.trim(), inputs },
       stages,
       role_bindings: roles,
@@ -140,6 +144,8 @@ export function WorkflowEditor({
           </ul>
         </div>
       ) : null}
+
+      {draftNote ? <div className="hint" data-testid="workflow-editor-draft-note">{draftNote}</div> : null}
 
       <div style={{ display: "grid", gap: 14 }}>
         <section style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
@@ -217,7 +223,7 @@ export function WorkflowEditor({
         </section>
 
         <section style={{ display: "grid", gap: 6 }}>
-          <strong>门禁策略（acceptance.py 五类字面语法，逐行一条；{"{any}/{all}"} 组合暂走"从已有定义编辑"）</strong>
+          <strong>门禁策略（acceptance.py 五类字面语法；支持 {"{any}/{all}"} 嵌套组合，服务端 dry-run 校验）</strong>
           {gatePolicies.map((policy, index) => (
             <div key={index} style={{ display: "grid", gap: 4, border: "1px solid var(--line, #ddd)", padding: 8, borderRadius: 6 }}>
               <div style={{ display: "flex", gap: 8 }}>
@@ -232,19 +238,24 @@ export function WorkflowEditor({
                 </select>
                 <button type="button" className="text-button" onClick={() => setGatePolicies((c) => c.filter((_, i) => i !== index))}>移除</button>
               </div>
-              <textarea
-                placeholder={"每行一条，例如：\nfile:outputs/outline.md non-empty\nartifact:outline approved"}
-                value={policy.spec.filter((leaf): leaf is string => typeof leaf === "string").join("\n")}
-                onChange={(event) =>
-                  setGatePolicies((c) =>
-                    c.map((item, i) =>
-                      i === index
-                        ? { ...item, spec: event.target.value.split("\n").map((line) => line.trim()).filter(Boolean) }
-                        : item,
-                    ),
-                  )
-                }
-                rows={3}
+                    <textarea
+                      placeholder={"每行一条字面条件，例如：\nfile:outputs/outline.md non-empty\nartifact:outline approved"}
+                      value={policy.spec.filter((leaf): leaf is string => typeof leaf === "string").join("\n")}
+                      onChange={(event) =>
+                        setGatePolicies((c) =>
+                          c.map((item, i) => {
+                            if (i !== index) return item;
+                            const combinator = item.spec.find((leaf) => typeof leaf === "object");
+                            const lines = event.target.value.split("\n").map((line) => line.trim()).filter(Boolean);
+                            return { ...item, spec: combinator ? ([...lines, combinator] as typeof item.spec) : lines };
+                          }),
+                        )
+                      }
+                      rows={3}
+                    />
+              <GateCombinatorEditor
+                spec={policy.spec}
+                onChange={(spec) => setGatePolicies((c) => c.map((item, i) => (i === index ? { ...item, spec } : item)))}
               />
             </div>
           ))}
@@ -442,6 +453,56 @@ export function WorkflowEditor({
                   </select>
                 </Row>
               </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+                {/* schema v2 条件分支（D4）：{input, equals?, in?}，缺一服务端拒绝；提交时 schema_version 自动升 2 */}
+                <Row label="条件分支 input（留空=无条件）">
+                  <input
+                    value={node.condition?.input ?? ""}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      patchNode(index, { condition: value ? { ...(node.condition ?? { input: "" }), input: value } : undefined });
+                    }}
+                    placeholder="工作流输入名，如 question_type"
+                    style={{ width: 180 }}
+                    data-testid={`workflow-editor-condition-input-${index}`}
+                  />
+                </Row>
+                {node.condition ? (
+                  <>
+                    <Row label="equals（等于某值）">
+                      <input
+                        value={node.condition.equals ?? ""}
+                        onChange={(event) =>
+                          patchNode(index, {
+                            condition: event.target.value
+                              ? { input: node.condition!.input, equals: event.target.value }
+                              : { input: node.condition!.input, in: node.condition!.in },
+                          })
+                        }
+                        placeholder="如 problem_two"
+                        style={{ width: 150 }}
+                      />
+                    </Row>
+                    <Row label="in（逗号分隔多值）">
+                      <input
+                        value={(node.condition.in ?? []).join(",")}
+                        onChange={(event) =>
+                          patchNode(index, {
+                            condition: event.target.value
+                              ? { input: node.condition!.input, in: event.target.value.split(",").map((item) => item.trim()).filter(Boolean) }
+                              : { input: node.condition!.input, equals: node.condition!.equals },
+                          })
+                        }
+                        placeholder="如 a,b,c"
+                        style={{ width: 150 }}
+                      />
+                    </Row>
+                    {!node.condition.equals && !(node.condition.in?.length) ? (
+                      <span style={{ fontSize: 12, color: "#b45309" }}>equals 与 in 至少填一个（服务端会拒绝缺一的定义）</span>
+                    ) : null}
+                  </>
+                ) : null}
+              </div>
             </div>
           ))}
           <button
@@ -467,5 +528,58 @@ export function WorkflowEditor({
         </div>
       </div>
     </Modal>
+  );
+}
+
+/** 门禁 {any/all} 组合编辑（D6）：spec 支持单个嵌套对象；合法性由服务端 dry-run 校验。 */
+type GatePolicySpec = NonNullable<WorkflowDefinition["gate_policies"]>[number];
+type GateSpecLeaf = GatePolicySpec["spec"][number];
+
+function GateCombinatorEditor({
+  spec,
+  onChange,
+}: {
+  spec: GateSpecLeaf[];
+  onChange: (spec: GateSpecLeaf[]) => void;
+}) {
+  const combinator = spec.find((leaf): leaf is Extract<GateSpecLeaf, object> => typeof leaf === "object") as ({ all: string[] } | { any: string[] }) | undefined;
+  const mode = combinator ? ("all" in combinator ? "all" : "any") : "";
+  const plain = spec.filter((leaf): leaf is string => typeof leaf === "string");
+  return (
+    <div style={{ fontSize: 12, display: "grid", gap: 4 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <span>组合条件（可选，与上方逐行条件并列提交）：</span>
+        <select
+          value={mode}
+          onChange={(event) => {
+            const next = event.target.value;
+            if (!next) {
+              onChange(plain);
+            } else {
+              onChange([...plain, next === "all" ? ({ all: [] } as GateSpecLeaf) : ({ any: [] } as GateSpecLeaf)]);
+            }
+          }}
+          style={{ width: 120 }}
+          data-testid="workflow-gate-combinator"
+        >
+          <option value="">无组合</option>
+          <option value="all">all（全部成立）</option>
+          <option value="any">any（任一成立）</option>
+        </select>
+        {combinator ? <button type="button" className="text-button" onClick={() => onChange(plain)}>移除组合</button> : null}
+      </div>
+      {combinator ? (
+        <textarea
+          placeholder={"组合内每行一条字面条件，例如：\nartifact:outline approved\nreview:critic concluded"}
+          value={"all" in combinator ? (combinator.all ?? []) : (combinator.any ?? [])}
+          onChange={(event) => {
+            const lines = event.target.value.split("\n").map((line) => line.trim());
+            onChange([...plain, "all" in combinator ? ({ all: lines } as GateSpecLeaf) : ({ any: lines } as GateSpecLeaf)]);
+          }}
+          rows={2}
+          data-testid="workflow-gate-combinator-spec"
+        />
+      ) : null}
+    </div>
   );
 }

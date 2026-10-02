@@ -11,10 +11,11 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { ArrowUpRight, Boxes, CheckCircle2, Info, PlayCircle, Plus } from "lucide-react";
+import { ArrowUpRight, Boxes, CheckCircle2, GitBranch, Info, PlayCircle, Plus } from "lucide-react";
 import { PageHeading } from "../../components/shell";
 import { EmptyState, LoadingSkeleton, Metric, Modal, Panel, StatusPill } from "../../components/ui";
 import { WorkflowEditor } from "../../components/workflow-editor";
+import { WorkflowFlowView } from "../../components/workflow-flow";
 import { useAuth } from "../../lib/auth";
 import { PAGE_GRID } from "../../lib/page-layout";
 import { REPOSITIONING_COPY } from "../../lib/status-dictionary";
@@ -22,6 +23,7 @@ import { useWorkspace } from "../../lib/workspace";
 import {
   advanceWorkflowRun,
   errorMessage,
+  getProjectWorkflowDraft,
   getProjects,
   getWorkflow,
   getWorkflowRun,
@@ -31,9 +33,9 @@ import {
   Project,
   startWorkflowRun,
   WorkflowAdvanceResult,
+  WorkflowDefinition,
   WorkflowPackage,
   WorkflowRunView,
-  type WorkflowDefinition,
 } from "../../lib/api";
 
 /** 节点任务状态 → 页面桶（API 形状文档 §6，词典对齐）；未知状态原样显示（不编）。 */
@@ -63,6 +65,7 @@ export default function WorkflowsPage() {
   const [expanded, setExpanded] = useState<Record<string, WorkflowDefinition | null>>({});
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<WorkflowPackage | null>(null);
+  const [draftContent, setDraftContent] = useState<{ definition: WorkflowDefinition; note: string } | null>(null);
   const [applyTarget, setApplyTarget] = useState<WorkflowPackage | null>(null);
   const [runs, setRuns] = useState<WorkflowRunView[] | null>(null);
   const [runDetail, setRunDetail] = useState<WorkflowRunView | null>(null);
@@ -122,6 +125,25 @@ export default function WorkflowsPage() {
     if (result.created.length) parts.push(`已安装：${result.created.join("、")}`);
     if (result.skipped.length) parts.push(`已存在跳过：${result.skipped.join("、")}`);
     notify(parts.join("；") || "没有变化（幂等安装）");
+  };
+
+  /** 反向草稿（W4.4）：从项目任务图抽定义 → 进编辑器 → 发布走 POST /api/workflows。 */
+  const reverseDraft = async () => {
+    if (!projectId) return;
+    setBusy(true);
+    try {
+      const draft = await getProjectWorkflowDraft(projectId);
+      setEditing(null);
+      setDraftContent({ definition: draft.definition, note: `${draft.note}（来自 ${draft.task_count} 个任务的反向草稿；需编辑补全后发布）` });
+      setEditorOpen(true);
+      if (draft.validation_errors.length) {
+        notify(`草稿带 ${draft.validation_errors.length} 条校验提示，请在编辑器里补全`);
+      }
+    } catch (failure) {
+      notify(errorMessage(failure, "反向草稿生成失败（空项目无法抽取）"));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const expandPackage = async (pkg: WorkflowPackage) => {
@@ -189,6 +211,16 @@ export default function WorkflowsPage() {
           <>
             <button type="button" className="button button-secondary" onClick={() => void installBuiltin()} disabled={busy} data-testid="workflows-install-builtin">
               <Boxes size={15} /> 安装内置包
+            </button>
+            <button
+              type="button"
+              className="button button-secondary"
+              data-testid="workflows-reverse-draft"
+              disabled={busy || !projects.length || !projectId}
+              title="从当前项目的任务图反向抽取定义草稿（W4.4）：草稿不是已发布模板，需编辑后发布"
+              onClick={() => void reverseDraft()}
+            >
+              <GitBranch size={15} /> 从项目反向生成
             </button>
             <button
               type="button"
@@ -405,15 +437,22 @@ export default function WorkflowsPage() {
       {editorOpen ? (
         <WorkflowEditor
           editing={editing}
-          initialDefinition={editing?.definition ?? null}
-          onClose={() => setEditorOpen(false)}
+          initialDefinition={editing?.definition ?? draftContent?.definition ?? null}
+          draftNote={draftContent?.note}
+          onClose={() => {
+            setEditorOpen(false);
+            setDraftContent(null);
+          }}
           onSaved={() => {
             setEditorOpen(false);
+            setDraftContent(null);
             void loadPackages();
           }}
           notify={notify}
         />
       ) : null}
+
+      {projectId ? <WorkflowFlowView projectId={projectId} /> : null}
     </div>
   );
 }

@@ -2601,6 +2601,8 @@ export type WorkflowNodeSpec = {
   handoff_contract?: string;
   delivery_adapter?: string;
   human_intervention?: "none" | "before" | "after" | "approval_gate";
+  /** schema v2 条件分支：{input, equals?, in?}——equals/in 缺一服务端拒绝；需要 schema_version=2 */
+  condition?: { input: string; equals?: string; in?: string[] };
 };
 
 export type WorkflowDeliveryAdapterSpec = { id: string; kind: string; config: Record<string, unknown> };
@@ -2787,6 +2789,88 @@ export async function advanceWorkflowRun(projectId: string, runId: string): Prom
     method: "POST",
   });
   if (!response.ok) throw await apiError(response, "工作流推进失败");
+  return response.json();
+}
+
+/** ---- 可视化 V1 与预览/草稿（W4.3/W4.4/D5；形状见 docs/WORKFLOW_API_SHAPES.md §145-148）---- */
+
+export type WorkflowViewData = {
+  project_id: string;
+  workflow: { key: string | null; version_id: string | null; state: string | null };
+  generated_at: string;
+  summary: Record<string, number>;
+  stages: { id: string; title: string }[];
+  nodes: {
+    id: string;
+    kind: string;
+    stage_id: string;
+    task_id: string;
+    title: string;
+    status: string;
+    mode: string;
+    assignee: string | null;
+    blocked_reason: string | null;
+    budget: Record<string, unknown> | null;
+  }[];
+  edges: { kind: string; source: string; target: string; label: string }[];
+  runtime_requests: {
+    request_id: string;
+    requester_node_id: string;
+    requester_agent_id: string;
+    provider_agent_id: string | null;
+    request_type: string;
+    question: string;
+    blocking: string;
+    status: string;
+    response_deadline: string | null;
+  }[];
+  blocking_chains: { root_node_id: string; reason: string; request_id?: string; affected_node_ids?: string[] }[];
+  runs: Record<string, unknown>[];
+};
+
+/** 流程图聚合：节点/边/运行时请求/阻断链全部来自服务端权威对象（前端不自行猜）。 */
+export async function getProjectWorkflowView(projectId: string): Promise<WorkflowViewData> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/workflow-view`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "流程图数据读取失败");
+  return response.json();
+}
+
+/** 试运行（W4.3）：展开任务图，不创建任何对象；定义非法时 valid=false + plan=null（HTTP 200）。 */
+export async function previewWorkflow(input: {
+  definition?: WorkflowDefinition;
+  workflow_id?: string;
+  version_id?: string;
+  inputs?: Record<string, string>;
+}): Promise<{
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+  plan: {
+    workflow: Record<string, unknown>;
+    inputs_provided: Record<string, unknown>;
+    nodes: { node_id: string; title: string; stage_id: string; mode: string; role_binding?: string; depends_on: string[]; condition_active?: boolean | null; condition_reason?: string }[];
+    edges: { source: string; target: string; kind: string; label?: string }[];
+  } | null;
+}> {
+  const response = await apiFetch(`${API_URL}/api/workflows/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw await apiError(response, "试运行失败");
+  return response.json();
+}
+
+/** 反向草稿（W4.4）：从项目任务图抽定义；空项目 422 workflow_draft_empty。
+ * 草稿过 schema 校验但**不是已发布模板**——发布走 createWorkflow。 */
+export async function getProjectWorkflowDraft(projectId: string): Promise<{
+  definition: WorkflowDefinition;
+  validation_errors: string[];
+  task_count: number;
+  note: string;
+}> {
+  const response = await apiFetch(`${API_URL}/api/projects/${projectId}/workflow-draft`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "反向草稿读取失败");
   return response.json();
 }
 
