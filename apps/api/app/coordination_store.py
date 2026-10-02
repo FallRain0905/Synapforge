@@ -44,6 +44,10 @@ class CoordinationStoreError(CoordinationError):
     """存储侧稳定错误族（request_not_found / budget_exceeded / duplicate...）。"""
 
 
+def _enum_value(value: Any) -> str:
+    return str(value.value if hasattr(value, "value") else value)
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -553,6 +557,7 @@ def build_workflow_view(store: Any, project_id: UUID) -> dict[str, Any]:
     tasks_by_id = {str(t.id): t for t in store.list_tasks(project_id)}
 
     nodes: list[dict[str, Any]] = []
+    artifacts_nodes: list[dict[str, Any]] = []
     for node_id, task_id in node_tasks.items():
         task = tasks_by_id.get(task_id)
         if task is None:
@@ -585,6 +590,45 @@ def build_workflow_view(store: Any, project_id: UUID) -> dict[str, Any]:
                 "label": dep_task.title if dep_task else "依赖",
             })
 
+    # 语义边（可视化设计 §2.4；B 已备 13 种边视觉，这里补后端三类）：
+    # artifact_output —— 任务产出成果物（产物挂 task_id 的都算，含版本与审批状态）
+    artifact_edges: dict[str, dict[str, Any]] = {}
+    for artifact in store.list_artifacts(project_id):
+        artifact_id = str(artifact.id)
+        task_ref = str(artifact.task_id) if getattr(artifact, "task_id", None) else None
+        status = _enum_value(artifact.status)
+        artifact_edges[artifact_id] = {
+            "kind": "artifact", "artifact_id": artifact_id,
+            "name": artifact.name,
+            "artifact_type": str(artifact.artifact_type),
+            "status": status,
+            "version": int(getattr(artifact, "version", 1) or 1),
+        }
+        if task_ref and task_ref in set(node_tasks.values()):
+            edges.append({
+                "kind": "artifact_output", "source": task_ref, "target": artifact_id,
+                "label": f"{artifact.name} v{artifact.version}",
+                "status": status,
+            })
+    # handoff —— 正式交接边（含收据状态）
+    for handoff in store.list_handoffs(project_id):
+        edges.append({
+            "kind": "handoff", "source": str(getattr(handoff, "task_id", "")),
+            "target": str(getattr(handoff, "id", "")),
+            "label": f"交接 · {_enum_value(getattr(handoff, 'receipt_status', ''))}",
+            "status": _enum_value(getattr(handoff, "status", "")),
+        })
+    # gate_block —— 门禁阻塞边（引擎本轮评估过的未通过门 → 该节点）
+    for node_id, task_id in node_tasks.items():
+        task_row = store.db.execute("SELECT blocked_reason FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        reason = str(task_row["blocked_reason"] or "") if task_row else ""
+        if "information_request:" in reason:
+            edges.append({
+                "kind": "gate_block", "source": reason.split(":", 1)[1][:36], "target": task_id,
+                "label": "信息请求阻塞",
+                "status": "BLOCKED",
+            })
+
     requests = list_information_requests(store, project_id)
     runtime_requests = [
         {
@@ -600,6 +644,21 @@ def build_workflow_view(store: Any, project_id: UUID) -> dict[str, Any]:
         }
         for r in requests
     ]
+    for artifact_edge in artifact_edges.values():
+        artifacts_nodes.append({
+            "id": artifact_edge["artifact_id"],
+            "kind": "artifact",
+            "stage_id": "",
+            "task_id": None,
+            "title": artifact_edge["name"],
+            "status": artifact_edge["status"],
+            "mode": "",
+            "assignee": None,
+            "blocked_reason": None,
+            "budget": None,
+            "artifact_type": artifact_edge["artifact_type"],
+            "version": artifact_edge["version"],
+        })
     blocking_chains = [
         {"root_node_id": r["requester_node_id"], "reason": f"等待信息请求回复（{r['status']}）",
          "request_id": r["request_id"]}
@@ -622,7 +681,7 @@ def build_workflow_view(store: Any, project_id: UUID) -> dict[str, Any]:
             {"id": str(stage.get("id")), "title": str(stage.get("title") or stage.get("id"))}
             for stage in (definition or {}).get("stages", [])
         ],
-        "nodes": nodes,
+        "nodes": nodes + artifacts_nodes,
         "edges": edges,
         "runtime_requests": runtime_requests,
         "blocking_chains": blocking_chains,
