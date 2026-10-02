@@ -1,7 +1,7 @@
 """执行体 SSH 助手（paramiko）：本地没有 sshpass，统一走这里。
 
 用法：
-    python scripts/deploy/_ssh_exec.py "命令"            # root@154.219.99.75
+    python scripts/deploy/_ssh_exec.py "命令"            # root@XX.XX.XX.XX
     python scripts/deploy/_ssh_exec.py --user synapforge "命令"
 
 只用于**运维探查与部署**（命令经 shell 原样执行）。凭据**不进仓库**：
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import paramiko
 
-HOST = os.environ.get("EXECUTOR_HOST", "154.219.99.75")
+HOST = os.environ.get("EXECUTOR_HOST", "XX.XX.XX.XX")
 SECRET_FILE = Path.home() / ".ssh" / "executor.secret"
 
 

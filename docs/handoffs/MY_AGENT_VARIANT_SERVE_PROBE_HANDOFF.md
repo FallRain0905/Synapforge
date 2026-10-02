@@ -2,7 +2,7 @@
 
 > 2026-09-24 · 状态：**结论已实测（有条件能）**，产品代码未改，线上配置未改
 > 上游：`docs/handoffs/MY_AGENT_M5C_S4_THINKING_HANDOFF.md` §3「强度按证据暂缓」——本文件把那条"暂缓"查成了"有条件能"。
-> 执行体：`154.219.99.75`，opencode **1.18.32**，provider 别名 `deepseek` → 百炼 `deepseek/deepseek-v4.1-flash`
+> 执行体：`XX.XX.XX.XX`，opencode **1.18.32**，provider 别名 `deepseek` → 百炼 `deepseek/deepseek-v4.1-flash`
 
 ---
 

@@ -5,7 +5,7 @@
 所以这一层做两件事：**从事件里取出人看的摘要**，以及**把事件里的用量读出来**（COST-1 的 token
 预算判定只在这条路径上拿得到数）。
 
-形状来自实测样本（不是猜的）：2026-09-23 在云端执行体服务器（154.219.99.75，Ubuntu 22.04）
+形状来自实测样本（不是猜的）：2026-09-23 在云端执行体服务器（XX.XX.XX.XX，Ubuntu 22.04）
 上装 opencode **1.18.32**，`opencode run --format json` 的真实输出（原文见
 `docs/handoffs/CLOUD_1_OPENCODE_ADAPTER_HANDOFF.md`）：
 

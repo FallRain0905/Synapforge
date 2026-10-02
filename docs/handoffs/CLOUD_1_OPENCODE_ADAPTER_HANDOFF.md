@@ -58,7 +58,7 @@ workbuddy / zcode 等仍按"stdout 即结果"处理。
 
 ## 4 服务器实测证据（opencode 1.18.32，2026-09-23）
 
-新机器 `154.219.99.75`（Ubuntu 22.04、4C8G、40G、**全新**，无 node/npm、Python 3.10.4）：
+新机器 `XX.XX.XX.XX`（Ubuntu 22.04、4C8G、40G、**全新**，无 node/npm、Python 3.10.4）：
 
 ```bash
 curl -fsSL https://opencode.ai/install | bash      # → /root/.opencode/bin/opencode（185 MB 独立二进制，不用 Node）
@@ -123,7 +123,7 @@ Ubuntu 22.04 自带的 3.10 会在 import 阶段就失败（本交接初稿的"3
 
 ## 7 部署进度（2026-09-23 当天，同一会话续做）
 
-**服务器 `154.219.99.75` 已就绪**（Ubuntu 22.04 / 4C8G / 40G，root 密码直登）：
+**服务器 `XX.XX.XX.XX` 已就绪**（Ubuntu 22.04 / 4C8G / 40G，root 密码直登）：
 
 | 项 | 状态 |
 | --- | --- |

@@ -208,7 +208,7 @@ apt-get install -y tectonic    # 或从 GitHub Releases 下载单文件二进制
 | 入口 | 访问方式 | 用途 |
 | --- | --- | --- |
 | `https://synapforge.top` | **账号登录**（无会话的 API 调用一律 401；页面自动跳 `/login`） | 日常使用 |
-| `http://156.239.229.143` | **nginx Basic**（`map` / 见 `/etc/math-agent-platform/credentials.txt`）+ 账号登录 | 应急后门：Basic 失效或前端故障时仍能进 API 与页面 |
+| `http://XX.XX.XX.XX` | **nginx Basic**（`map` / 见 `/etc/math-agent-platform/credentials.txt`）+ 账号登录 | 应急后门：Basic 失效或前端故障时仍能进 API 与页面 |
 
 **首次使用必须由你本人注册第一个账号**（我刻意没有代建）：第一个注册的账号自动成为管理员，
 并把此前 `member-001` 名下的项目/任务/成果物/设备一次性接管过来（`member-001` 置为 suspended 保留）。
@@ -266,25 +266,25 @@ MAP_VERIFY_EMAIL=you@example.com MAP_VERIFY_PASSWORD=<口令> bash /root/deploy/
 
 ## 9. 部署记录（2026-09-17 实测）
 
-目标机：`156.239.229.143`（Ubuntu 24.04.1 / 4 vCPU / 3915MB 内存 / **根分区 39G 而非 50G**，36G 可用）。
+目标机：`XX.XX.XX.XX`（Ubuntu 24.04.1 / 4 vCPU / 3915MB 内存 / **根分区 39G 而非 50G**，36G 可用）。
 
 实际执行顺序（全部由本机经 `scripts/deploy/remote.py` 驱动）：
 
 | 步骤 | 结果 |
 | --- | --- |
 | `remote.py check` | Python 3.12.3 自带、无 node/nginx/pip/swap、仅 sshd 在监听（无既有站点） |
-| `server_bootstrap.sh --origin http://156.239.229.143` | 依赖 + Node 20 + 4GB swap + `map` 用户 + 两个 systemd 单元 + nginx 就绪 |
+| `server_bootstrap.sh --origin http://XX.XX.XX.XX` | 依赖 + Node 20 + 4GB swap + `map` 用户 + 两个 systemd 单元 + nginx 就绪 |
 | `pack-source.sh` → 上传 1.1MB 包 | 378 条目，服务器 `tar -xzf` 展开 |
-| `server_release.sh --public-url http://156.239.229.143` | **前端在服务器上构建成功（19/19 静态页）**——`NODE_OPTIONS=--max-old-space-size=1536` + 4GB swap 把 2.7GB 的构建峰值压住了，swap 实际只用到 0B |
+| `server_release.sh --public-url http://XX.XX.XX.XX` | **前端在服务器上构建成功（19/19 静态页）**——`NODE_OPTIONS=--max-old-space-size=1536` + 4GB swap 把 2.7GB 的构建峰值压住了，swap 实际只用到 0B |
 | `server_verify.sh` | **16 项全过** |
 | 端到端冒烟 | 见下 |
 
 **端到端冒烟（真实链路，不是桩）**：
 
 1. 经公网入口生成配对（`POST /api/devices/pairings`，Basic 认证）→ 本机跑
-   `scripts/connect-agent.ps1 -Url http://156.239.229.143 -Pairing <blob>` → Agent 登记 + Ed25519 签名 +
+   `scripts/connect-agent.ps1 -Url http://XX.XX.XX.XX -Pairing <blob>` → Agent 登记 + Ed25519 签名 +
    `POST /api/devices/register` **201** + 设备 Token 写入 Windows 凭据管理器；
-2. `agentd.py gateway-run` 连 `ws://156.239.229.143/ws/agents/device-fallrain` → 平台侧设备状态 **active**、
+2. `agentd.py gateway-run` 连 `ws://XX.XX.XX.XX/ws/agents/device-fallrain` → 平台侧设备状态 **active**、
    心跳持续（**证明 WebSocket 经 nginx 的 Upgrade 代理可用**）；
 3. 建声明式命令任务（`worker_command: ["cmd","/c","echo","deployment-smoke-ok"]`）→
    授权设备到项目 → `agentd.py worker-run --once --grant <blob>` →

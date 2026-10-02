@@ -2,7 +2,7 @@
 
 > 2026-09-24 · 状态：**S-1 已交付并线上真跑验证** · 计划 `docs/MY_AGENT_M5C_STREAMING_EXECUTION_PLAN.md`
 > 上游 S-0 样本：`docs/handoffs/MY_AGENT_M5C_S0_SSE_SAMPLES_HANDOFF.md`（协议事实全部来自那份真机样本）
-> 执行体：`154.219.99.75` · opencode 1.18.32 · provider `deepseek/deepseek-v4.1-flash`
+> 执行体：`XX.XX.XX.XX` · opencode 1.18.32 · provider `deepseek/deepseek-v4.1-flash`
 
 ---
 

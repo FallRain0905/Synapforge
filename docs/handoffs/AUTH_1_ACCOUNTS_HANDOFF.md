@@ -6,7 +6,7 @@
 >
 > 上一份交接：`docs/handoffs/UX_9_MOBILE_ADAPTATION_HANDOFF.md`
 >
-> 部署目标：`https://synapforge.top`（IP 入口 `http://156.239.229.143` 保留 Basic 作运维后门）
+> 部署目标：`https://synapforge.top`（IP 入口 `http://XX.XX.XX.XX` 保留 Basic 作运维后门）
 
 ---
 

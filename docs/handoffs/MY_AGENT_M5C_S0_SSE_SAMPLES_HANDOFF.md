@@ -1,7 +1,7 @@
 # MY-AGENT M-5c S-0 交接：真实 `opencode serve` + SSE 事件样本
 
 > 2026-09-24 · 状态：**S-0 完成**（样本是真的，不是猜的）· 计划 `docs/MY_AGENT_M5C_STREAMING_EXECUTION_PLAN.md`
-> 采样机：云端执行体 `154.219.99.75`，opencode **1.18.32**，provider 别名 `deepseek` → 百炼 `deepseek/deepseek-v4.1-flash`
+> 采样机：云端执行体 `XX.XX.XX.XX`，opencode **1.18.32**，provider 别名 `deepseek` → 百炼 `deepseek/deepseek-v4.1-flash`
 > 探针纪律：装→测→**必删**（会话、serve 进程、`/tmp/oc-*` 文件全部清掉，`auth.json` 已删；机器状态与采样前一致）
 
 ---

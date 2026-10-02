@@ -1,6 +1,6 @@
 """CLOUD-1 方案 B 契约测试：opencode 执行体（通用 CLI 通道的协议适配）。
 
-样本不是编的：2026-09-23 在云端执行体服务器（154.219.99.75，Ubuntu 22.04）上装 opencode **1.18.32**，
+样本不是编的：2026-09-23 在云端执行体服务器（XX.XX.XX.XX，Ubuntu 22.04）上装 opencode **1.18.32**，
 用 `opencode run --format json` 实跑采到的**原文**（下面两个常量逐字来自 `/tmp/oc.jsonl` 与
 `/tmp/oc2.jsonl`，见 `docs/handoffs/CLOUD_1_OPENCODE_ADAPTER_HANDOFF.md`）。
 

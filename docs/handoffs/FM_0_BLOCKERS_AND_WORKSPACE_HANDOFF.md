@@ -88,11 +88,11 @@ Gateaway 命令列表与 Sidecar v1 既有字段语义**零改动**。
 
 ## 5 对象存储与云端工作区事实核对（读线上，未改任何配置）
 
-- 生产平台（`156.239.229.143`，`map-api.service`）：`/etc/math-agent-platform/api.env` 里
+- 生产平台（`XX.XX.XX.XX`，`map-api.service`）：`/etc/math-agent-platform/api.env` 里
   `OBJECT_STORE_BACKEND=local` → **本地目录** `/opt/math-agent-platform/apps/api/data/objects`，
   **22 个对象、212K**；`artifacts` 24 行里有 **5 行没有 `storage_key`**（元数据在、内容不在）。
   → FM-1 迁移必须把这 5 行标成"无内容"（如 `scan_status=unavailable`），不能假装每行都有内容。
-- 云端 Agent（`154.219.99.75`，`map-agent@cloud.service`）：`WorkingDirectory=/srv/synapforge/%i`，
+- 云端 Agent（`XX.XX.XX.XX`，`map-agent@cloud.service`）：`WorkingDirectory=/srv/synapforge/%i`，
   `ExecStart` 带 `--workspace /srv/synapforge/cloud`，实测 cwd 与之一致；`/srv/synapforge/cloud/inputs/`
   已有早期验证留下的 `sample.md`。
 - **Compose 变量不一致（只记录，不改）**：`infra/docker-compose.yml`（README 禁区）给 api 服务传的是
