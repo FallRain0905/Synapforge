@@ -64,7 +64,8 @@ def ensure_schema(store: Any) -> None:
             summary TEXT NOT NULL DEFAULT '',
             payload TEXT NOT NULL DEFAULT '{}',
             created_by TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            idempotency_key TEXT
         );
         CREATE TABLE IF NOT EXISTS information_requests (
             id TEXT PRIMARY KEY,
@@ -110,6 +111,10 @@ def ensure_schema(store: Any) -> None:
         );
         """
     )
+    columns = {row[1] for row in store.db.execute("PRAGMA table_info(stage_reports)")}
+    if columns and "idempotency_key" not in columns:
+        store.db.execute("ALTER TABLE stage_reports ADD COLUMN idempotency_key TEXT")
+    store.db.execute("CREATE UNIQUE INDEX IF NOT EXISTS stage_reports_idem_idx ON stage_reports(idempotency_key) WHERE idempotency_key IS NOT NULL")
     store.db.commit()
     store._coordination_schema_ready = True
 
@@ -136,6 +141,7 @@ def _event(store: Any, project_id: UUID, event_type: str, actor: str, payload: d
 def submit_stage_report(
     store: Any, project_id: UUID, task_id: UUID, agent_id: str, report: dict[str, Any],
     *, run_id: str | None = None, attempt: int = 1, organization_id: str | None = None,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     ensure_schema(store)
     project_id = project_id if isinstance(project_id, UUID) else UUID(str(project_id))
@@ -143,15 +149,22 @@ def submit_stage_report(
     if errors:
         raise CoordinationStoreError("stage_report_invalid", errors)
     organization_id = organization_id or _project_org(store, project_id)
+    # 幂等（D3）：同一 idempotency_key 的重复提交返回**原报告**，不重复记账
+    if idempotency_key:
+        existing = store.db.execute(
+            "SELECT * FROM stage_reports WHERE idempotency_key = ?", (idempotency_key,)
+        ).fetchone()
+        if existing is not None:
+            return {**_report_view(existing), "duplicate": True}
     report_id = str(uuid4())
     timestamp = _now()
     store.db.execute(
-        "INSERT INTO stage_reports (id, organization_id, project_id, task_id, run_id, attempt, status, summary, payload, created_by, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO stage_reports (id, organization_id, project_id, task_id, run_id, attempt, status, summary, payload, created_by, created_at, idempotency_key)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             report_id, organization_id, str(project_id), str(task_id), run_id, int(attempt),
             str(report["status"]), str(report.get("summary") or ""),
-            json.dumps(report, ensure_ascii=False), agent_id, timestamp,
+            json.dumps(report, ensure_ascii=False), agent_id, timestamp, idempotency_key,
         ),
     )
     store.db.commit()
@@ -228,6 +241,8 @@ def create_information_request(
     request_id = str(uuid4())
     timestamp = _now()
     blocking = str(request["blocking"])
+    # 边界字符串化：requester_task_id 可能是 UUID 对象（sqlite 不认）
+    requester_task_id = str(body.get("requester_task_id")) if body.get("requester_task_id") else None
     node_effect = "WAITING:information_requested" if blocking == "required" else ""
     store.db.execute(
         "INSERT INTO information_requests (id, organization_id, project_id, run_id, requester_node_id, requester_task_id,"
@@ -236,7 +251,7 @@ def create_information_request(
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'OPEN', ?, ?, ?, ?, ?, ?)",
         (
             request_id, organization_id, str(project_id), run_id, body.get("requester_node_id"),
-            body.get("requester_task_id"), requester_agent_id, body.get("provider_agent_id"),
+            requester_task_id, requester_agent_id, body.get("provider_agent_id"),
             body.get("provider_capability"), str(request["request_type"]), str(request["question"]),
             blocking, str(request.get("reason") or ""), node_effect,
             json.dumps(request, ensure_ascii=False), body.get("correlation_id"), idempotency_key,
@@ -300,6 +315,11 @@ def ack_information_request(store: Any, request_id: UUID, provider_agent_id: str
     if outcome not in ("received", "rejected", "unable_to_execute"):
         raise CoordinationStoreError("ack_outcome_invalid", [f"outcome: {outcome!r} 不在 received/rejected/unable_to_execute"])
     row = _load_request(store, request_id)
+    if str(row["status"]) == "ACKNOWLEDGED" and outcome == "received":
+        # 重复 ACK：返回原状态（幂等，D3 重复投递不双写）
+        return {**_request_view(row), "ack_outcome": "received", "duplicate": True}
+    if str(row["status"]) == "REJECTED" and outcome == "rejected":
+        return {**_request_view(row), "ack_outcome": "rejected", "duplicate": True}
     if row["status"] not in {"OPEN", "ROUTED", "ACKNOWLEDGED"}:
         raise CoordinationStoreError("request_status_invalid", [f"status={row['status']} 不可 ACK"])
     if outcome == "received":

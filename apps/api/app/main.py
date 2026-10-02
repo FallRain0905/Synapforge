@@ -1455,7 +1455,8 @@ def submit_stage_report(agent_id: str, task_id: UUID, data: StageReportSubmit, r
     _require_agent_capability(request, project_id, "task.progress", agent_id)
     try:
         return coordination_store.submit_stage_report(
-            store, project_id, task_id, agent_id, data.report, run_id=data.run_id, attempt=data.attempt
+            store, project_id, task_id, agent_id, data.report, run_id=data.run_id,
+            attempt=data.attempt, idempotency_key=data.idempotency_key,
         )
     except coordination_store.CoordinationStoreError as error:
         raise _coordination_http_error(error) from error

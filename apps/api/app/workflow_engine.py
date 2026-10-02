@@ -254,6 +254,9 @@ def advance_run(store: Any, project_id: UUID, run_id: UUID, actor: str) -> dict[
     if row["status"] != "RUNNING":
         raise WorkflowEngineError("workflow_run_not_running")
 
+    # D3：过期信息请求先显式化（OPEN/ROUTED/ACKNOWLEDGED 超过 deadline → EXPIRED + 事件）
+    coordination_store.expire_overdue_requests(store, project_id, actor=actor)
+
     gates = _node_gate(store, project_id, definition, node_tasks, actor)
     retried = _bounded_retry(store, project_id, definition, node_tasks, engine_state, actor)
 

@@ -1458,6 +1458,7 @@ class StageReportSubmit(APIModel):
     report: dict[str, Any]
     run_id: str | None = Field(default=None, max_length=160)
     attempt: int = Field(default=1, ge=1, le=100)
+    idempotency_key: str | None = Field(default=None, max_length=160)
 
 
 class InformationRequestCreate(APIModel):
