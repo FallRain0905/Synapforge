@@ -4452,7 +4452,7 @@ class Store:
         if self._deadline_passed(row):
             raise ValueError("task_deadline_passed")
         if row["status"] not in {"READY", "NEEDS_REVISION"}:
-            raise ValueError("task_not_claimable")
+            raise ValueError(f"task_not_claimable:status={row['status']}")
         self._assert_task_claimable_inputs(self.get_task(task_id))
         active = self._active_lease_for_task(task_id)
         if active:

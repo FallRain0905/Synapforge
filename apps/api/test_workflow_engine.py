@@ -45,7 +45,8 @@ def engine_definition() -> dict:
                 "outputs": [{"name": "result_table", "artifact_type": "result_table", "path": "outputs/result.csv"}],
                 "gate_policy": "solve-gate",
                 "budget": {"max_attempts": 2},
-                "retry_policy": {"backoff_seconds": 0, "on_fail": "retry"},
+                "on_fail": "retry",
+                "retry_policy": {"backoff_seconds": 0},
             },
         ],
         "gate_policies": [
