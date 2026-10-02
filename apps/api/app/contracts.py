@@ -1452,6 +1452,19 @@ class WorkflowUpsert(APIModel):
     definition: dict[str, Any]
 
 
+class FeasibilityConcernRaise(APIModel):
+    """可行性异议提交（D3，计划 §6.5.2）：结构由 coordination.validate_feasibility_concern 校验。"""
+
+    concern: dict[str, Any]
+    run_id: str | None = Field(default=None, max_length=160)
+    node_id: str | None = Field(default=None, max_length=160)
+    task_id: UUID | None = None
+
+
+class FeasibilityConcernDecide(APIModel):
+    decision: dict[str, Any]
+
+
 class StageReportSubmit(APIModel):
     """阶段报告提交（D1）：结构由 coordination.validate_stage_report 权威校验。"""
 

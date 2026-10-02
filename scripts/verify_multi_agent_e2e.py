@@ -462,6 +462,38 @@ def main() -> int:
               consumed[0] == 200 and json.loads(consumed[1])["node_effect_result"]["effect"] == "RUNNING",
               consumed[1][:160])
 
+        # 可行性异议真实闭环（计划 §6.5.2 场景二）：B 发现约束 2 与上游矛盾 →
+        # 结构化异议（证据+建议）→ 节点 BLOCKED → 决策（带假设继续）→ 恢复执行
+        concern = call(base, f"/api/agents/e2e-agent-b/feasibility-concerns?project_id={project_id}",
+                       "POST", {
+            "concern": {"concern_type": "acceptance_conflict",
+                        "claim": "约束 2（步长 0.1）与验收精度要求冲突",
+                        "basis": ["artifact:" + model_art],
+                        "observations": ["实测步长 0.1 时精度不达标"],
+                        "unverified_assumptions": ["步长 0.05 或可满足"],
+                        "impact": {"current_node": "blocked", "downstream_nodes": ["review"]},
+                        "recommendation": "revise_task",
+                        "can_continue_safely": False,
+                        "continued_under_assumption": False},
+            "run_id": wf_run["run_id"], "node_id": "code",
+            "task_id": wf_tasks["code"],
+        }, token=member_token, agent=as_agent("e2e-agent-b", token_b))
+        check("B 提交可行性异议（保留证据）", concern[0] == 201, f"HTTP {concern[0]} {concern[1][:160]}")
+        concern_body = json.loads(concern[1])
+        check("不能安全继续 → 节点立即 BLOCKED", concern_body["node_effect"] == "BLOCKED")
+
+        decided = call(base, f"/api/projects/{project_id}/feasibility-concerns/{concern_body['concern_id']}/decide",
+                       "POST", {
+            "decision": {"policy": "continue_with_assumption",
+                         "basis": ["复核确认步长 0.05 方案可行"],
+                         "created_at": "2026-10-02T12:00:00+00:00",
+                         "expected_events": ["project.feasibility_concern.decided"]},
+        }, token=member_token)
+        check("决策者选 continue_with_assumption（报告者只建议，决策者拍板）", decided[0] == 200,
+              f"HTTP {decided[0]} {decided[1][:160]}")
+        # 决策后节点恢复 READY（带假设继续），B 重新领取走完
+        call(base, f"/api/tasks/{wf_tasks['code']}?status=READY", "PATCH", token=member_token)
+
         # code 节点收尾：两个产物（code + result_table，C 对照清单②1）→ 结果
         for art_name, art_type in (("code-result.zip", "code"), ("result-table.csv", "result_table")):
             art = call(base, f"/api/projects/{project_id}/artifacts", "POST", {

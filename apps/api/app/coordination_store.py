@@ -35,6 +35,9 @@ __all__ = [
     "expire_overdue_requests",
     "list_information_requests",
     "record_decision",
+    "raise_feasibility_concern",
+    "decide_feasibility_concern",
+    "list_feasibility_concerns",
     "list_decisions",
     "build_workflow_view",
 ]
@@ -98,6 +101,21 @@ def ensure_schema(store: Any) -> None:
         );
         CREATE UNIQUE INDEX IF NOT EXISTS information_requests_idem_idx
             ON information_requests(idempotency_key) WHERE idempotency_key IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS feasibility_concerns (
+            id TEXT PRIMARY KEY,
+            organization_id TEXT NOT NULL,
+            project_id TEXT NOT NULL REFERENCES projects(id),
+            run_id TEXT,
+            node_id TEXT,
+            task_id TEXT,
+            reporter_agent_id TEXT NOT NULL,
+            concern_type TEXT NOT NULL,
+            claim TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'NEEDS_DECISION',
+            payload TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS orchestration_decisions (
             id TEXT PRIMARY KEY,
             organization_id TEXT NOT NULL,
@@ -480,6 +498,129 @@ def list_information_requests(store: Any, project_id: UUID, *, agent_id: str | N
     return [_request_view(row) for row in store.db.execute(query, params).fetchall()]
 
 
+# ---- 可行性异议真实闭环（计划 §6.5.2：Agent 质疑前提 → Orchestrator 决策 → 诚实处置）--
+
+
+def raise_feasibility_concern(
+    store: Any, project_id: UUID, reporter_agent_id: str, concern: dict[str, Any],
+    *, run_id: str | None = None, node_id: str | None = None, task_id: str | None = None,
+    organization_id: str | None = None,
+) -> dict[str, Any]:
+    """Agent 提交可行性异议：结构校验（D0）→ 落库 → 事实事件 → 节点按 can_continue_safely 处置。
+
+    can_continue_safely=false 时节点至少进 BLOCKED（计划 §6.5.2 规则 2：
+    平台不能因为 Agent 仍在发心跳就显示为正常执行）。
+    """
+
+    ensure_schema(store)
+    errors = coordination.validate_feasibility_concern(concern)
+    if errors:
+        raise CoordinationStoreError("feasibility_concern_invalid", errors)
+    # 边界字符串化（第三次踩同型坑：路由把 UUID 对象直接传进来，sqlite 不认）
+    project_id = project_id if isinstance(project_id, UUID) else UUID(str(project_id))
+    organization_id = str(organization_id) if organization_id else _project_org(store, project_id)
+    run_id = str(run_id) if run_id else None
+    node_id = str(node_id) if node_id else None
+    task_id = str(task_id) if task_id else None
+    concern_id = str(uuid4())
+    timestamp = _now()
+    can_continue = bool(concern.get("can_continue_safely"))
+    store.db.execute(
+        "INSERT INTO feasibility_concerns (id, organization_id, project_id, run_id, node_id, task_id,"
+        " reporter_agent_id, concern_type, claim, payload, status, created_at, updated_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'NEEDS_DECISION', ?, ?)",
+        (
+            concern_id, organization_id, str(project_id), run_id, node_id, task_id,
+            reporter_agent_id, str(concern["concern_type"]), str(concern["claim"]),
+            json.dumps(concern, ensure_ascii=False), timestamp, timestamp,
+        ),
+    )
+    # 节点处置：不能安全继续 → BLOCKED 带原因（证据保留在异议记录里）
+    if not can_continue and task_id:
+        store.db.execute(
+            "UPDATE tasks SET status = 'BLOCKED', blocked_reason = ?, updated_at = ? WHERE id = ?",
+            (f"feasibility_concern:{concern_id}", timestamp, str(task_id)),
+        )
+    store.db.commit()
+    _event(store, project_id, "project.feasibility_concern.raised", reporter_agent_id,
+           {"concern_id": concern_id, "node_id": node_id, "concern_type": concern["concern_type"],
+            "claim": str(concern["claim"])[:200], "can_continue_safely": can_continue,
+            "recommendation": str(concern.get("recommendation") or "")},
+           actor_kind="agent", object_type="task", object_id=task_id)
+    return {**_concern_view(_load_concern(store, concern_id)), "node_effect": ("BLOCKED" if not can_continue else "RUNNING")}
+
+
+def _load_concern(store: Any, concern_id: str) -> Any:
+    row = store.db.execute("SELECT * FROM feasibility_concerns WHERE id = ?", (str(concern_id),)).fetchone()
+    if row is None:
+        raise CoordinationStoreError("concern_not_found")
+    return row
+
+
+def _concern_view(row: Any) -> dict[str, Any]:
+    return {
+        "concern_id": str(row["id"]),
+        "project_id": str(row["project_id"]),
+        "run_id": row["run_id"],
+        "node_id": row["node_id"],
+        "task_id": row["task_id"],
+        "reporter_agent_id": str(row["reporter_agent_id"]),
+        "concern_type": str(row["concern_type"]),
+        "claim": str(row["claim"]),
+        "status": str(row["status"]),
+        "payload": json.loads(row["payload"] or "{}"),
+        "created_at": str(row["created_at"]),
+    }
+
+
+def decide_feasibility_concern(
+    store: Any, concern_id: UUID, orchestrator_actor: str, decision: dict[str, Any],
+) -> dict[str, Any]:
+    """Orchestrator 对异议做出决策（唯一决策者；否定也要记录依据，不删原报告）。"""
+
+    ensure_schema(store)
+    row = _load_concern(store, str(concern_id))
+    if str(row["status"]) != "NEEDS_DECISION":
+        raise CoordinationStoreError("concern_status_invalid", [f"status={row['status']} 不可决策"])
+    decision = dict(decision)
+    decision.setdefault("decision_id", f"dec-concern-{str(concern_id)[:8]}")
+    errors = coordination.validate_orchestration_decision(decision)
+    if errors:
+        raise CoordinationStoreError("orchestration_decision_invalid", errors)
+    store.db.execute(
+        "UPDATE feasibility_concerns SET status = 'DECIDED', payload = ?, updated_at = ? WHERE id = ?",
+        (json.dumps({**json.loads(row["payload"] or "{}"), "orchestrator_decision": decision}, ensure_ascii=False),
+         _now(), str(concern_id)),
+    )
+    stop_reason = decision.get("stop_reason")
+    if decision.get("policy") == "stop" and stop_reason:
+        run_row = store.db.execute(
+            "SELECT id FROM project_workflow_runs WHERE id = ?", (row["run_id"],)
+        ).fetchone() if row["run_id"] else None
+        if run_row:
+            store.db.execute(
+                "UPDATE project_workflow_runs SET status = 'FAILED', updated_at = ? WHERE id = ?",
+                (_now(), str(row["run_id"])),
+            )
+    store.db.commit()
+    _event(store, UUID(row["project_id"]), "project.feasibility_concern.decided", orchestrator_actor,
+           {"concern_id": str(concern_id), "decision_id": decision["decision_id"],
+            "policy": decision["policy"], "stop_reason": stop_reason},
+           actor_kind="system")
+    view = _concern_view(_load_concern(store, str(concern_id)))
+    view["decision"] = decision
+    return view
+
+
+def list_feasibility_concerns(store: Any, project_id: UUID, *, open_only: bool = False) -> list[dict[str, Any]]:
+    ensure_schema(store)
+    query = "SELECT * FROM feasibility_concerns WHERE project_id = ?"
+    if open_only:
+        query += " AND status = 'NEEDS_DECISION'"
+    query += " ORDER BY created_at DESC LIMIT 50"
+    return [_concern_view(row) for row in store.db.execute(query, (str(project_id),)).fetchall()]
+
+
 # ---- 编排决策持久化（计划 §阶段 6：所有全局决策可回放）-----------------------------
 
 
@@ -630,6 +771,15 @@ def build_workflow_view(store: Any, project_id: UUID) -> dict[str, Any]:
             })
 
     requests = list_information_requests(store, project_id)
+    # information_request —— 运行时信息请求边（青色虚线：请求方 → 提供方，含状态）
+    for request in requests:
+        edges.append({
+            "kind": "information_request", "source": str(request["requester_task_id"] or request["request_id"]),
+            "target": str(request["provider_agent_id"] or request["request_id"]),
+            "label": f"{request['request_type']} · {request['status']}",
+            "status": request["status"],
+            "blocking": request["blocking"],
+        })
     runtime_requests = [
         {
             "request_id": r["request_id"],

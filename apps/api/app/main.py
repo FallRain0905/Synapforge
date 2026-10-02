@@ -28,6 +28,8 @@ from .contracts import (
     InformationRequestAck,
     InformationRequestCreate,
     InformationRequestRespond,
+    FeasibilityConcernDecide,
+    FeasibilityConcernRaise,
     StageReportSubmit,
     WorkflowPreviewRequest,
     WorkflowRunStart,
@@ -1458,6 +1460,38 @@ def submit_stage_report(agent_id: str, task_id: UUID, data: StageReportSubmit, r
             store, project_id, task_id, agent_id, data.report, run_id=data.run_id,
             attempt=data.attempt, idempotency_key=data.idempotency_key,
         )
+    except coordination_store.CoordinationStoreError as error:
+        raise _coordination_http_error(error) from error
+
+
+@app.post("/api/agents/{agent_id}/feasibility-concerns", response_model=dict[str, Any], status_code=201)
+def raise_feasibility_concern(agent_id: str, project_id: UUID, data: FeasibilityConcernRaise, request: Request) -> dict[str, Any]:
+    """可行性异议提交（计划 §6.5.2）：Agent 质疑前提/不可行——不能安全继续时节点立即 BLOCKED。"""
+
+    _require_agent_capability(request, project_id, "task.progress", agent_id)
+    try:
+        return coordination_store.raise_feasibility_concern(
+            store, project_id, agent_id, data.concern, run_id=data.run_id,
+            node_id=data.node_id, task_id=data.task_id,
+        )
+    except coordination_store.CoordinationStoreError as error:
+        raise _coordination_http_error(error) from error
+
+
+@app.get("/api/agents/{agent_id}/feasibility-concerns", response_model=list[dict[str, Any]])
+def list_feasibility_concerns(agent_id: str, project_id: UUID, request: Request,
+                              open_only: bool = Query(default=False)) -> list[dict[str, Any]]:
+    _require_agent_capability(request, project_id, "task.progress", agent_id)
+    return coordination_store.list_feasibility_concerns(store, project_id, open_only=open_only)
+
+
+@app.post("/api/projects/{project_id}/feasibility-concerns/{concern_id}/decide", response_model=dict[str, Any])
+def decide_feasibility_concern(project_id: UUID, concern_id: UUID, data: FeasibilityConcernDecide, request: Request) -> dict[str, Any]:
+    """Orchestrator/负责人对异议做决策（唯一决策者；否定也记录依据，不删原报告）。"""
+
+    project_or_404(project_id)
+    try:
+        return coordination_store.decide_feasibility_concern(store, concern_id, _request_member_id(request), data.decision)
     except coordination_store.CoordinationStoreError as error:
         raise _coordination_http_error(error) from error
 
