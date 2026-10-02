@@ -55,7 +55,7 @@ class CatalogTests(unittest.TestCase):
     def test_every_event_name_matches_its_family_pattern(self):
         for spec in event_catalog.EVENTS.values():
             self.assertTrue(spec.name.startswith("project."))
-            self.assertRegex(spec.name, r"^project\.[a-z]+\.[a-z_]+$")
+            self.assertRegex(spec.name, r"^project\.[a-z_]+\.[a-z_]+$")
 
     def test_catalog_version_is_positive_int(self):
         self.assertIsInstance(CATALOG_VERSION, int)

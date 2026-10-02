@@ -35,12 +35,14 @@ __all__ = [
 
 
 #: 目录整体版本。每次新增事件时 +1；消费方不得假设两个版本之间没有新事件。
-CATALOG_VERSION = 1
+CATALOG_VERSION = 2
 
-#: 事件族（事件名第二段）。新族属于破坏性演进，需要另行评审。
-EVENT_FAMILIES = ("task", "run", "artifact", "handoff", "review", "gate", "agent")
+#: 事件族（事件名第二段）。新族属于演进：information_request / feasibility_concern
+#: 两个运行时协作族由多 Agent 协作计划 §6.5.3 评审加入（D0 协议冻结配套，v2）。
+EVENT_FAMILIES = ("task", "run", "artifact", "handoff", "review", "gate", "agent",
+                  "information_request", "feasibility_concern")
 
-_EVENT_NAME_RE = re.compile(r"^project\.(?P<family>[a-z]+)\.(?P<action>[a-z_]+)$")
+_EVENT_NAME_RE = re.compile(r"^project\.(?P<family>[a-z_]+)\.(?P<action>[a-z_]+)$")  # v2：族名允许下划线（information_request / feasibility_concern）
 
 
 class UnknownEventError(ValueError):
@@ -92,6 +94,14 @@ EVENTS: dict[str, EventSpec] = {
         _e("project.gate.blocked", "门禁阻塞（含 UNVERIFIED 条目清单）"),
         _e("project.gate.escalated", "门禁升级人工介入"),
         # ---- agent ----
+        _e("project.information_request.created", "运行时信息请求创建（含 blocking 级别与截止时间）"),
+        _e("project.information_request.acked", "信息请求被接收方确认（received/rejected/unable）"),
+        _e("project.information_request.answered", "信息请求获得回复（answered/provisional）"),
+        _e("project.information_request.redirected", "信息请求转问（含转问序号）"),
+        _e("project.information_request.expired", "信息请求超时（转问/升级/阻塞由编排决策）"),
+        _e("project.information_request.consumed", "请求方确认消费回复并继续/阻塞当前节点"),
+        _e("project.feasibility_concern.raised", "Agent 提出可行性异议（含证据与建议处置）"),
+        _e("project.feasibility_concern.decided", "Orchestrator 对异议做出决策（含依据）"),
         _e("project.agent.joined", "Agent 接入项目"),
         _e("project.agent.left", "Agent 断开/退出"),
         _e("project.agent.lease_lost", "租约丢失/被接管（fencing 生效）"),

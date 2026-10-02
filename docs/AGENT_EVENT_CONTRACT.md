@@ -1,6 +1,6 @@
 # 项目事件流契约（AGENT_EVENT_CONTRACT）
 
-> 状态：v1（目录版本 CATALOG_VERSION = 1，由 `apps/api/app/event_catalog.py` 权威定义）
+> 状态：v2（目录版本 CATALOG_VERSION = 2，由 `apps/api/app/event_catalog.py` 权威定义；v2 增补运行时信息请求与可行性异议事件族，D0 协议冻结配套）
 > 所有者：工作包 C（改契约先找 C；A 负责服务端执行，B 负责前端消费）
 > 适用范围：项目级多 Agent 协作事件（`project.*`）。单会话轮次事件
 > （`agent_turn_events`）沿用既有通道，本契约是其"项目级"的姊妹协议，不是替代。
@@ -96,6 +96,14 @@ data: {"event":"project.task.claimed","seq":43,...}
 | gate | `project.gate.blocked` | gate_id, unchecked[] |
 | gate | `project.gate.escalated` | gate_id, reason |
 | agent | `project.agent.joined` | agent_id, capabilities[] |
+| information_request | `project.information_request.created` | request_id, requester_node_id, provider_agent_id/capability, request_type, blocking, response_deadline |
+| information_request | `project.information_request.acked` | request_id, outcome (received/rejected/unable_to_execute) |
+| information_request | `project.information_request.answered` | request_id, response_status (answered/provisional), answer_summary |
+| information_request | `project.information_request.redirected` | request_id, redirect_seq, new_provider |
+| information_request | `project.information_request.expired` | request_id, expires_at |
+| information_request | `project.information_request.consumed` | request_id, node_effect (RUNNING/WAITING/BLOCKED/NEEDS_DECISION) |
+| feasibility_concern | `project.feasibility_concern.raised` | concern_id, node_id, concern_type, basis_refs, can_continue_safely, recommendation |
+| feasibility_concern | `project.feasibility_concern.decided` | concern_id, decision_id, policy, stop_reason |
 | agent | `project.agent.left` | agent_id |
 | agent | `project.agent.lease_lost` | agent_id, task_id |
 
