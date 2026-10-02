@@ -18,6 +18,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from . import acceptance
+from .progress_ledger import DispatchCandidate, resolve_dispatch
 from .contracts import TaskCreate
 
 __all__ = [
@@ -36,7 +37,7 @@ __all__ = [
     "draft_from_project",
 ]
 
-KNOWN_SCHEMA_VERSION = 1
+KNOWN_SCHEMA_VERSION = 2  # v2：节点 condition 字段（D4 additive 演进，v1 定义仍可运行）
 NODE_MODES = {"manual", "hybrid", "auto"}
 BUDGET_KEYS = {"max_seconds", "max_attempts", "max_tokens"}
 _KEY_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789-"
@@ -52,8 +53,37 @@ class WorkflowError(RuntimeError):
         self.errors = errors or []
 
 
+def _previous_role(created: list[dict[str, Any]]) -> str | None:
+    """上一成功物化节点的派发角色（回退链的 previous——连续性优先于声明顺序）。"""
+
+    for item in reversed(created):
+        if item.get("dispatch_role"):
+            return str(item["dispatch_role"])
+    return None
+
+
 def _enum(value: Any) -> str:
     return str(value.value if hasattr(value, "value") else value)
+
+
+def _condition_active(node: dict[str, Any], provided: dict[str, Any]) -> tuple[bool, str]:
+    """v2 条件分支求值：condition 里的 input 在运行输入上比对（equals / in）。
+
+    返回 (是否物化, 原因)。条件不满足的节点**不物化**——下游依赖它的节点靠
+    depends_on 照常解锁（被跳过的分支视作"已完成但无产出"，计划 §阶段 7 语义）。
+    """
+
+    condition = node.get("condition")
+    if condition is None:
+        return True, "unconditional"
+    value = provided.get(str(condition.get("input") or ""))
+    if "equals" in condition:
+        wanted = condition["equals"]
+        return (str(value) == str(wanted)), f"condition {condition.get('input')}={value!r} vs equals {wanted!r}"
+    allowed = condition.get("in") or []
+    return (str(value) in [str(item) for item in allowed]), (
+        f"condition {condition.get('input')}={value!r} vs in {allowed!r}"
+    )
 
 
 def _now() -> str:
@@ -162,8 +192,10 @@ def validate_definition(definition: Any) -> list[str]:
     errors: list[str] = []
     if not isinstance(definition, dict):
         return ["definition: 必须是 JSON 对象"]
-    if definition.get("schema_version") != KNOWN_SCHEMA_VERSION:
-        errors.append(f"schema_version: 仅支持 {KNOWN_SCHEMA_VERSION}（收到 {definition.get('schema_version')!r}）")
+    # v2（D4 additive）：接受 1 与 2——v1 定义继续运行（其节点无 condition 字段）；
+    # v2 新增节点 condition（{input, equals, in?} 单条件）用于条件分支/并行。
+    if definition.get("schema_version") not in (1, 2):
+        errors.append(f"schema_version: 仅支持 1 或 2（收到 {definition.get('schema_version')!r}）")
 
     workflow = definition.get("workflow")
     if not isinstance(workflow, dict) or not str(workflow.get("key") or "").strip():
@@ -301,6 +333,20 @@ def validate_definition(definition: Any) -> list[str]:
         # 规则 7：交付节点（声明 delivery_adapter 且无下游消费者）至少一个输出
         if adapter_ref and node_id not in downstream_ids and not (node.get("outputs") or []):
             errors.append(f"node:{node_id}: 交付节点必须至少声明一个输出")
+        # v2（D4）：节点 condition——条件分支的条件定义（单条件：input + equals/in）
+        condition = node.get("condition")
+        if condition is not None:
+            if not isinstance(condition, dict):
+                errors.append(f"node:{node_id}: condition 必须是对象 {{input, equals?, in?}}")
+            else:
+                if not str(condition.get("input") or "").strip():
+                    errors.append(f"node:{node_id}: condition.input 必填（工作流输入名）")
+                if "equals" not in condition and "in" not in condition:
+                    errors.append(f"node:{node_id}: condition 需要 equals 或 in 之一")
+                if "in" in condition and not isinstance(condition.get("in"), list):
+                    errors.append(f"node:{node_id}: condition.in 必须是数组")
+                if definition.get("schema_version", 1) < 2:
+                    errors.append(f"node:{node_id}: condition 需要 schema_version=2")
 
     # 规则 4：DAG 无环 + 全部可达（Kahn）
     indegree = {nid: 0 for nid in node_by_id}
@@ -418,6 +464,7 @@ def add_workflow_version(store: Any, workflow_id: UUID, actor: str, definition: 
 
 def get_workflow(store: Any, workflow_id: UUID, organization_id: str) -> dict[str, Any]:
     ensure_schema(store)
+    organization_id = str(organization_id)  # 路由可能传 UUID 对象（sqlite 不认）
     row = store.db.execute(
         "SELECT * FROM workflows WHERE id = ? AND organization_id = ?", (str(workflow_id), organization_id)
     ).fetchone()
@@ -428,6 +475,7 @@ def get_workflow(store: Any, workflow_id: UUID, organization_id: str) -> dict[st
 
 def list_workflows(store: Any, organization_id: str) -> list[dict[str, Any]]:
     ensure_schema(store)
+    organization_id = str(organization_id)  # 路由可能传 UUID 对象（sqlite 不认）
     rows = store.db.execute(
         "SELECT * FROM workflows WHERE organization_id = ? ORDER BY updated_at DESC", (organization_id,)
     ).fetchall()
@@ -473,8 +521,23 @@ def start_workflow_run(
     )
 
     binding_by_id = {str(b.get("id")): b for b in definition.get("role_bindings", []) if isinstance(b, dict) and b.get("id")}
+    # 派发候选：每个角色绑定一个候选，能力 = 该绑定声明的 capability_requirements
+    dispatch_candidates = [
+        DispatchCandidate(
+            role_id=str(b.get("id")),
+            name=str(b.get("role_name") or b.get("id")),
+            capabilities=frozenset(str(c) for c in (b.get("capability_requirements") or [])),
+        )
+        for b in definition.get("role_bindings", [])
+        if isinstance(b, dict) and b.get("id")
+    ]
     node_tasks: dict[str, str] = {}
     created: list[dict[str, Any]] = []
+    dispatch_decisions: list[dict[str, Any]] = []
+    from . import coordination_store
+
+    coordination_store.ensure_schema(store)  # 派发决策落库前建表
+
     # 拓扑序物化（依赖的任务 id 先生成才能挂 dependency_task_ids）
     pending = {str(n["id"]): n for n in definition.get("nodes", []) if isinstance(n, dict) and n.get("id")}
     while pending:
@@ -484,7 +547,25 @@ def start_workflow_run(
             deps = [str(d) for d in (node.get("depends_on") or [])]
             if any(dep in pending for dep in deps):
                 continue
+            active, cond_reason = _condition_active(node, inputs or {})
+            if not active:
+                # 条件分支不满足：跳过物化（记入 created 供解释，不建任务）
+                created.append({"node_id": node_id, "task_id": None, "mode": "skipped",
+                                "reason": cond_reason})
+                pending.pop(node_id)
+                progressed = True
+                continue
             binding = binding_by_id.get(str(node.get("role_binding") or ""), {})
+            # 派发回退链（D4 接线，C 的 progress_ledger.resolve_dispatch）：
+            # 指定角色 → 能力匹配 → 上一角色 → 首个可用 → 人工；决策持久化可回放。
+            requested = str(node.get("role_binding") or "") or None
+            previous = node_tasks and _previous_role(created) or None
+            decision = resolve_dispatch(
+                candidates=dispatch_candidates,
+                required_capabilities=[str(item) for item in (binding.get("capability_requirements") or [])],
+                requested_role=requested,
+                previous_role=previous,
+            )
             template = str((node.get("prompt") or {}).get("task_template") or node.get("goal") or "")
             for name, value in (inputs or {}).items():
                 template = template.replace("{{input." + str(name) + "}}", str(value))
@@ -501,7 +582,18 @@ def start_workflow_run(
                 actor=actor,
             )
             node_tasks[node_id] = str(task.id)
-            created.append({"node_id": node_id, "task_id": str(task.id), "mode": str(node.get("mode") or "")})
+            created.append({"node_id": node_id, "task_id": str(task.id), "mode": str(node.get("mode") or ""),
+                            "dispatch_source": decision.source, "dispatch_role": decision.role_id,
+                            "dispatch_reason": decision.reason})
+            dispatch_decisions.append(
+                {
+                    "decision_id": f"dec-dispatch-{node_id}",
+                    "policy": "dispatch",
+                    "basis": [decision.reason],
+                    "created_at": _now(),
+                    "expected_events": ["project.task.created"],
+                }
+            )
             pending.pop(node_id)
             progressed = True
         if not progressed:
@@ -511,6 +603,22 @@ def start_workflow_run(
         "UPDATE project_workflow_runs SET node_tasks = ?, updated_at = ? WHERE id = ?",
         (json.dumps(node_tasks, ensure_ascii=False), _now(), run_id),
     )
+    # 派发决策持久化（可回放；失败不炸物化）
+    for decision in dispatch_decisions:
+        try:
+            store.db.execute(
+                "INSERT INTO orchestration_decisions (id, organization_id, project_id, run_id, node_id, task_id, policy, basis, expected_events, stop_reason, payload, created_by, created_at)"
+                " VALUES (?, ?, ?, ?, ?, NULL, 'dispatch', ?, ?, NULL, ?, ?, ?)",
+                (
+                    decision["decision_id"], organization_id, str(project_id), run_id,
+                    next((item["node_id"] for item in created if item.get("dispatch_reason") == decision["basis"][0]), None),
+                    json.dumps(decision["basis"], ensure_ascii=False),
+                    json.dumps(decision["expected_events"], ensure_ascii=False),
+                    json.dumps(decision, ensure_ascii=False), actor, _now(),
+                ),
+            )
+        except Exception as error:  # noqa: BLE001 - 决策记录失败不炸物化
+            print(f"[workflow_service] dispatch decision persist failed: {error}")
     store.db.commit()
     return {
         "run_id": run_id,
@@ -519,6 +627,8 @@ def start_workflow_run(
         "workflow_key": str(workflow_row["key"]),
         "status": "RUNNING",
         "tasks": created,
+        "skipped_nodes": [item for item in created if item.get("mode") == "skipped"],
+        "dispatch_decisions": dispatch_decisions,
         # 诚实标注（schema §1 规则 1）：这是任务/成果物骨架
         "note": "已生成任务骨架，待执行与审核；应用模板不等于得到结果",
     }
@@ -562,11 +672,8 @@ def get_workflow_run(store: Any, project_id: UUID, run_id: UUID) -> dict[str, An
             node_statuses[node_id] = str(status.value if hasattr(status, "value") else status)
     view["node_statuses"] = node_statuses
     ledger = state.get("ledger") or {}
-    view["ledger"] = {
-        "round": ledger.get("round", 0),
-        "stall_count": ledger.get("stall_count", 0),
-        "needs_replan": ledger.get("needs_replan", False),
-    }
+    # 完整账本快照（ProgressLedger JSON，check_ledger_snapshot 的单一权威形状）
+    view["ledger"] = ledger
     version_row = store.db.execute(
         "SELECT definition FROM workflow_versions WHERE id = ?", (row["workflow_version_id"],)
     ).fetchone()
@@ -631,9 +738,12 @@ def preview_definition(definition: Any, inputs: dict[str, Any] | None = None) ->
         for leaf in _flat_leaves(gate_spec):
             if str(leaf).lower().startswith("tests_passed:"):
                 tests_gates += 1
+        active, cond_reason = _condition_active(node, inputs or {})
         plan_nodes.append(
             {
                 "node_id": node_id,
+                "condition_active": active if node.get("condition") else None,
+                "condition_reason": cond_reason if node.get("condition") else None,
                 "title": str(node.get("title") or node_id),
                 "stage_id": str(node.get("stage_id") or ""),
                 "mode": mode,
