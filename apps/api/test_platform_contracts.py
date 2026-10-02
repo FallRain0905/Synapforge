@@ -70,6 +70,7 @@ class PlatformContractTests(unittest.TestCase):
                 "035_artifact_receipt.sql",
                 "036_workflow_packages.sql",
                 "037_workflow_engine.sql",
+                "038_coordination_storage.sql",
             ],
         )
         initial = files[0].read_text(encoding="utf-8").lower()

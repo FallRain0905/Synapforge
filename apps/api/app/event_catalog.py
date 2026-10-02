@@ -35,12 +35,12 @@ __all__ = [
 
 
 #: 目录整体版本。每次新增事件时 +1；消费方不得假设两个版本之间没有新事件。
-CATALOG_VERSION = 2
+CATALOG_VERSION = 3
 
 #: 事件族（事件名第二段）。新族属于演进：information_request / feasibility_concern
 #: 两个运行时协作族由多 Agent 协作计划 §6.5.3 评审加入（D0 协议冻结配套，v2）。
 EVENT_FAMILIES = ("task", "run", "artifact", "handoff", "review", "gate", "agent",
-                  "information_request", "feasibility_concern")
+                  "information_request", "feasibility_concern", "stage_report")
 
 _EVENT_NAME_RE = re.compile(r"^project\.(?P<family>[a-z_]+)\.(?P<action>[a-z_]+)$")  # v2：族名允许下划线（information_request / feasibility_concern）
 
@@ -93,6 +93,8 @@ EVENTS: dict[str, EventSpec] = {
         _e("project.gate.passed", "门禁通过"),
         _e("project.gate.blocked", "门禁阻塞（含 UNVERIFIED 条目清单）"),
         _e("project.gate.escalated", "门禁升级人工介入"),
+        # ---- stage_report ----
+        _e("project.stage_report.submitted", "阶段报告提交（进入接收方审核，不是批准结论）"),
         # ---- agent ----
         _e("project.information_request.created", "运行时信息请求创建（含 blocking 级别与截止时间）"),
         _e("project.information_request.acked", "信息请求被接收方确认（received/rejected/unable）"),

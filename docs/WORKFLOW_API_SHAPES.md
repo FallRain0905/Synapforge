@@ -20,6 +20,14 @@
 | GET | `/api/projects/{project_id}/workflow-runs` | 运行列表（最近 50） | 200 |
 | GET | `/api/projects/{project_id}/workflow-runs/{run_id}` | 运行详情 | 200 |
 | POST | `/api/projects/{project_id}/workflow-runs/{run_id}/advance` | 推进一轮 | 200 |
+| POST | `/api/agents/{agent_id}/tasks/{task_id}/stage-report` | 阶段报告提交（D1） | 201 |
+| GET | `/api/agents/{agent_id}/tasks/{task_id}/stage-reports` | 任务报告列表 | 200 |
+| POST | `/api/agents/{agent_id}/information-requests` | 创建运行时信息请求（project_id 为查询参数） | 201 |
+| GET | `/api/agents/{agent_id}/information-requests` | 请求收件箱（agent_id+project_id 过滤） | 200 |
+| POST | `/api/agents/{agent_id}/information-requests/{request_id}/ack` | ACK（received/rejected/unable） | 200 |
+| POST | `/api/agents/{agent_id}/information-requests/{request_id}/respond` | 回复（answered/provisional/unavailable/rejected） | 200 |
+| POST | `/api/agents/{agent_id}/information-requests/{request_id}/consume` | 请求方消费回复 | 200 |
+| GET | `/api/projects/{project_id}/workflow-view` | 流程图聚合（可视化 V1 契约） | 200 |
 
 鉴权：member 会话（`Authorization: Bearer`）；项目侧路由先过 `project_or_404`（无权 → 403）。
 
@@ -135,6 +143,8 @@ gate_policies/handoff_contracts/delivery_adapters）。**前端不要从响应�
 - 推进错误：`{"detail": "<code>"}`，404 `workflow_run_not_found` / `workflow_version_not_found`，
   409 `workflow_run_not_running`。
 - 试运行（preview）：`{"valid": bool, "errors": [...], "warnings": [...], "plan": {workflow, inputs_provided, nodes[{node_id,title,stage_id,mode,role_binding,resolved_prompt,depends_on,outputs,gate_policy,budget,on_fail,human_intervention,delivery_adapter,requires_human}], edges}}`；定义非法时 valid=false + plan=null（**HTTP 200**，错误在结果体里）。
+- 信息请求错误：429 `information_request_budget_exceeded`（预算超限）、403 `request_provider_mismatch`/`request_consumer_mismatch`、409 `request_status_invalid`；错误形状同工作流错误（code+errors 数组）。
+- workflow-view（V1 契约）：`{project_id, workflow{key,version_id,state}, summary{状态计数}, stages[], nodes[{id,kind,stage_id,task_id,title,status,mode,assignee,blocked_reason,budget}], edges[{kind,source,target,label}], runtime_requests[], blocking_chains[], runs[]}`——节点/边来自服务端权威对象，阻断链服务端计算（前端不自行猜）。
 - 反向草稿：`{"definition", "validation_errors": [], "task_count", "note"}`（草稿过 schema §4 校验，发布走 `POST /api/workflows`）；空项目 422 `workflow_draft_empty`。
 
 ## 6. 页面状态映射建议（W3.7）

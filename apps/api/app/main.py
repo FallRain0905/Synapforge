@@ -25,6 +25,10 @@ from .contracts import (
     AgentChatMessageCreate,
     AgentConversationPromote,
     AgentConversationPromoteResult,
+    InformationRequestAck,
+    InformationRequestCreate,
+    InformationRequestRespond,
+    StageReportSubmit,
     WorkflowPreviewRequest,
     WorkflowRunStart,
     WorkflowUpsert,
@@ -193,7 +197,7 @@ from .path_privacy import public_agent, public_artifact, public_run
 from . import archive, drive, drive_grants, file_transfers, llm_channels, workspace_files
 from .cumcm_importer import CumcmHandoffImporter, CumcmImporter
 from .gateway import GatewayProtocolError, GatewayService
-from . import agent_chat, ai_chat, ai_probe, boundary_gate, builtin_workflows, collaboration, convert_queue, delivery, document_api, kb_gateway, knowledge_base, observability, pack_api, personal_drive, project_team, stream_bridge, workflow_engine, workflow_service
+from . import agent_chat, ai_chat, ai_probe, boundary_gate, builtin_workflows, collaboration, coordination_store, convert_queue, delivery, document_api, kb_gateway, knowledge_base, observability, pack_api, personal_drive, project_team, stream_bridge, workflow_engine, workflow_service
 from .contracts import LlmChannelCreate, LlmChannelUpdate, LlmQuotaSet
 from packages.competition_packs import CompetitionPackError
 
@@ -1420,6 +1424,110 @@ def workflow_draft_from_project(project_id: UUID) -> dict[str, Any]:
         raise _workflow_http_error(error) from error
 
 
+# ---- 协作协议接线（D1：阶段报告 / 运行时信息请求；协议权威 coordination.py）--------
+
+
+def _coordination_http_error(error: coordination_store.CoordinationStoreError) -> HTTPException:
+    status = {
+        "stage_report_invalid": 422,
+        "information_request_invalid": 422,
+        "information_response_invalid": 422,
+        "orchestration_decision_invalid": 422,
+        "workflow_draft_empty": 422,
+        "information_request_budget_exceeded": 429,
+        "request_not_found": 404,
+        "request_status_invalid": 409,
+        "request_provider_mismatch": 403,
+        "request_consumer_mismatch": 403,
+        "project_not_found": 404,
+    }.get(error.code, 400)
+    return HTTPException(status_code=status, detail={"code": error.code, "errors": error.errors})
+
+
+@app.post("/api/agents/{agent_id}/tasks/{task_id}/stage-report", response_model=dict[str, Any], status_code=201)
+def submit_stage_report(agent_id: str, task_id: UUID, data: StageReportSubmit, request: Request) -> dict[str, Any]:
+    """阶段报告提交（D1）：结构校验后落库并发事实事件——报告进入接收方审核，不是批准结论。"""
+
+    try:
+        project_id = store.get_task(task_id).project_id
+    except Exception as error:
+        raise task_protocol_error(error) from error
+    _require_agent_capability(request, project_id, "task.progress", agent_id)
+    try:
+        return coordination_store.submit_stage_report(
+            store, project_id, task_id, agent_id, data.report, run_id=data.run_id, attempt=data.attempt
+        )
+    except coordination_store.CoordinationStoreError as error:
+        raise _coordination_http_error(error) from error
+
+
+@app.get("/api/agents/{agent_id}/tasks/{task_id}/stage-reports", response_model=list[dict[str, Any]])
+def list_stage_reports(agent_id: str, task_id: UUID, request: Request) -> list[dict[str, Any]]:
+    try:
+        project_id = store.get_task(task_id).project_id
+    except Exception as error:
+        raise task_protocol_error(error) from error
+    _require_agent_capability(request, project_id, "task.progress", agent_id)
+    return coordination_store.get_stage_reports(store, project_id, task_id)
+
+
+@app.post("/api/agents/{agent_id}/information-requests", response_model=dict[str, Any], status_code=201)
+def create_information_request(agent_id: str, project_id: UUID, data: InformationRequestCreate, request: Request) -> dict[str, Any]:
+    """运行时信息请求（计划 §6.5.1）：Agent 执行中主动向同伴请求上下文/事实/决策。"""
+
+    _require_agent_capability(request, project_id, "task.progress", agent_id)
+    try:
+        return coordination_store.create_information_request(store, project_id, agent_id, data.model_dump(mode="json"))
+    except coordination_store.CoordinationStoreError as error:
+        raise _coordination_http_error(error) from error
+
+
+@app.get("/api/agents/{agent_id}/information-requests", response_model=list[dict[str, Any]])
+def list_information_requests(agent_id: str, project_id: UUID, request: Request,
+                              open_only: bool = Query(default=False)) -> list[dict[str, Any]]:
+    _require_agent_capability(request, project_id, "task.progress", agent_id)
+    return coordination_store.list_information_requests(store, project_id, agent_id=agent_id, open_only=open_only)
+
+
+@app.post("/api/agents/{agent_id}/information-requests/{request_id}/ack", response_model=dict[str, Any])
+def ack_information_request(agent_id: str, request_id: UUID, data: InformationRequestAck, request: Request) -> dict[str, Any]:
+    # 鉴权：请求行的项目范围 + 调用方能力令牌（行级取项目，不信任查询参数）
+    row = coordination_store.get_request(store, request_id)
+    _require_agent_capability(request, UUID(row["project_id"]), "task.progress", agent_id)
+    try:
+        return coordination_store.ack_information_request(store, request_id, agent_id, data.outcome)
+    except coordination_store.CoordinationStoreError as error:
+        raise _coordination_http_error(error) from error
+
+
+@app.post("/api/agents/{agent_id}/information-requests/{request_id}/respond", response_model=dict[str, Any])
+def respond_information_request(agent_id: str, request_id: UUID, data: InformationRequestRespond, request: Request) -> dict[str, Any]:
+    row = coordination_store.get_request(store, request_id)
+    _require_agent_capability(request, UUID(row["project_id"]), "task.progress", agent_id)
+    try:
+        return coordination_store.respond_information_request(store, request_id, agent_id, data.response)
+    except coordination_store.CoordinationStoreError as error:
+        raise _coordination_http_error(error) from error
+
+
+@app.post("/api/agents/{agent_id}/information-requests/{request_id}/consume", response_model=dict[str, Any])
+def consume_information_request(agent_id: str, request_id: UUID, request: Request) -> dict[str, Any]:
+    """请求方确认消费回复：节点效果由 decide_node_effect 决定（required → RUNNING/WAITING/BLOCKED）。"""
+
+    row = coordination_store.get_request(store, request_id)
+    _require_agent_capability(request, UUID(row["project_id"]), "task.progress", agent_id)
+    try:
+        return coordination_store.consume_information_request(store, request_id, agent_id)
+    except coordination_store.CoordinationStoreError as error:
+        raise _coordination_http_error(error) from error
+
+
+@app.get("/api/projects/{project_id}/workflow-view", response_model=dict[str, Any])
+def workflow_view(project_id: UUID) -> dict[str, Any]:
+    """生产流程图聚合（可视化 V1 数据契约，WORKFLOW_VISUALIZATION_DESIGN §5）。"""
+
+    project_or_404(project_id)
+    return coordination_store.build_workflow_view(store, project_id)
 @app.post("/api/projects/{project_id}/workflow-runs/{run_id}/advance", response_model=dict[str, Any])
 def advance_workflow_run(project_id: UUID, run_id: UUID, request: Request) -> dict[str, Any]:
     """推进一轮（W3.2）：有界重试 → 门禁评估 → 账本记账 → 完成判定。无变化 = 纯记账（幂等安全）。"""

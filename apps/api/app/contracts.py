@@ -1452,6 +1452,35 @@ class WorkflowUpsert(APIModel):
     definition: dict[str, Any]
 
 
+class StageReportSubmit(APIModel):
+    """阶段报告提交（D1）：结构由 coordination.validate_stage_report 权威校验。"""
+
+    report: dict[str, Any]
+    run_id: str | None = Field(default=None, max_length=160)
+    attempt: int = Field(default=1, ge=1, le=100)
+
+
+class InformationRequestCreate(APIModel):
+    """运行时信息请求创建（D1，计划 §6.5.1）。结构由 coordination 校验。"""
+
+    request: dict[str, Any]
+    run_id: str | None = Field(default=None, max_length=160)
+    requester_node_id: str | None = Field(default=None, max_length=160)
+    requester_task_id: UUID | None = None
+    provider_agent_id: str | None = Field(default=None, max_length=80)
+    provider_capability: str | None = Field(default=None, max_length=80)
+    correlation_id: str | None = Field(default=None, max_length=160)
+    idempotency_key: str | None = Field(default=None, max_length=160)
+
+
+class InformationRequestAck(APIModel):
+    outcome: Literal["received", "rejected", "unable_to_execute"]
+
+
+class InformationRequestRespond(APIModel):
+    response: dict[str, Any]
+
+
 class WorkflowPreviewRequest(APIModel):
     """试运行（W4.3）：给 definition 直接预览，或给 workflow_id(+version_id) 预览已发布版本。"""
 
