@@ -1522,6 +1522,14 @@ def consume_information_request(agent_id: str, request_id: UUID, request: Reques
         raise _coordination_http_error(error) from error
 
 
+@app.get("/api/projects/{project_id}/orchestration-decisions", response_model=list[dict[str, Any]])
+def list_orchestration_decisions(project_id: UUID, run_id: str | None = Query(default=None)) -> list[dict[str, Any]]:
+    """编排决策回放（D1/D2 验收：所有全局决策可回放）。"""
+
+    project_or_404(project_id)
+    return coordination_store.list_decisions(store, project_id, run_id=run_id)
+
+
 @app.get("/api/projects/{project_id}/workflow-view", response_model=dict[str, Any])
 def workflow_view(project_id: UUID) -> dict[str, Any]:
     """生产流程图聚合（可视化 V1 数据契约，WORKFLOW_VISUALIZATION_DESIGN §5）。"""

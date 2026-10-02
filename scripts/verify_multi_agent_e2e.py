@@ -38,6 +38,9 @@ from device_test_support import registration_request  # noqa: E402
 
 from multi_agent_assertions import (  # noqa: E402
     check_artifact_feeds_task,
+    check_gate_evaluated_payload,
+    check_ledger_snapshot,
+    check_stall_series,
     check_artifact_version_bump,
     check_event_stream,
     check_production_path,
@@ -125,7 +128,11 @@ def main() -> int:
         member_id = json.loads(raw)["account"]["member"]["id"]
         organization_id = json.loads(raw)["account"]["member"]["organization_id"]
 
-        status, raw = call(base, "/api/projects", "POST", {"name": "双智能体协作验收"}, token=member_token)
+        # manual 模式：关闭维护线程的自动派发，引擎场景由脚本显式驱动每个节点
+        # （auto 模式的受约束派发由 auto_dispatch_tick 承担，与本剧本的显式领取竞争）
+        status, raw = call(base, "/api/projects", "POST", {
+            "name": "双智能体协作验收", "task_mode": "manual",
+        }, token=member_token)
         check("创建协作项目", status in {200, 201}, f"HTTP {status} {raw[:160]}")
         project_id = json.loads(raw)["id"]
 
@@ -133,6 +140,8 @@ def main() -> int:
         def bring_up_agent(agent_id: str, device_id: str) -> str:
             status, raw = call(base, "/api/agents/register", "POST", {
                 "agent_id": agent_id, "display_name": agent_id, "owner_member_id": member_id,
+                # 工作流任务按角色绑定带 required_capabilities（files/shell），领取处硬校验
+                "supported_tools": ["files.read", "files.write", "shell.run"],
             })
             assert status == 200, raw  # 该路由未声明 201，默认 200
             status, raw = call(base, "/api/devices/pairings", "POST", {"organization_id": organization_id}, token=member_token)
@@ -140,7 +149,11 @@ def main() -> int:
             pairing = SimpleNamespace(**json.loads(raw))
             payload = registration_request(
                 pairing, Ed25519PrivateKey.generate(), agent_id, device_id,
-                device_name=f"e2e-{device_id}", capabilities=["task.claim", "task.progress", "task.result", "task.lease", "artifact.write", "artifact.read"],
+                device_name=f"e2e-{device_id}",
+                # 角色绑定的能力要求（mm-*：files/shell）必须齐——工作流任务的
+                # required_capabilities 在 claim 处硬校验，缺了就是三次重试撞同一堵墙
+                capabilities=["task.claim", "task.progress", "task.result", "task.lease",
+                              "artifact.write", "artifact.read", "files.read", "files.write", "shell.run"],
             )
             status, raw = call(base, "/api/devices/register", "POST", payload.model_dump(mode="json"))
             assert status == 201, raw
@@ -310,7 +323,194 @@ def main() -> int:
         check("事件目录与 seq 严格递增（契约断言）", ok, extra)
         check("事件流含 receipt 溯源字段", "workspace_diff" in raw)
 
+        # ---- ⑦ 工作流引擎 + 运行时协作 + 阶段 8/9（D2）-------------------
+        # 诚实剧本：七个节点全部走 claim → 进度 → 产物 → 结果 → 人工审核批准
+        # （产物批准 ≠ 任务批准）；compile/bundle 的交付适配器在节点批准后由推进器执行。
+        status, raw = call(base, "/api/workflows/builtin", "POST", {}, token=member_token)
+        check("安装内置工作流包", status == 200 and "cumcm-main" in raw, f"HTTP {status}")
+        status, raw = call(base, "/api/workflows", token=member_token)
+        wf = next((w for w in json.loads(raw) if w["key"] == "cumcm-main"), None)
+        check("cumcm-main 包存在", wf is not None)
+        status, raw = call(base, f"/api/projects/{project_id}/workflow-runs", "POST", {
+            "workflow_id": wf["id"], "inputs": {"problem_code": "C", "questions": "1,2,3,4"},
+        }, token=member_token)
+        check("应用 cumcm-main → 七节点任务骨架", status == 201 and len(json.loads(raw)["tasks"]) == 7,
+              f"HTTP {status} {raw[:160]}")
+        wf_run = json.loads(raw)
+        wf_tasks = {item["node_id"]: item["task_id"] for item in wf_run["tasks"]}
+        wf_stalls: list[int] = []
+
+        def approve_artifact_and_task(artifact_id: str | None, task_id: str, idem: str) -> None:
+            if artifact_id:
+                call(base, f"/api/projects/{project_id}/reviews", "POST", {
+                    "target_type": "artifact", "target_id": artifact_id, "verdict": "APPROVED",
+                    "summary": "产物合格", "idempotency_key": f"e2e-arp-{idem}",
+                }, token=member_token)
+            call(base, f"/api/projects/{project_id}/reviews", "POST", {
+                "target_type": "task", "target_id": task_id, "verdict": "APPROVED",
+                "summary": "任务收口", "idempotency_key": f"e2e-trp-{idem}",
+            }, token=member_token)
+
+        def drive_node(node_id: str, agent_id: str, token: str, artifact_name: str | None,
+                       artifact_type: str, idem: str, with_report: bool = True) -> str | None:
+            task_id = wf_tasks[node_id]
+            status, raw = call(base, f"/api/tasks/{task_id}/claim", "POST", {
+                "agent_id": agent_id, "lease_seconds": 900, "idempotency_key": f"e2e-{idem}-claim",
+            }, token=member_token, agent=as_agent(agent_id, token))
+            if status != 200:
+                ev = call(base, f"/api/projects/{project_id}/events", token=member_token)
+                claims = [item.get("payload") for item in json.loads(ev[1])
+                          if item.get("event_type") == "task.claimed" and json.dumps(item.get("payload", {})).find(node_id) >= 0]
+                raise AssertionError(f"claim {node_id}: {raw[:200]} claims={claims}")
+            lease = json.loads(raw)["lease"]
+            progress = call(base, f"/api/tasks/{task_id}/progress", "POST", {
+                "agent_id": agent_id, "lease_token": lease["lease_token"], "status": "RUNNING",
+                "idempotency_key": f"e2e-{idem}-prog",
+            }, token=member_token, agent=as_agent(agent_id, token))
+            assert progress[0] == 200, f"progress {node_id}: {progress[1][:200]}"
+            if with_report:
+                rep = call(base, f"/api/agents/{agent_id}/tasks/{task_id}/stage-report", "POST", {
+                    "report": {"status": "partial", "summary": f"{node_id} 进行中",
+                               "completed_items": ["一半"], "incomplete_items": ["另一半"],
+                               "output_artifacts": [], "evidence_refs": [],
+                               "tests": {"passed": 1, "failed": 0, "skipped": 0, "commands": []},
+                               "blockers": [], "can_continue_safely": True,
+                               "continued_under_assumption": False, "assumptions": []},
+                    "run_id": wf_run["run_id"], "attempt": 1,
+                }, token=member_token, agent=as_agent(agent_id, token))
+                check(f"{node_id} 阶段报告被接收（不是批准）", rep[0] == 201, f"HTTP {rep[0]}")
+            artifact_id = None
+            if artifact_name:
+                art = call(base, f"/api/projects/{project_id}/artifacts", "POST", {
+                    "name": artifact_name, "artifact_type": artifact_type, "task_id": task_id,
+                    "receipt": {"receipt_version": 1, "tool_name": "workspace_diff",
+                                "tool_call_id": f"turn-{idem}", "args_hash": "0123456789abcdef",
+                                "output_hash": "fedcba9876543210", "output_bytes": 256},
+                }, token=member_token, agent=as_agent(agent_id, token))
+                check(f"{node_id} 产物带 receipt", art[0] == 201, f"HTTP {art[0]}")
+                artifact_id = json.loads(art[1])["id"]
+            result = call(base, f"/api/tasks/{task_id}/result", "POST", {
+                "agent_id": agent_id, "lease_token": lease["lease_token"], "idempotency_key": f"e2e-{idem}-result",
+                "success": True, "output_artifact_ids": [artifact_id] if artifact_id else [],
+                "summary": f"{node_id} 完成",
+            }, token=member_token, agent=as_agent(agent_id, token))
+            assert result[0] == 200, f"result {node_id}: {result[1][:200]}"
+            return artifact_id
+
+        def advance(_run=None) -> tuple[int, str]:
+            return call(base,
+                        f"/api/projects/{project_id}/workflow-runs/{wf_run['run_id']}/advance",
+                        "POST", {}, token=member_token)
+
+        facts_art = drive_node("problem_facts", "e2e-agent-a", token_a, "problem-facts.md", "problem_facts", "facts")
+        approve_artifact_and_task(facts_art, wf_tasks["problem_facts"], "facts")
+
+        model_art = drive_node("model", "e2e-agent-a", token_a, "model-spec.md", "model_spec", "model")
+        # 门禁周期：交付待审时 NOT_HOLDS（未批准）→ 批准后 HOLDS
+        status, raw = advance(wf_run)
+        gate_round1 = json.loads(raw)["gates"]
+        check("model 门禁评估为 NOT_HOLDS（fail-closed）",
+              bool(gate_round1) and gate_round1[0]["verdict"] == "NOT_HOLDS", raw[:160])
+        status, raw = call(base, f"/api/projects/{project_id}/events", token=member_token)
+        gate_events = [item["payload"] for item in json.loads(raw)
+                       if item.get("event_type") == "project.gate.evaluated"]
+        ok, extra = check_gate_evaluated_payload(gate_events[0])
+        check("gate.evaluated 叶子三值一致（契约断言）", ok, extra)
+        # 先批产物（门禁在任务仍 WAITING_REVIEW 时评估 → HOLDS），再批任务解锁下游
+        call(base, f"/api/projects/{project_id}/reviews", "POST", {
+            "target_type": "artifact", "target_id": model_art, "verdict": "APPROVED",
+            "summary": "模型规格合格", "idempotency_key": "e2e-review-model-art",
+        }, token=member_token)
+        status, raw = advance(wf_run)
+        gate_round2 = json.loads(raw)["gates"]
+        check("model 门禁批准后 HOLDS", bool(gate_round2) and gate_round2[0]["verdict"] == "HOLDS", raw[:160])
+        call(base, f"/api/projects/{project_id}/reviews", "POST", {
+            "target_type": "task", "target_id": wf_tasks["model"], "verdict": "APPROVED",
+            "summary": "模型任务收口", "idempotency_key": "e2e-review-model-task",
+        }, token=member_token)
+
+        # code 节点：领取 → RUNNING → 运行时信息请求（required）→ 回复 → 消费（RUNNING）
+        # → 产物 → 结果（信息请求发生在执行中，不是执行前后）
+        status, raw = call(base, f"/api/tasks/{wf_tasks['code']}/claim", "POST", {
+            "agent_id": "e2e-agent-b", "lease_seconds": 900, "idempotency_key": "e2e-claim-code",
+        }, token=member_token, agent=as_agent("e2e-agent-b", token_b))
+        assert status == 200, f"claim code: {raw[:200]}"
+        code_lease = json.loads(raw)["lease"]
+        status, raw = call(base, f"/api/agents/e2e-agent-b/information-requests?project_id={project_id}",
+                           "POST", {
+            "request": {"request_type": "context", "question": "模型约束第 2 条是什么？",
+                        "required_information": ["约束 2"], "blocking": "required",
+                        "reason": "没有约束 2 无法安全编码",
+                        "response_deadline": "2026-10-02T23:00:00+00:00"},
+            "run_id": wf_run["run_id"], "requester_node_id": "code",
+            "requester_task_id": wf_tasks["code"], "provider_agent_id": "e2e-agent-a",
+            "idempotency_key": "e2e-ireq-1",
+        }, token=member_token, agent=as_agent("e2e-agent-b", token_b))
+        check("B 创建 required 信息请求", status == 201, f"HTTP {status} {raw[:160]}")
+        ireq = json.loads(raw)
+        check("required 请求节点效果 WAITING", "WAITING" in ireq["node_effect"], ireq["node_effect"])
+        call(base, f"/api/agents/e2e-agent-a/information-requests/{ireq['request_id']}/ack",
+             "POST", {"outcome": "received"}, token=member_token, agent=as_agent("e2e-agent-a", token_a))
+        call(base, f"/api/agents/e2e-agent-a/information-requests/{ireq['request_id']}/respond",
+             "POST", {"response": {"status": "answered", "answer_summary": "约束 2：求解步长 0.1",
+                                   "facts": ["步长 0.1"], "artifact_refs": [model_art],
+                                   "evidence_refs": [], "assumptions": []}},
+             token=member_token, agent=as_agent("e2e-agent-a", token_a))
+        consumed = call(base, f"/api/agents/e2e-agent-b/information-requests/{ireq['request_id']}/consume",
+                        "POST", {}, token=member_token, agent=as_agent("e2e-agent-b", token_b))
+        check("B 消费回复后继续（RUNNING）",
+              consumed[0] == 200 and json.loads(consumed[1])["node_effect_result"]["effect"] == "RUNNING",
+              consumed[1][:160])
+
+        # code 节点收尾：两个产物（code + result_table，C 对照清单②1）→ 结果
+        for art_name, art_type in (("code-result.zip", "code"), ("result-table.csv", "result_table")):
+            art = call(base, f"/api/projects/{project_id}/artifacts", "POST", {
+                "name": art_name, "artifact_type": art_type, "task_id": wf_tasks["code"],
+                "receipt": {"receipt_version": 1, "tool_name": "workspace_diff",
+                            "tool_call_id": f"turn-{art_type}", "args_hash": "0123456789abcdef",
+                            "output_hash": "fedcba9876543210", "output_bytes": 256},
+            }, token=member_token, agent=as_agent("e2e-agent-b", token_b))
+            check(f"code 产物 {art_type} 带 receipt", art[0] == 201, f"HTTP {art[0]}")
+        result = call(base, f"/api/tasks/{wf_tasks['code']}/result", "POST", {
+            "agent_id": "e2e-agent-b", "lease_token": code_lease["lease_token"],
+            "idempotency_key": "e2e-result-code", "success": True,
+            "output_artifact_ids": [], "summary": "代码与结果表完成",
+        }, token=member_token, agent=as_agent("e2e-agent-b", token_b))
+        assert result[0] == 200, f"result code: {result[1][:200]}"
+        approve_artifact_and_task(None, wf_tasks["code"], "code-task")  # 任务级收口（产物审批在上方）
+        review_art = drive_node("review", "e2e-agent-b", token_b, "audit-report.md", "audit_report", "review")
+        approve_artifact_and_task(review_art, wf_tasks["review"], "review")
+        paper_art = drive_node("paper", "e2e-agent-a", token_a, "paper-source.tex", "paper_source", "paper")
+        approve_artifact_and_task(paper_art, wf_tasks["paper"], "paper")
+        compile_art = drive_node("compile", "e2e-agent-a", token_a, "main.pdf", "compiled_pdf", "compile")
+        approve_artifact_and_task(compile_art, wf_tasks["compile"], "compile")
+        bundle_art = drive_node("bundle", "e2e-agent-a", token_a, "bundle.zip", "submission_bundle", "bundle")
+        approve_artifact_and_task(bundle_art, wf_tasks["bundle"], "bundle")
+
+        # 阶段 8/9：全部节点批准 → COMPLETED；交付适配器已执行并如实记账
+        status, raw = advance(wf_run)
+        final = json.loads(raw)
+        check("全部节点批准 → 运行 COMPLETED（阶段 8/9）", final["status"] == "COMPLETED", raw[:160])
+        check("交付适配器被执行并如实记账（deliveries）",
+              any(d["node_id"] == "compile" for d in final["deliveries"]), str(final["deliveries"])[:160])
+        wf_stalls.append(final["stall_count"])
+
+        # 决策可回放 + 账本/停滞断言（C 的断言库）
+        status, raw = call(base, f"/api/projects/{project_id}/orchestration-decisions", token=member_token)
+        decisions = json.loads(raw)
+        check("编排决策已持久化可回放", status == 200 and len(decisions) >= 1, raw[:120])
+        status, raw = call(base, f"/api/projects/{project_id}/workflow-runs/{wf_run['run_id']}", token=member_token)
+        detail = json.loads(raw)
+        ok, extra = check_ledger_snapshot(detail["ledger"])
+        check("账本快照结构（契约断言）", ok, extra)
+        ok, extra = check_stall_series(wf_stalls)
+        check("stall 记账合规（契约断言）", ok, extra)
+        status, raw = call(base, f"/api/projects/{project_id}/workflow-view", token=member_token)
+        view = json.loads(raw)
+        check("workflow-view 聚合（D1 DTO）", view["summary"].get("APPROVED", 0) >= 1, str(view["summary"])[:120])
+
         # ---- 状态机总断言（fail-closed 白名单）---------------------------
+        ok, extra = check_task_lifecycle(t1_steps)        # ---- 状态机总断言（fail-closed 白名单）---------------------------
         ok, extra = check_task_lifecycle(t1_steps)
         check("T1 状态机全程合法", ok, extra)
         ok, extra = check_task_lifecycle(t2_steps)
@@ -329,6 +529,9 @@ def main() -> int:
             process.wait(timeout=10)
         except Exception:
             process.kill()
+        if os.environ.get("E2E_DUMP_SERVER_LOG"):
+            out = process.stdout.read().decode("utf-8", "replace") if process.stdout else ""
+            Path("/tmp/e2e_server.log").write_text(out, encoding="utf-8")
 
 
 if __name__ == "__main__":

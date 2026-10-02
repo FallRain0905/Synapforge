@@ -73,6 +73,15 @@ class ProjectDecisions:
         self._node_task_id = str(node_task_id) if node_task_id else None
 
     def artifact_approved(self, artifact_type: str) -> bool | None:
+        # 节点上下文内判定（引擎传入 node_task_id）："本节点产出了已批准的该类型成果物"
+        # ——项目级全局查询会被同类型的历史产物污染（e2e 实测抓到）。无上下文时退回项目级。
+        if self._node_task_id:
+            row = self._store.db.execute(
+                "SELECT 1 FROM artifacts WHERE project_id = ? AND artifact_type = ? AND task_id = ?"
+                " AND status = 'APPROVED' LIMIT 1",
+                (self._project_id, str(artifact_type), self._node_task_id),
+            ).fetchone()
+            return row is not None
         row = self._store.db.execute(
             "SELECT 1 FROM artifacts WHERE project_id = ? AND artifact_type = ? AND status = 'APPROVED' LIMIT 1",
             (self._project_id, str(artifact_type)),

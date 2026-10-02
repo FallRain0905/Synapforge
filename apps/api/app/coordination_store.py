@@ -466,8 +466,13 @@ def record_decision(store: Any, project_id: UUID, decision: dict[str, Any], *, a
     errors = coordination.validate_orchestration_decision(decision)
     if errors:
         raise CoordinationStoreError("orchestration_decision_invalid", errors)
+    # 边界字符串化：调用方（路由/引擎）传 UUID 对象，sqlite 不认
     project_id = project_id if isinstance(project_id, UUID) else UUID(str(project_id))
-    organization_id = organization_id or _project_org(store, project_id)
+    organization_id = str(organization_id) if organization_id else _project_org(store, project_id)
+    actor = str(actor)
+    run_id = str(run_id) if run_id else None
+    node_id = str(node_id) if node_id else None
+    task_id = str(task_id) if task_id else None
     decision_id = str(decision["decision_id"])
     store.db.execute(
         "INSERT INTO orchestration_decisions (id, organization_id, project_id, run_id, node_id, task_id, policy, basis, expected_events, stop_reason, payload, created_by, created_at)"

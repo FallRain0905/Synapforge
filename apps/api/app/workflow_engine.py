@@ -26,7 +26,7 @@ from dataclasses import asdict
 from typing import Any
 from uuid import UUID
 
-from . import workflow_delivery, workflow_gate
+from . import coordination_store, workflow_delivery, workflow_gate
 from .progress_ledger import ProgressLedger
 
 __all__ = ["advance_run", "WorkflowEngineError"]
@@ -203,6 +203,42 @@ def _run_deliveries(
     return deliveries
 
 
+def _persist_decisions(store: Any, project_id: UUID, run_id: str, gates: list[dict], retried: list[str], actor: str) -> None:
+    """把本轮的全局决策写进 orchestration_decisions（可回放；失败不炸推进器）。"""
+
+    for outcome in gates:
+        if outcome["verdict"] == "HOLDS":
+            continue
+        decision = {
+            "decision_id": f"dec-{outcome['node_id']}-{outcome['verdict']}",
+            "policy": "escalate_human" if outcome["on_block"] == "escalate_human" else "replan",
+            "basis": [f"gate:{outcome['gate_policy']}", f"verdict:{outcome['verdict']}"],
+            "created_at": _now(),
+            "expected_events": ["project.gate.blocked"],
+        }
+        try:
+            coordination_store.record_decision(store, project_id, decision, actor=actor,
+                                               run_id=run_id, node_id=outcome["node_id"],
+                                               task_id=outcome["task_id"])
+        except Exception as error:  # noqa: BLE001 - 决策记录失败不影响推进
+            print(f"[workflow_engine] decision persist failed: {error}")
+    if retried:
+        decision = {
+            "decision_id": f"dec-retry-{retried[0]}",
+            "policy": "retry",
+            "basis": [f"failed nodes: {retried}"],
+            "created_at": _now(),
+            "expected_events": ["project.task.retried"],
+        }
+        try:
+            coordination_store.record_decision(store, project_id, decision, actor=actor, run_id=run_id)
+        except Exception as error:  # noqa: BLE001
+            print(f"[workflow_engine] decision persist failed: {error}")
+
+
+_DECISION_POLICIES_OK = {"escalate_human", "retry", "replan", "stop", "dispatch", "request_information"}
+
+
 def _signature(node_tasks: dict[str, str], statuses: dict[str, str]) -> str:
     import hashlib
 
@@ -220,6 +256,9 @@ def advance_run(store: Any, project_id: UUID, run_id: UUID, actor: str) -> dict[
 
     gates = _node_gate(store, project_id, definition, node_tasks, actor)
     retried = _bounded_retry(store, project_id, definition, node_tasks, engine_state, actor)
+
+    # 编排决策持久化（计划 §阶段 6：所有全局决策可回放）
+    _persist_decisions(store, project_id, run_id, gates, retried, actor)
 
     statuses: dict[str, str] = {}
     for node_id, task_id in node_tasks.items():
