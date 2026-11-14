@@ -795,7 +795,6 @@ textarea.ctl { height:auto; padding:7px 8px; }
             </div>
             <div class="model-pop-body" id="modelPopBody"></div>
           </div>
-          <datalist id="modelOptions"></datalist>
         </div>
         <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px">
           <button class="link-btn" id="openModelConfig">渠道与模型配置 →</button>
@@ -841,7 +840,7 @@ textarea.ctl { height:auto; padding:7px 8px; }
         <option value="command">自定义命令模板</option>
       </select></label>
       <label>渠道<select id="fProvider"></select></label>
-      <label>模型<input id="fModel" list="modelOptions" placeholder="glm-5.3"></label>
+      <label>模型<select id="fModel"></select></label>
       <label class="full hidden" id="fCommandWrap">命令模板<input id="fCommand" placeholder="my-agent --model {model} --prompt {prompt}"></label>
       <label class="full">角色卡 / 预设提示词<textarea id="fPrompt" placeholder="你是一名技术写手。写清晰的 Markdown，先给结论，再给步骤。交付必须是工作区文件。"></textarea></label>
       <label class="full">工作区（留空自动创建）<input id="fWorkspace" placeholder="~/.synapforge/agents/writer"></label>
@@ -1085,6 +1084,28 @@ function channelModels(id) {
 function providerKindName(kind) {
   return kind === "openai" ? "OpenAI 兼容" : "Anthropic";
 }
+
+/**
+ * 模型下拉：用真正的 <select>，不用 datalist。
+ * datalist 会按已输入内容过滤候选——当前值是 auto/glm-5.3-flash 时，
+ * 点开只剩名字里含 glm-5.3-flash 的几项，看起来像"渠道只有两个模型"。
+ * 当前值不在渠道列表里时补一个「当前」选项，避免静默改值。
+ */
+function modelSelectHTML(providerId, current, attrs) {
+  const models = channelModels(providerId);
+  const value = String(current || "");
+  const known = models.includes(value);
+  const rows = models.map(m =>
+    `<option value="${esc(m)}" ${m === value ? "selected" : ""}>${esc(m)}</option>`).join("");
+  const extra = value && !known
+    ? `<option value="${esc(value)}" selected>${esc(value)}（当前，不在渠道列表）</option>`
+    : "";
+  const empty = !models.length
+    ? `<option value="${esc(value)}" selected>${esc(value || "（该渠道还没有模型）")}</option>`
+    : "";
+  return `<select ${attrs || ""}>${extra}${rows}${empty}</select>`;
+}
+
 function checkKey(kind, id) { return `${kind}:${id}`; }
 function renderCheck(kind, id) {
   const check = S.checks[checkKey(kind, id)];
@@ -1119,7 +1140,7 @@ async function loadAgents(selectId) {
     S.models = data.models || S.models;
     S.providers = data.providers || S.providers;
     document.getElementById("agentCount").textContent = S.agents.length ? String(S.agents.length) : "";
-    renderSidebar(); renderModelOptions();
+    renderSidebar();
     if (!S.agents.length) { S.agent = null; renderEmpty(); return; }
     const target = selectId || (S.agent && S.agent.id) || S.agents[0].id;
     if (S.view === "workbench" && (!S.agent || S.agent.id !== target)) await selectAgent(target);
@@ -1228,17 +1249,6 @@ async function newSessionFor(agentId) {
     if (S.agent && S.agent.id === agentId) await selectAgent(agentId);
     else renderSidebar();
   } catch (e) { toast(e.message); }
-}
-
-function renderModelOptions(providerId) {
-  const list = document.getElementById("modelOptions");
-  if (!list) return;
-  const models = providerId === undefined
-    ? (S.models.models || [])
-    : channelModels(providerId).map(id => ({id, label: id}));
-  list.innerHTML = models.map(m => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join("");
-  if (providerId === undefined && !document.getElementById("fModel").value && S.models.default)
-    document.getElementById("fModel").value = S.models.default;
 }
 
 function modelCandidates(providerId) {
@@ -1904,9 +1914,7 @@ function agentCard(a) {
   const status = statusOf(run);
   const pid = a.provider_id || "";
   const provider = channels().find(c => c.id === pid);
-  const models = channelModels(pid);
   const channelError = a.provider_missing || (a.backend === "claude" && provider && provider.kind !== "anthropic");
-  const listId = `agentModels-${a.id}`;
   return `<div class="agent-card" data-agent-card="${esc(a.id)}">
     <div class="ac-head">
       <div class="ac-avatar">${esc((a.name || "A").slice(0,1).toUpperCase())}</div>
@@ -1936,8 +1944,7 @@ function agentCard(a) {
         <select data-f="provider_id" data-channel-select>${channelOptions(pid)}</select>
       </label>
       <label>模型
-        <input data-f="model" list="${esc(listId)}" value="${esc(a.model || "")}" placeholder="选择或输入模型 id">
-        <datalist id="${esc(listId)}">${models.map(m => `<option value="${esc(m)}"></option>`).join("")}</datalist>
+        ${modelSelectHTML(pid, a.model || "", `data-f="model"`)}
       </label>
       <label class="full">角色卡 / 提示词
         <textarea data-f="system_prompt" placeholder="这个 Agent 是谁、怎么写、交付标准是什么…">${esc(a.system_prompt || "")}</textarea>
@@ -2363,11 +2370,13 @@ function renderModelsView(box) {
   box.querySelectorAll("[data-channel-select]").forEach(select => {
     select.onchange = () => {
       const card = select.closest("[data-agent-card]");
-      const modelInput = card.querySelector('[data-f="model"]');
-      const datalist = card.querySelector("datalist");
+      const modelSelect = card.querySelector('[data-f="model"]');
       const models = channelModels(select.value);
-      datalist.innerHTML = models.map(m => `<option value="${esc(m)}"></option>`).join("");
-      if (!models.includes(modelInput.value)) modelInput.value = models[0] || "";
+      // 重建模型 select 的选项；当前值不在新渠道里就落到第一个
+      const keep = models.includes(modelSelect.value) ? modelSelect.value : (models[0] || "");
+      modelSelect.innerHTML = models.map(m =>
+        `<option value="${esc(m)}" ${m === keep ? "selected" : ""}>${esc(m)}</option>`).join("")
+        || `<option value="">（该渠道还没有模型）</option>`;
       const channel = channels().find(c => c.id === select.value);
       const hint = card.querySelector("[data-channel-hint]");
       if (hint) hint.textContent = channel
@@ -3433,7 +3442,8 @@ function renderPlanCard() {
   const rows = items.map((item, index) => {
     const invalid = Boolean(item.invalid);
     const agentId = item.agent_id || "";
-    const models = channelModels((agents.find(a => a.id === agentId) || {}).provider_id || "");
+    const agent = agents.find(a => a.id === agentId) || {};
+    const modelValue = item.model || agent.model || "";
     return `<div class="plan-item ${invalid ? "invalid" : ""}" data-plan-item="${index}">
       <div class="pi-head">
         <span class="pi-num">${index + 1}</span>
@@ -3446,9 +3456,7 @@ function renderPlanCard() {
           <option value="">选择 Agent</option>
           ${agents.map(a => `<option value="${esc(a.id)}" ${a.id === agentId ? "selected" : ""}>${esc(a.name)} · ${esc(a.model || "默认")}</option>`).join("")}
         </select></label>
-        <label>模型<input class="ctl" data-pi="model" list="piModels${index}" value="${esc(item.model || "")}" placeholder="默认">
-          <datalist id="piModels${index}">${models.map(m => `<option value="${esc(m)}"></option>`).join("")}</datalist>
-        </label>
+        <label>模型${modelSelectHTML(agent.provider_id || "", modelValue, 'class="ctl" data-pi="model"')}</label>
       </div>
       <input class="ctl pi-prompt" data-pi="role_prompt" value="${esc(item.role_prompt || "")}" placeholder="本轮职责（可选）">
       ${invalid ? `<div class="pi-error">${esc(item.invalid)}</div>` : ""}
@@ -3837,13 +3845,13 @@ function bindClusterChat(box, phase) {
   box.querySelectorAll('[data-pi="agent_id"]').forEach(select => select.onchange = () => {
     const card = select.closest("[data-plan-item]");
     const agent = (S.agents || []).find(a => a.id === select.value);
-    const modelInput = card.querySelector('[data-pi="model"]');
-    const datalist = card.querySelector("datalist");
+    const modelSelect = card.querySelector('[data-pi="model"]');
     const models = channelModels((agent || {}).provider_id || "");
-    if (datalist) datalist.innerHTML = models.map(m => `<option value="${esc(m)}"></option>`).join("");
-    if (modelInput && !models.includes(modelInput.value)) {
-      modelInput.value = (agent && agent.model) || models[0] || "";
-    }
+    const keep = models.includes((agent || {}).model)
+      ? agent.model : (models[0] || "");
+    modelSelect.innerHTML = models.map(m =>
+      `<option value="${esc(m)}" ${m === keep ? "selected" : ""}>${esc(m)}</option>`).join("")
+      || `<option value="">（该渠道还没有模型）</option>`;
   });
 }
 
@@ -4595,7 +4603,6 @@ function renderInspector() {
   document.getElementById("providerHint").textContent = provider
     ? (provider.has_key ? provider.key_masked || "key 已配置" : "无 key")
     : "本机配置";
-  renderModelOptions(a.provider_id || "");
   renderModelPicker();
   document.getElementById("allowWeb").checked = a.allow_web !== false;
   document.getElementById("workspaceText").textContent = a.workspace || "—";
@@ -4784,11 +4791,12 @@ function fillModalChannels() {
 
 function syncModalModelOptions() {
   const pid = document.getElementById("fProvider").value;
-  const list = channelModels(pid).map(id => `<option value="${esc(id)}"></option>`).join("");
-  document.getElementById("modelOptions").innerHTML = list;
-  const input = document.getElementById("fModel");
+  const select = document.getElementById("fModel");
   const models = channelModels(pid);
-  if (!input.value || !models.includes(input.value)) input.value = models[0] || "";
+  const keep = models.includes(select.value) ? select.value : (models[0] || "");
+  select.innerHTML = models.map(m =>
+    `<option value="${esc(m)}" ${m === keep ? "selected" : ""}>${esc(m)}</option>`).join("")
+    || `<option value="">（该渠道还没有模型）</option>`;
 }
 
 function syncModalBackend() {
@@ -4860,7 +4868,6 @@ document.getElementById("newSession").onclick = newSession;
 document.getElementById("openModelConfig").onclick = () => switchView("models");
 document.getElementById("providerSelect").onchange = async () => {
   const pid = document.getElementById("providerSelect").value;
-  renderModelOptions(pid);
   const models = channelModels(pid);
   const provider = channels().find(c => c.id === pid);
   document.getElementById("providerHint").textContent = provider
