@@ -409,6 +409,22 @@ class AgentRunWorker:
 
     # ---- 命令与流 ----------------------------------------------------------
 
+    def _plan_instruction(self) -> str:
+        """规划会话的指令段：让主 Agent 交任务卡，而不是自己把活干完。
+
+        延迟导入：`plans` 依赖 `agents`，而本模块也在同一层，顶层导入会绕成环。
+        """
+
+        from . import plans as studio_plans
+
+        store = open_store(self.state_path)
+        try:
+            return studio_plans.plan_prompt(store, self._plan_id) + "\n"
+        except Exception:  # noqa: BLE001 — 取不到名单也不该让整条 run 失败
+            return studio_plans.PLAN_INSTRUCTION.replace("{agents}", "（见工作区）") + "\n"
+        finally:
+            store.close()
+
     def _command(self, agent: dict[str, Any], run: dict[str, Any]) -> list[str] | None:
         if self._backend == "command":
             return self._command_custom(agent, run)
@@ -426,12 +442,14 @@ class AgentRunWorker:
         if self._provider:
             self._settings_path = self._write_claude_settings()
             command += ["--settings", str(self._settings_path)]
-        if agent.get("mcp_managed") or self._plugin_parts.get("mcp"):
+        if (agent.get("mcp_managed") or self._plugin_parts.get("mcp")
+                or str(self._plan_id or "").strip()):
             self._mcp_path = self._write_mcp_config(agent)
             command += ["--mcp-config", str(self._mcp_path)]
             if agent.get("mcp_managed"):
                 command += ["--strict-mcp-config"]
         resume = str(agent.get("session_id") or "").strip()
+        plan_mode = bool(str(self._plan_id or "").strip())
         if resume:
             # 续接同一会话；模型仍显式传，保证换了渠道/模型后下一次任务生效
             self._session_id = resume
@@ -439,8 +457,10 @@ class AgentRunWorker:
             prompt = (
                 f"继续同一个会话。新任务：{run.get('task_text')}\n\n"
                 f"工作区：{run.get('workspace')}\n\n"
-                "要求：直接做，不要反问；产出写成工作区文件；完成后一段话总结做了什么、产出哪些文件。\n"
             )
+            prompt += (self._plan_instruction() if plan_mode else
+                       "要求：直接做，不要反问；产出写成工作区文件；"
+                       "完成后一段话总结做了什么、产出哪些文件。\n")
         else:
             self._new_session_id = str(uuid4())
             command += ["--session-id", self._new_session_id]
@@ -449,12 +469,19 @@ class AgentRunWorker:
                 f"角色设定：{agent.get('system_prompt') or '你是一个可靠的执行型 Agent。'}\n\n"
                 f"任务：{run.get('task_text')}\n\n"
                 f"工作区：{run.get('workspace')}\n\n"
-                "要求：\n"
-                "1. 直接开始做，不要反问；需要信息就基于工作区现有文件判断。\n"
-                "2. 产出必须写成工作区里的文件（Markdown/代码/数据都行），文件名清晰。\n"
-                "3. 只读写工作区内的文件；可以使用 Read/Write/Edit 工具。\n"
-                "4. 完成后用一段话总结：做了什么、产出哪些文件、还有什么没做。\n"
             )
+            if plan_mode:
+                # 规划会话：主 Agent 的活是拆任务，不是自己把活干完。
+                # 不拼这段指令时它会直接写文件、把任务卡这步跳过去（线上实测过）。
+                prompt += self._plan_instruction()
+            else:
+                prompt += (
+                    "要求：\n"
+                    "1. 直接开始做，不要反问；需要信息就基于工作区现有文件判断。\n"
+                    "2. 产出必须写成工作区里的文件（Markdown/代码/数据都行），文件名清晰。\n"
+                    "3. 只读写工作区内的文件；可以使用 Read/Write/Edit 工具。\n"
+                    "4. 完成后用一段话总结：做了什么、产出哪些文件、还有什么没做。\n"
+                )
         if self._model:
             command += ["--model", self._model]
         command += [

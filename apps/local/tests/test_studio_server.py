@@ -379,5 +379,80 @@ class StudioServerTests(unittest.TestCase):
                                capture_output=True, text=True)
 
 
+class ReverseProxyTests(unittest.TestCase):
+    """反代部署形态：Origin 白名单 + 子路径前缀。
+
+    默认形态（只绑回环、只认回环 Origin）不能因为多两个开关就放松，
+    所以这里同时断言"不给白名单时公网 Origin 仍被拒"。
+    """
+
+    def _serve(self, **kwargs) -> str:
+        tmp = tempfile.TemporaryDirectory(prefix="sf-studio-proxy-")
+        self.addCleanup(tmp.cleanup)
+        self.httpd, self.manager, self.token, self.port = build_server(
+            port=0, state_path=Path(tmp.name) / "state.db", token="proxy-token",
+            skills_home=Path(tmp.name) / "home", **kwargs)
+        thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        thread.start()
+
+        def stop() -> None:
+            self.httpd.shutdown()
+            self.httpd.server_close()
+            self.manager.shutdown()
+            getattr(self.httpd, "agent_manager").shutdown()
+
+        self.addCleanup(stop)
+        return f"http://127.0.0.1:{self.port}"
+
+    def _post(self, base: str, path: str, *, origin: str) -> tuple[int, dict]:
+        request = urllib.request.Request(
+            base + path,
+            data=json.dumps({"cluster_id": "missing", "text": "x"}).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json", "Connection": "close",
+                     "X-Studio-Token": "proxy-token", "Origin": origin})
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status, json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as error:
+            return error.code, json.loads(error.read().decode("utf-8"))
+
+    def test_public_origin_rejected_without_whitelist(self) -> None:
+        base = self._serve()
+        status, payload = self._post(base, "/api/studio/messages",
+                                    origin="https://studio.example.com")
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["code"], "origin_rejected")
+
+    def test_whitelisted_origin_allowed(self) -> None:
+        base = self._serve(allowed_origins=("https://studio.example.com",))
+        status, payload = self._post(base, "/api/studio/messages",
+                                    origin="https://studio.example.com")
+        # 过了 Origin 校验，才会走到"集群不存在"的业务错误
+        self.assertNotEqual(payload.get("code"), "origin_rejected")
+        self.assertFalse(payload.get("ok"))
+
+    def test_base_path_serves_ui_and_api(self) -> None:
+        base = self._serve(base_path="/studio",
+                           allowed_origins=["https://studio.example.com"])
+        with urllib.request.urlopen(base + "/studio/", timeout=10) as response:
+            self.assertEqual(response.status, 200)
+            self.assertIn("synapforge studio", response.read().decode("utf-8"))
+        # 反代常把 /studio 的尾斜杠省掉
+        with urllib.request.urlopen(base + "/studio", timeout=10) as response:
+            self.assertEqual(response.status, 200)
+        status, payload = self._post(base, "/studio/api/studio/messages",
+                                    origin="https://studio.example.com")
+        # 去掉前缀后是正常的 API 路由（集群不存在 → 业务错误，而不是 not_found 兜底）
+        self.assertNotIn(payload.get("code"), {"not_found", "origin_rejected"})
+        # 页面在子路径下拿到的是同一份单页（token 走 query，和本地形态一致）
+        with urllib.request.urlopen(base + "/studio/?token=proxy-token", timeout=10) as response:
+            self.assertIn("sf.studio.token", response.read().decode("utf-8"))
+
+    def test_host_binding_defaults_to_loopback(self) -> None:
+        self._serve()
+        self.assertEqual(self.httpd.server_address[0], "127.0.0.1")
+
+
 if __name__ == "__main__":
     unittest.main()

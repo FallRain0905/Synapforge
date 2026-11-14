@@ -3678,7 +3678,7 @@ function renderRunPanels() {
           <div class="name">${esc(role.name)}
             ${role.id === cluster.lead_role_id ? `<span class="tag accent">lead</span>` : ""}
           </div>
-          <div class="sub">${esc(role.model || "默认模型")} · ${steps.length} 步</div>
+          <div class="sub"><span class="ep-count">${esc(role.model || "默认模型")} · ${steps.length} 步</span></div>
         </div>
         <span class="status ${esc(status)}">${esc(status === "IDLE" ? "待命" : status)}</span>
       </div>
@@ -3692,8 +3692,13 @@ function renderRunPanels() {
           </div>`}
     </div>`;
   }).join("");
-  box.querySelectorAll("[data-panel-toggle]").forEach(el => el.onclick = () => {
-    S.expandedRole = S.expandedRole === el.dataset.panelToggle ? "" : el.dataset.panelToggle;
+  // 整张卡片都能点开：用户明确要求过"点整块就展开"，别只留一个小热区。
+  box.querySelectorAll("[data-panel]").forEach(el => el.onclick = (ev) => {
+    const roleId = el.dataset.panel;
+    if (!roleId) return;
+    // 展开状态里点正文/链接不该收起来
+    if (S.expandedRole === roleId && ev.target.closest(".ep-detail")) return;
+    S.expandedRole = S.expandedRole === roleId ? "" : roleId;
     renderRunPanels();
   });
   box.querySelectorAll(".ep-detail").forEach(el => bindFolds(el));
@@ -3702,17 +3707,30 @@ function renderRunPanels() {
 function patchPanel(roleId) {
   const panel = document.querySelector(`[data-panel="${roleId}"]`);
   if (!panel) { renderRunPanels(); return; }
+  const steps = S.panelSteps[roleId] || [];
   if (S.expandedRole === roleId) {
     const detail = document.getElementById(`panel-detail-${roleId}`);
     if (!detail) { renderRunPanels(); return; }
     const scroll = document.getElementById("session");
     const nearBottom = scroll
       ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 240 : true;
-    detail.innerHTML = renderConversation(S.panelSteps[roleId] || [],
-      {status: "RUNNING"});
+    detail.innerHTML = renderConversation(steps, {status: "RUNNING"});
     bindFolds(detail);
     if (nearBottom && scroll) scroll.scrollTop = scroll.scrollHeight;
     return;
+  }
+  // 折叠态也要更新步数：只改最近一行会让"0 步"一直挂着（线上看着像没跑）
+  const count = panel.querySelector(".ep-count");
+  if (count) {
+    const role = ((S.cluster || {}).roles || []).find(r => r.id === roleId) || {};
+    count.textContent = `${role.model || "默认模型"} · ${steps.length} 步`;
+  }
+  const body = panel.querySelector(".ep-body");
+  const recent = steps.slice(-4);
+  if (body && recent.length) {
+    body.innerHTML = `<div class="ep-recent">${recent.map(s =>
+      `<div class="ep-line"><span class="tag">${esc(s.kind)}</span>${esc(s.title)}</div>`).join("")}</div>
+      <div class="ep-hint">点开看完整步骤</div>`;
   }
   const last = panel.querySelector(".ep-last");
   if (last) last.textContent = panelStepSummary(roleId);

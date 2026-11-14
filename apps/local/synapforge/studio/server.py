@@ -89,6 +89,9 @@ class _Handler(BaseHTTPRequestHandler):
             return True
         port = getattr(self.server, "server_port", 0)
         allowed = {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
+        # 反代部署时浏览器 Origin 是公网域名，只能靠显式白名单放行；
+        # 默认仍只认回环（本地形态不该因为多一个开关就放松）。
+        allowed |= set(getattr(self.server, "allowed_origins", ()) or ())
         return origin in allowed
 
     def _read_json(self) -> dict[str, Any]:
@@ -114,7 +117,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
-        path = parsed.path
+        path = _strip_base(parsed.path, getattr(self.server, "base_path", ""))
         if path in ("/", "/index.html", "/workbench"):
             index = STATIC_DIR / "workbench.html"
             if not index.exists():
@@ -590,7 +593,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _mutate(self, method: str) -> None:
         parsed = urlparse(self.path)
-        if not parsed.path.startswith("/api/studio/"):
+        path = _strip_base(parsed.path, getattr(self.server, "base_path", ""))
+        if not path.startswith("/api/studio/"):
             self._fail("not_found", status=404)
             return
         if not self._authorized():
@@ -601,7 +605,7 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             body = self._read_json()
-            self._route_mutate(method, parsed.path, body)
+            self._route_mutate(method, path, body)
         except StudioError as error:
             self._fail(error.code, error.errors)
         except Exception as error:  # noqa: BLE001
@@ -1157,9 +1161,24 @@ class _Handler(BaseHTTPRequestHandler):
         self._fail("not_found", status=404)
 
 
+def _strip_base(path: str, base: str) -> str:
+    """反代挂在子路径下时，把 `/studio/...` 还原成 `/...`（`/api/studio/` 不受影响）。"""
+
+    if not base:
+        return path
+    if path == base:
+        return "/"
+    if path.startswith(base + "/"):
+        return path[len(base):]
+    return path
+
+
 def build_server(*, port: int = 0, state_path: str | Path | None = None,
                  token: str | None = None,
                  skills_home: str | Path | None = None,
+                 host: str = "127.0.0.1",
+                 allowed_origins: tuple[str, ...] | list[str] | None = None,
+                 base_path: str = "",
                  ) -> tuple[ThreadingHTTPServer, SupervisorManager, str, int]:
     """构造但不启动；测试与 `serve` 共用，避免两套初始化。"""
 
@@ -1171,7 +1190,7 @@ def build_server(*, port: int = 0, state_path: str | Path | None = None,
 
     manager = SupervisorManager(state_path)
     actual_token = token or secrets.token_urlsafe(24)
-    httpd = ThreadingHTTPServer(("127.0.0.1", int(port)), _Handler)
+    httpd = ThreadingHTTPServer((host, int(port)), _Handler)
     actual = httpd.server_address[1]
     httpd.state_path = str(state_path) if state_path else None  # type: ignore[attr-defined]
     httpd.skills_home = str(skills_home) if skills_home else None  # type: ignore[attr-defined]
@@ -1179,11 +1198,22 @@ def build_server(*, port: int = 0, state_path: str | Path | None = None,
     httpd.manager = manager  # type: ignore[attr-defined]
     httpd.agent_manager = AgentRuntimeManager(state_path)  # type: ignore[attr-defined]
     httpd.server_port = actual  # type: ignore[attr-defined]
+    httpd.allowed_origins = tuple(o.strip().rstrip("/") for o in (allowed_origins or ()) if o.strip())  # type: ignore[attr-defined]
+    httpd.base_path = _normalize_base_path(base_path)  # type: ignore[attr-defined]
     return httpd, manager, actual_token, actual
 
 
+def _normalize_base_path(value: str) -> str:
+    text = str(value or "").strip().strip("/")
+    return f"/{text}" if text else ""
+
+
 def serve(*, port: int = 0, open_browser: bool = True,
-          state_path: str | Path | None = None) -> None:
+          state_path: str | Path | None = None,
+          host: str = "127.0.0.1",
+          allowed_origins: tuple[str, ...] | list[str] | None = None,
+          base_path: str = "",
+          public_url: str = "") -> None:
     info_path = (Path(state_path).expanduser().resolve().parent if state_path else state_dir()) / "studio.json"
     existing_token = ""
     try:
@@ -1193,11 +1223,15 @@ def serve(*, port: int = 0, open_browser: bool = True,
     except (OSError, ValueError):
         existing_token = ""
     httpd, manager, token, actual = build_server(
-        port=port, state_path=state_path, token=existing_token or None)
+        port=port, state_path=state_path, token=existing_token or None,
+        host=host, allowed_origins=allowed_origins, base_path=base_path)
 
-    url = f"http://127.0.0.1:{actual}/?token={token}"
-    info = {"contract": "studio-v1", "port": actual, "url": url, "token": token,
-            "pid": os.getpid(), "state_path": str(state_path) if state_path else str(state_dir() / "state.db")}
+    local_url = f"http://127.0.0.1:{actual}/?token={token}"
+    url = (public_url.rstrip("/") + f"/?token={token}") if public_url else local_url
+    info = {"contract": "studio-v1", "port": actual, "url": url, "local_url": local_url,
+            "token": token, "host": host, "base_path": _normalize_base_path(base_path),
+            "pid": os.getpid(),
+            "state_path": str(state_path) if state_path else str(state_dir() / "state.db")}
     try:
         info_path.parent.mkdir(parents=True, exist_ok=True)
         info_path.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1206,6 +1240,8 @@ def serve(*, port: int = 0, open_browser: bool = True,
         pass
     print("synapforge studio（本地控制台）", flush=True)
     print(f"  {url}", flush=True)
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        print(f"  监听：{host}:{actual}（非回环，务必只经反代暴露）", flush=True)
     print(f"  状态库：{state_path or state_dir() / 'state.db'}", flush=True)
     print("  关闭：Ctrl-C", flush=True)
     if open_browser:

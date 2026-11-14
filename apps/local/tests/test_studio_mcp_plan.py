@@ -170,5 +170,94 @@ class RunPlanIdTests(unittest.TestCase):
         worker._cleanup_settings()
 
 
+class PlanPromptTests(unittest.TestCase):
+    """规划会话的提示词必须要求交任务卡。
+
+    线上实测过：漏掉这段指令时，主 Agent 会**自己把活干完**（直接写文件、
+    登记成果物），任务卡永远是空的，整个集群流程走不下去。
+    """
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory(prefix="sf-plan-prompt-")
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        self.state = root / "state.db"
+        store = open_store(self.state)
+        studio_store.ensure_schema(store)
+        self.lead = studio_agents.create_agent(
+            store, name="Planner", workspace=str(root / "ws"))
+        self.plan = studio_plans.create_plan(
+            store, lead_agent_id=self.lead["id"], objective="x")
+        store.close()
+
+    def _prompt(self, *, plan_id: str) -> str:
+        from synapforge.studio.agent_runtime import AgentRunWorker, RunBroker
+
+        worker = AgentRunWorker("arun-prompt", self.state, RunBroker(), plan_id=plan_id)
+        agent = {"name": "Planner", "system_prompt": "你是主控", "session_id": "",
+                 "allow_bash": False, "allow_web": False}
+        run = {"task_text": "聊聊要做什么", "workspace": "/tmp/ws"}
+        command = worker._command(agent, run)
+        worker._cleanup_settings()
+        self.assertIsNotNone(command)
+        return command[command.index("-p") + 1]
+
+    def test_plan_session_asks_for_task_card(self) -> None:
+        prompt = self._prompt(plan_id=self.plan["id"])
+        self.assertIn("synapforge_submit_plan", prompt)
+        # 不能还留着「直接开始做」那套：那会诱导它自己动手
+        self.assertNotIn("直接开始做，不要反问", prompt)
+
+    def test_normal_session_keeps_work_instruction(self) -> None:
+        prompt = self._prompt(plan_id="")
+        self.assertIn("直接开始做，不要反问", prompt)
+        self.assertNotIn("synapforge_submit_plan", prompt)
+
+    def test_resumed_plan_session_also_asks_for_task_card(self) -> None:
+        from synapforge.studio.agent_runtime import AgentRunWorker, RunBroker
+
+        worker = AgentRunWorker("arun-prompt2", self.state, RunBroker(),
+                                plan_id=self.plan["id"])
+        agent = {"name": "Planner", "system_prompt": "你是主控",
+                 "session_id": "11111111-2222-3333-4444-555555555555",
+                 "allow_bash": False, "allow_web": False}
+        run = {"task_text": "继续", "workspace": "/tmp/ws"}
+        command = worker._command(agent, run)
+        worker._cleanup_settings()
+        prompt = command[command.index("-p") + 1]
+        self.assertIn("synapforge_submit_plan", prompt)
+
+    def test_plan_command_mounts_mcp_config(self) -> None:
+        """光有指令不够：`--mcp-config` 不挂，主 Agent 手里根本没有那个工具。"""
+
+        from synapforge.studio.agent_runtime import AgentRunWorker, RunBroker
+
+        worker = AgentRunWorker("arun-mcp", self.state, RunBroker(),
+                                plan_id=self.plan["id"])
+        agent = {"name": "Planner", "system_prompt": "你是主控", "session_id": "",
+                 "allow_bash": False, "allow_web": False}
+        run = {"task_text": "拆任务", "workspace": "/tmp/ws"}
+        command = worker._command(agent, run)
+        self.assertIn("--mcp-config", command)
+        self.assertIn("mcp__synapforge_plan", " ".join(command))
+        config_path = command[command.index("--mcp-config") + 1]
+        payload = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        worker._cleanup_settings()
+        self.assertIn("synapforge_plan", payload["mcpServers"])
+        # 非托管形态不能加 --strict-mcp-config，否则用户自己的 MCP 会被一起掐掉
+        self.assertNotIn("--strict-mcp-config", command)
+
+    def test_normal_command_has_no_mcp_config(self) -> None:
+        from synapforge.studio.agent_runtime import AgentRunWorker, RunBroker
+
+        worker = AgentRunWorker("arun-nomcp", self.state, RunBroker())
+        agent = {"name": "Planner", "system_prompt": "x", "session_id": "",
+                 "allow_bash": False, "allow_web": False}
+        run = {"task_text": "干活", "workspace": "/tmp/ws"}
+        command = worker._command(agent, run)
+        worker._cleanup_settings()
+        self.assertNotIn("--mcp-config", command)
+
+
 if __name__ == "__main__":
     unittest.main()

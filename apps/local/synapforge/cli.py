@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any
 
@@ -262,6 +263,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("studio", help="启动本地 Agent 集群控制台（可写，仅回环）", parents=[common])
     p.add_argument("--port", type=int, default=0, help="0 = 随机端口")
     p.add_argument("--no-browser", action="store_true", help="不自动打开浏览器")
+    # 反代部署用：默认仍然只绑回环。暴露到公网必须同时给 --allowed-origin，
+    # 否则浏览器 Origin 会被拒（403 origin_rejected）。
+    p.add_argument("--host", default=os.environ.get("SYNAPFORGE_STUDIO_HOST", "127.0.0.1"),
+                   help="监听地址，默认 127.0.0.1")
+    p.add_argument("--allowed-origin", action="append", default=None,
+                   help="额外允许的 Origin（可多次给），如 https://example.com；"
+                        "也可用 SYNAPFORGE_STUDIO_ALLOWED_ORIGINS（逗号分隔）")
+    p.add_argument("--base-path", default=os.environ.get("SYNAPFORGE_STUDIO_BASE_PATH", ""),
+                   help="反代子路径，如 /studio")
+    p.add_argument("--public-url", default=os.environ.get("SYNAPFORGE_STUDIO_PUBLIC_URL", ""),
+                   help="对外访问地址，仅用于打印与写 studio.json")
 
     return parser
 
@@ -290,7 +302,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "studio":
         from .studio.server import serve
 
-        serve(port=args.port, open_browser=not args.no_browser, state_path=state)
+        origins = list(args.allowed_origin or [])
+        env_origins = os.environ.get("SYNAPFORGE_STUDIO_ALLOWED_ORIGINS", "")
+        origins += [item.strip() for item in env_origins.split(",") if item.strip()]
+        serve(port=args.port, open_browser=not args.no_browser, state_path=state,
+              host=args.host, allowed_origins=origins,
+              base_path=args.base_path, public_url=args.public_url)
         return 0
 
     store = open_store(state or db_path())
