@@ -12,6 +12,7 @@ import os
 import queue
 import shlex
 import subprocess
+import sys
 import threading
 import time
 from datetime import UTC, datetime
@@ -27,7 +28,7 @@ from . import plugins as studio_plugins
 from . import providers as studio_providers
 from . import routing as studio_routing
 from . import store as studio_store
-from .backends import _base_env, find_claude
+from .backends import MCP_SCRIPT, _base_env, find_claude
 from .commands import StudioError
 from .step_parser import StepParser
 
@@ -77,10 +78,11 @@ class RunBroker:
 
 class AgentRunWorker:
     def __init__(self, run_id: str, state_path: str | Path | None,
-                 broker: RunBroker) -> None:
+                 broker: RunBroker, plan_id: str = "") -> None:
         self.run_id = str(run_id)
         self.state_path = state_path
         self.broker = broker
+        self._plan_id = str(plan_id or "")
         self._stop = threading.Event()
         self._proc: subprocess.Popen | None = None
         self._proc_lock = threading.Lock()
@@ -415,6 +417,9 @@ class AgentRunWorker:
             return None
         tools = "Write,Read,Edit" + (",Bash" if agent.get("allow_bash") else "") + (
             ",WebSearch,WebFetch" if agent.get("allow_web", True) else "")
+        if str(self._plan_id or "").strip():
+            # 规划会话额外挂的 MCP server 必须显式放行，否则工具调用会被权限门拒绝
+            tools += ",mcp__synapforge_plan"
         command = [executable]
         # Claude Code 会把 ~/.claude/settings.json 的 env 合并进来（优先级高于进程环境）。
         # 选了渠道时必须用 --settings 重新声明 ANTHROPIC_*，否则会继续打到旧地址。
@@ -526,6 +531,17 @@ class AgentRunWorker:
             Path.home(), agent.get("mcp") or [], [agent])
         servers = dict(payload["mcpServers"])
         servers.update(self._plugin_parts.get("mcp") or {})
+        # 规划会话：额外挂一个 plan 作用域的 synapforge MCP，让 Agent 能用
+        # synapforge_submit_plan 提交结构化任务卡（比让它输出 JSON 可靠得多）
+        plan_id = str(self._plan_id or "").strip()
+        if plan_id:
+            args = [str(MCP_SCRIPT), "--agent", str(agent.get("id") or ""),
+                    "--plan", plan_id]
+            if self.state_path:
+                args += ["--state", str(self.state_path)]
+            servers["synapforge_plan"] = {
+                "command": sys.executable, "args": args,
+            }
         path.write_text(json.dumps({"mcpServers": servers},
                                    ensure_ascii=False, indent=2), encoding="utf-8")
         try:
@@ -761,7 +777,8 @@ class AgentWorker(threading.Thread):
             finally:
                 store.close()
             self.broker.publish(queued["id"], {"type": "run", "run": running})
-            runner = AgentRunWorker(queued["id"], self.state_path, self.broker)
+            runner = AgentRunWorker(queued["id"], self.state_path, self.broker,
+                                    plan_id=str(queued.get("plan_id") or ""))
             with self._lock:
                 self._current = runner
             try:

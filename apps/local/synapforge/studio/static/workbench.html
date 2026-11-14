@@ -3491,10 +3491,12 @@ async function generatePlanCard() {
 }
 
 function PLAN_INSTRUCTION_TEXT() {
-  return "现在请把上面的讨论整理成可执行的任务列表，只输出一个 JSON 数组，不要其它内容。"
-    + "每个元素包含 title、description、agent_name、role_prompt。"
+  return "现在请把上面的讨论整理成任务列表，调用 synapforge_submit_plan 工具提交。"
+    + "不要用文字描述计划，不要输出 JSON 代码块——直接调用工具，参数是 "
+    + "title / objective / tasks（每个任务含 title、description、agent_name、role_prompt）。"
     + "可用执行者：" + (S.agents || []).map(a => a.name).join("、")
-    + "。任务之间要能并行，每个任务都要有明确的产出文件。只输出 JSON 数组。";
+    + "。任务之间要能并行，每个任务都要有明确的产出文件，3-6 个为宜。"
+    + "提交后回复一句「计划已提交」，不要再做别的事。";
 }
 
 async function parsePlanCard() {

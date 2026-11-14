@@ -27,15 +27,19 @@ from .commands import StudioError
 
 MAX_ITEMS = 20
 
-PLAN_INSTRUCTION = """现在请把上面的讨论整理成**可执行的任务列表**，只输出一个 JSON 数组，不要其它内容。
+PLAN_INSTRUCTION = """现在请把上面的讨论整理成任务列表，**调用 `synapforge_submit_plan` 工具提交**。
 
-每个元素：
-{
-  "title": "任务标题（短，可识别）",
-  "description": "具体要做什么、交付什么文件",
-  "agent_name": "执行者名字（从下面列表里选）",
-  "role_prompt": "给这个执行者的一句话补充要求（可空）"
-}
+不要用文字描述计划，不要输出 JSON 代码块——直接调用工具：
+
+synapforge_submit_plan(
+  title="计划标题",
+  objective="一句话说清要达成什么",
+  tasks=[
+    {title: "任务标题", description: "要做什么、交付什么文件",
+     agent_name: "执行者名字", role_prompt: "一句话补充要求"},
+    ...
+  ]
+)
 
 可用的执行者：
 {agents}
@@ -44,7 +48,8 @@ PLAN_INSTRUCTION = """现在请把上面的讨论整理成**可执行的任务�
 1. 任务之间尽量独立，能并行执行；
 2. 每个任务都要有明确的产出文件；
 3. 不要写"等待"、"依赖"这类无法并行的工作；
-4. 只输出 JSON 数组。"""
+4. 3-6 个任务为宜。
+5. 提交后回复一句"计划已提交"，不要再做别的事。"""
 
 
 # ---- 解析 -------------------------------------------------------------------
@@ -220,7 +225,8 @@ def send_message(store: Any, plan_id: str, text: str) -> dict[str, Any]:
     body = str(text or "").strip()
     if not body:
         raise StudioError("message_required", ["消息不能为空"])
-    result = studio_agents.start_task(store, plan["lead_agent_id"], body)
+    result = studio_agents.start_task(store, plan["lead_agent_id"], body,
+                                      plan_id=plan_id)
     studio_store.update_cluster_plan(
         store, plan_id, chat_run_id=str(result["run"]["id"]), status="CHAT")
     return {"plan": studio_store.get_cluster_plan(store, plan_id), **result}
@@ -239,19 +245,30 @@ def _last_assistant_text(store: Any, run_id: str) -> str:
 
 
 def generate_plan(store: Any, plan_id: str, *, text: str = "") -> dict[str, Any]:
-    """从主 Agent 最后一条回复里提取任务卡；也可直接传入文本（重试）。"""
+    """确认任务卡：优先用 MCP 工具提交的结果；没有才回退到解析文本。
+
+    `synapforge_submit_plan` 已经把结构化任务写进 `items`，这里直接认；
+    只有老会话（工具还没接上）才走文本解析兜底。
+    """
 
     plan = studio_store.get_cluster_plan(store, plan_id)
     if plan is None:
         raise StudioError("plan_not_found", [str(plan_id)])
+
+    existing = _resolve_items(store, plan["items"] or [])
+    if existing and plan["status"] in ("READY", "CONFIRMED"):
+        return {"ok": True, "plan": plan, "items": existing, "raw": "",
+                "source": "tool"}
+
     source = str(text or "").strip() or _last_assistant_text(store, plan["chat_run_id"])
     parsed = parse_items(source)
     if not parsed["ok"]:
-        return {"ok": False, "plan": plan, **parsed}
+        return {"ok": False, "plan": plan, **parsed, "source": "text"}
     items = _resolve_items(store, parsed["items"])
     updated = studio_store.update_cluster_plan(
         store, plan_id, items=items, status="READY")
-    return {"ok": True, "plan": updated, "items": items, "raw": parsed["raw"]}
+    return {"ok": True, "plan": updated, "items": items, "raw": parsed["raw"],
+            "source": "text"}
 
 
 def update_items(store: Any, plan_id: str,
@@ -279,6 +296,35 @@ def update_items(store: Any, plan_id: str,
     resolved = _resolve_items(store, cleaned)
     updated = studio_store.update_cluster_plan(store, plan_id, items=resolved)
     return {"plan": updated, "items": resolved}
+
+
+def submit_plan(store: Any, plan_id: str, items: list[dict[str, Any]], *,
+                title: str = "", objective: str = "") -> dict[str, Any]:
+    """MCP 工具入口：主 Agent 通过 `synapforge_submit_plan` 提交结构化计划。
+
+    和文本解析的区别：这里**不需要猜测格式**，参数已经是结构化的。
+    """
+
+    plan = studio_store.get_cluster_plan(store, plan_id)
+    if plan is None:
+        raise StudioError("plan_not_found", [str(plan_id)])
+    if not items:
+        raise StudioError("plan_empty", ["至少要有一个任务"])
+    resolved = _resolve_items(store, items[:MAX_ITEMS])
+    fields: dict[str, Any] = {"items": resolved, "status": "READY"}
+    if title:
+        fields["title"] = str(title)[:120]
+    if objective:
+        fields["objective"] = str(objective)[:500]
+    updated = studio_store.update_cluster_plan(store, plan_id, **fields)
+    return {
+        "ok": True,
+        "plan_id": plan_id,
+        "item_count": len(resolved),
+        "items": resolved,
+        "plan": updated,
+        "next": "计划已提交，等待用户在界面上确认后执行。",
+    }
 
 
 def plan_prompt(store: Any, plan_id: str) -> str:

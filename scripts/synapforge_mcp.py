@@ -28,10 +28,12 @@ def main(argv: list[str] | None = None) -> int:
                                      description="synapforge 本地协作协议的 MCP 薄壳（stdio）")
     parser.add_argument("--agent", default=None, help="默认 Agent id")
     parser.add_argument("--project", default=None, help="默认项目 id")
+    parser.add_argument("--plan", default=None, help="默认规划 id（规划会话专用）")
     parser.add_argument("--state", default=None, help="状态库路径（默认 ~/.synapforge/state.db）")
     args = parser.parse_args(argv)
 
-    server = McpServer(agent_id=args.agent, project_id=args.project, store_path=args.state)
+    server = McpServer(agent_id=args.agent, project_id=args.project,
+                       store_path=args.state, plan_id=args.plan)
     try:
         return serve_stdio(server)
     finally:

@@ -20,9 +20,11 @@ from pathlib import Path
 
 from synapforge import commands
 from synapforge.db import open_store
-from synapforge.mcp import TOOLS, McpServer, McpToolError, handle_message
+from synapforge.mcp import TOOLS, McpServer, McpToolError, handle_message, tools_for
 
 TOOL_BUDGET = 17  # 15 → 16 加 synapforge_say；16 → 17 加 synapforge_contract（契约是核心能力）。
+# synapforge_submit_plan 是规划会话专用，由 tools_for(plan_mode=True) 单独暴露，
+# 不计入普通协作会话的工具预算。
 MCP_ENTRY = Path(__file__).resolve().parents[1] / ".." / ".." / "scripts" / "synapforge_mcp.py"
 
 
@@ -30,8 +32,17 @@ class ToolSurfaceTests(unittest.TestCase):
     def test_tool_count_within_context_budget(self) -> None:
         """工具 schema 会进模型上下文——300 条路由不能变成 300 个工具。"""
 
-        self.assertLessEqual(len(TOOLS), TOOL_BUDGET,
-                             f"工具数 {len(TOOLS)} 超过预算 {TOOL_BUDGET}：先收敛动词，不要加工具")
+        normal = tools_for()
+        self.assertLessEqual(len(normal), TOOL_BUDGET,
+                             f"工具数 {len(normal)} 超过预算 {TOOL_BUDGET}：先收敛动词，不要加工具")
+        self.assertNotIn("synapforge_submit_plan", [t["name"] for t in normal])
+
+    def test_plan_mode_exposes_submit_plan_only_there(self) -> None:
+        plan_tools = tools_for(plan_mode=True)
+        self.assertIn("synapforge_submit_plan", [t["name"] for t in plan_tools])
+        self.assertEqual(len(plan_tools), len(tools_for()) + 1)
+        for tool in plan_tools:
+            self.assertNotIn("scopes", tool, "内部字段不该出现在 MCP schema 里")
 
     def test_tool_names_are_unique_and_prefixed(self) -> None:
         names = [tool["name"] for tool in TOOLS]
@@ -85,7 +96,7 @@ class JsonRpcTests(unittest.TestCase):
                                                        "method": "notifications/initialized"}))
 
     def test_tools_list_returns_all_tools(self) -> None:
-        self.assertEqual(len(self._call("tools/list")["result"]["tools"]), len(TOOLS))
+        self.assertEqual(len(self._call("tools/list")["result"]["tools"]), len(tools_for()))
 
     def test_unknown_method_is_protocol_error(self) -> None:
         response = self._call("does/not/exist")
@@ -208,7 +219,7 @@ class StdioTransportTests(unittest.TestCase):
             self.assertEqual(reply["jsonrpc"], "2.0")
             self.assertIn("id", reply)
         self.assertEqual(replies[0]["id"], 1)
-        self.assertEqual(len(replies[1]["result"]["tools"]), len(TOOLS))
+        self.assertEqual(len(replies[1]["result"]["tools"]), len(tools_for()))
         status = json.loads(replies[2]["result"]["content"][0]["text"])
         self.assertEqual(status["project_id"], pid)
 

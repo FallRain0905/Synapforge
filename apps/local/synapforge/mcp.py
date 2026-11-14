@@ -218,7 +218,53 @@ TOOLS: list[dict[str, Any]] = [
             "task_id": _s("publish 时关联的任务 id"),
         }, ["action"]),
     },
+    {
+        "name": "synapforge_submit_plan",
+        "description": (
+            "把讨论结果提交成结构化任务计划。这是**唯一**正确的提交方式："
+            "不要用文字描述计划，直接调用这个工具。提交后用户在界面上确认并执行。"
+        ),
+        "inputSchema": _schema({
+            "title": _s("计划标题（短）"),
+            "objective": _s("计划目标（一句话说清要达成什么）"),
+            "tasks": {
+                "type": "array",
+                "description": "任务列表；每个任务分配给一个执行者，各自并行执行",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": _s("任务标题（短，可识别）"),
+                        "description": _s("具体要做什么、交付什么文件"),
+                        "agent_name": _s("执行者名字；留空=由用户指定"),
+                        "model": _s("执行模型；留空=用该 Agent 默认"),
+                        "role_prompt": _s("给这个执行者的一句话补充要求"),
+                    },
+                    "required": ["title"],
+                    "additionalProperties": False,
+                },
+            },
+            "plan_id": _s("提交到哪个规划；省略则用服务启动时的默认规划"),
+        }, ["tasks"]),
+        # 只在规划会话里暴露：普通协作会话的工具预算不该被它挤占
+        "scopes": ("plan",),
+    },
 ]
+
+# 普通协作会话暴露的工具（排除规划专用）
+PLAN_ONLY_TOOLS = frozenset({"synapforge_submit_plan"})
+
+
+def tools_for(*, plan_mode: bool = False) -> list[dict[str, Any]]:
+    """按会话类型裁剪工具集：规划会话多一个 submit_plan，普通会话看不到它。"""
+
+    out: list[dict[str, Any]] = []
+    for tool in TOOLS:
+        plan_only = tool["name"] in PLAN_ONLY_TOOLS
+        if plan_only and not plan_mode:
+            continue
+        item = {key: value for key, value in tool.items() if key != "scopes"}
+        out.append(item)
+    return out
 
 
 # ---- 工具分发 ---------------------------------------------------------------
@@ -241,9 +287,10 @@ def _need(args: dict[str, Any], key: str) -> Any:
 
 class McpServer:
     def __init__(self, *, agent_id: str | None = None, project_id: str | None = None,
-                 store_path: Any = None) -> None:
+                 store_path: Any = None, plan_id: str | None = None) -> None:
         self.default_agent = agent_id
         self.default_project = project_id
+        self.default_plan = plan_id
         self._store_path = store_path
         self._store: Any = None
 
@@ -432,6 +479,41 @@ class McpServer:
                 agent_id=self._agent(args), task_id=args.get("task_id"))
         raise McpToolError("invalid_argument", ["action: 必须是 list / read / publish"])
 
+    def _tool_submit_plan(self, args: dict[str, Any]) -> Any:
+        """把计划写进 local_cluster_plans，用户在界面上确认。"""
+
+        from .studio import plans as studio_plans
+
+        plan_id = str(args.get("plan_id") or self.default_plan or "").strip()
+        if not plan_id:
+            raise McpToolError(
+                "plan_required",
+                ["plan_id: 未提供，且服务启动时没有默认规划（这是规划会话专用的工具）"])
+        tasks = args.get("tasks")
+        if not isinstance(tasks, list) or not tasks:
+            raise McpToolError("missing_argument", ["tasks: 至少一个任务"])
+        items = []
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            title = str(task.get("title") or "").strip()
+            if not title:
+                continue
+            items.append({
+                "title": title[:120],
+                "description": str(task.get("description") or "").strip()[:4000],
+                "agent_name": str(task.get("agent_name") or "").strip(),
+                "model": str(task.get("model") or "").strip(),
+                "role_prompt": str(task.get("role_prompt") or "").strip()[:500],
+            })
+        if not items:
+            raise McpToolError("missing_argument", ["tasks: 每条至少要有 title"])
+        result = studio_plans.submit_plan(
+            self.store, plan_id, items,
+            title=str(args.get("title") or "").strip(),
+            objective=str(args.get("objective") or "").strip())
+        return result
+
 
 # ---- JSON-RPC / stdio -------------------------------------------------------
 
@@ -469,7 +551,8 @@ def handle_message(server: McpServer, message: dict[str, Any]) -> dict[str, Any]
         if method == "ping":
             return {"jsonrpc": "2.0", "id": request_id, "result": {}}
         if method == "tools/list":
-            return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": TOOLS}}
+            visible = tools_for(plan_mode=bool(getattr(server, "default_plan", None)))
+            return {"jsonrpc": "2.0", "id": request_id, "result": {"tools": visible}}
         if method == "tools/call":
             name = str(params.get("name") or "")
             arguments = params.get("arguments") or {}
@@ -533,4 +616,5 @@ def serve_stdio(server: McpServer, *, stdin: Any = None, stdout: Any = None) -> 
     return 0
 
 
-__all__ = ["McpServer", "McpToolError", "PROTOCOL_VERSION", "TOOLS", "handle_message", "serve_stdio"]
+__all__ = ["McpServer", "McpToolError", "PROTOCOL_VERSION", "TOOLS", "tools_for",
+           "handle_message", "serve_stdio"]

@@ -152,7 +152,8 @@ def delete_agent(store: Any, agent_id: str) -> dict[str, Any]:
     return {"deleted": True, "agent_id": agent_id, "name": agent["name"]}
 
 
-def start_task(store: Any, agent_id: str, task_text: str) -> dict[str, Any]:
+def start_task(store: Any, agent_id: str, task_text: str, *,
+               plan_id: str = "") -> dict[str, Any]:
     agent = get_agent_or_error(store, agent_id)
     text = str(task_text or "").strip()
     if not text:
@@ -176,7 +177,7 @@ def start_task(store: Any, agent_id: str, task_text: str) -> dict[str, Any]:
         task_id=str(task["id"]), task_text=text,
         model=agent["model"] or default_model,
         backend=agent["backend"], provider_id=agent["provider_id"],
-        workspace=agent["workspace"], status="QUEUED")
+        workspace=agent["workspace"], status="QUEUED", plan_id=str(plan_id or ""))
     return {"run": run, "task": task, "agent": agent,
             "provider_name": provider["name"] if provider else "本机默认",
             "queue_position": studio_store.queue_position(store, agent_id)}

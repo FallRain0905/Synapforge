@@ -210,6 +210,7 @@ CREATE TABLE IF NOT EXISTS local_agent_runs (
     agent_id TEXT NOT NULL,
     project_id TEXT NOT NULL,
     task_id TEXT NOT NULL DEFAULT '',
+    plan_id TEXT NOT NULL DEFAULT '',
     task_text TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'RUNNING',
     backend TEXT NOT NULL DEFAULT 'claude',
@@ -264,6 +265,7 @@ def ensure_schema(store: Any) -> None:
     _ensure_column(store, "local_agents", "plugins_json", "TEXT NOT NULL DEFAULT '[]'")
     _ensure_column(store, "local_agent_runs", "provider_id", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(store, "local_agent_runs", "backend", "TEXT NOT NULL DEFAULT 'claude'")
+    _ensure_column(store, "local_agent_runs", "plan_id", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(store, "local_cluster_roles", "local_agent_id", "TEXT NOT NULL DEFAULT ''")
     _ensure_column(store, "local_cluster_roles", "role_prompt", "TEXT NOT NULL DEFAULT ''")
 
@@ -912,6 +914,7 @@ def _agent_run(row: Any) -> dict[str, Any]:
         "agent_id": row["agent_id"],
         "project_id": row["project_id"],
         "task_id": row["task_id"],
+        "plan_id": row["plan_id"] if "plan_id" in keys else "",
         "task_text": row["task_text"],
         "status": row["status"],
         "backend": row["backend"] if "backend" in keys else "claude",
@@ -1341,14 +1344,14 @@ def delete_agent(store: Any, agent_id: str) -> None:
 def create_agent_run(store: Any, *, agent_id: str, project_id: str, task_id: str,
                      task_text: str, model: str, workspace: str,
                      status: str = "QUEUED", backend: str = "claude",
-                     provider_id: str = "") -> dict[str, Any]:
+                     provider_id: str = "", plan_id: str = "") -> dict[str, Any]:
     run_id = new_id("arun")
     store.db.execute(
-        "INSERT INTO local_agent_runs (id, agent_id, project_id, task_id, task_text,"
-        " status, backend, provider_id, model, workspace, started_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (run_id, str(agent_id), str(project_id), str(task_id), task_text, status,
-         backend, provider_id, model, workspace, now_iso()))
+        "INSERT INTO local_agent_runs (id, agent_id, project_id, task_id, plan_id,"
+        " task_text, status, backend, provider_id, model, workspace, started_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (run_id, str(agent_id), str(project_id), str(task_id), str(plan_id or ""),
+         task_text, status, backend, provider_id, model, workspace, now_iso()))
     store.db.commit()
     return get_agent_run(store, run_id)  # type: ignore[return-value]
 
