@@ -70,7 +70,7 @@ http://127.0.0.1:8765/?token=...
 
 **侧栏与视图（对齐 magpie）**
 
-- **工作**：`Agent 工作台`（默认）、`运行记录`（所有任务，点进看完整步骤）、`会话`（同一 Claude session 的多次运行聚合）、`交付`（所有成果物，按 Agent + 文件名聚合版本）、**`集群工作`**（lead + worker 长周期任务，原生视图，不再跳转）。
+- **工作**：`集群工作`（**默认首页**，对话式规划 → 任务卡 → 并排执行，其下有「状态」子栏）、`Agent 工作台`（单 Agent 对话与交付，其下是 Agent 子栏）、`运行记录`、`会话`、`交付`。
 - **Agents**：Agent 列表；**点整张卡片**就展开它的会话下拉（再点收起），不用找小箭头。
 - **模型**：`模型与智能体`（智能体 / 渠道 / 执行体 / 能力 / 方案）、`路由`（本机网关 + key 池）、`扩展库`（跨 Agent 集中管理技能/MCP/插件）。
 - **观测**：`用量`（花费、tokens 构成、缓存命中、按 Agent/模型/渠道/天）。
@@ -197,7 +197,36 @@ Agent 卡上的「扩展」按钮打开三个 Tab；都按单个 Agent 生效，
 - 顶部计数 + 搜索（按名称 / 描述 / 路径过滤）。
 - 技能支持「导入技能」：填本地目录复制到 `~/.agents/skills/<name>`，不联网。
 
-### 集群工作（侧栏「工作」组）
+### 集群工作（默认首页，三个阶段的 Tab）
+
+**1 · 对话**：和主 Agent 多轮聊清任务。每条消息是一次普通 Agent 运行（续接同一会话），
+所以流式、思考、工具调用都直接复用 Agent 工作台那套。
+
+**2 · 任务卡**：点「生成任务卡」，主 Agent 输出 JSON 任务数组，后端解析成可编辑卡片：
+
+```
+1  [任务标题]                                    移除
+   [具体要做什么、交付什么文件]
+   执行体 [Writer ▾]    模型 [auto/glm-5.3-flash ▾]
+   [本轮职责（可选）]
+＋ 添加任务
+```
+
+- 解析容错：支持 ```json 围栏、裸数组、包在对象里的 `tasks`；失败会显示模型原文并让你重试。
+- 执行体解析不到时该条标红并给出原因，不静默丢弃。
+- 同一 `(Agent, 模型)` 的多个任务共用一个执行体角色。
+
+**3 · 执行**：确认后自动建集群、预置任务（**不再让 lead 重复拆解**），进入并排面板：
+
+- 每个执行体一个面板，显示状态、模型、步数、最近 4 步；`RUNNING` 时实时流式更新。
+- 点面板标题展开 → 占满整行，用和 Agent 详情页一样的对话样式显示完整步骤
+  （思考/工具/工具结果可折叠）。
+- 一个 SSE 连接推该集群所有角色的事件，按 `role_id` 分发到面板。
+
+**「状态」子栏**：原来的六 Tab 集群视图（角色/任务/事件/成果物/运行/预算），
+用来查完整状态、复核任务、看预算与停止原因。
+
+### 集群工作（侧栏「状态」子栏，完整状态）
 
 **角色直接复用已有 Agent**：新建集群时从 Agent 列表挑 lead 和 worker，继承它的渠道、
 模型、角色卡、Bash/联网开关、技能、MCP、插件；每个角色只需再填一句「本轮职责」。
@@ -297,6 +326,7 @@ lead 有活时只派 lead（避免和 worker 抢同一批任务）；lead 空闲
 `mcp_managed` / `plugins_json` / `session_id`）/ `local_agent_runs`（含 `QUEUED`、渠道/执行体快照）/
 `local_agent_steps` / `local_agent_sessions`（会话标题/归档）/
 `local_plugins`（插件库）/ `local_profiles`（方案快照）/
+`local_cluster_plans`（规划草稿）/ `local_cluster_steps`（角色级步骤流）/
 `local_provider_keys`（渠道 key 池）/
 `local_providers`（渠道，key 只在本机），仍在同一个 `~/.synapforge/state.db`。
 
@@ -378,6 +408,15 @@ CLI 需要自己支持 MCP（或用环境变量 `SYNAPFORGE_MCP_CONFIG` 自己�
 
 ```
 GET  /api/studio/state[?cluster_id=]
+GET  /api/studio/plans                    # 规划草稿列表
+GET  /api/studio/plans/{id}               # 含对话 runs + steps + 任务卡
+POST /api/studio/plans                    # {lead_agent_id} 新建规划
+POST /api/studio/plans/{id}/messages      # {text} 发一条规划消息（建 run）
+POST /api/studio/plans/{id}/generate      # 解析主 Agent 回复为任务卡
+PATCH|PUT /api/studio/plans/{id}/items    # {items} 手工改任务卡
+POST /api/studio/plans/{id}/confirm       # 建集群 + 预置任务 + 启动
+POST /api/studio/plans/{id}/discard
+GET  /api/studio/clusters/{id}/stream?token=…   # SSE：cluster / step / step_update / role / done
 GET  /api/studio/clusters[/{id}]
 POST /api/studio/clusters
 POST /api/studio/clusters/{id}/roles      # {agent_id, role_prompt} 从 Agent 加角色
@@ -486,5 +525,6 @@ python -X utf8 -m unittest discover -s tests -p "test_*.py"
 覆盖：集群/角色/运行持久化、建集群/启停/指令/复核、假后端双 Agent 全流程、
 HTTP token/Origin、渠道 CRUD/连接检测/本机路由/多 key 池与失败分类、会话聚合/重命名/导出、
 技能挂载/MCP 配置/记忆读写、插件安装/解析/挂载/卸载、方案保存/应用、
-**集群角色复用 Agent（继承配置/本轮职责/同 Agent 进多集群/加删角色）**、
-**集群并发（同时跑/并发上限/失败隔离）**、UI JS 语法。
+集群角色复用 Agent（继承配置/本轮职责/同 Agent 进多集群/加删角色）、
+集群并发（同时跑/并发上限/失败隔离）、**规划解析与确认建集群**、
+**stream-json 解析器（单 Agent 与集群共用）**、**集群角色步骤落库**、UI JS 语法。

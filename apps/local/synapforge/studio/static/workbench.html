@@ -595,6 +595,59 @@ main { min-width:0; display:flex; flex-direction:column; min-height:0; backgroun
   font:11px/1.55 var(--code); color:var(--fg-2); white-space:pre-wrap; overflow-wrap:anywhere; }
 .ubar i.red { background:var(--red); }
 
+/* 集群工作：三阶段 */
+.plan-chat { display:flex; flex-direction:column; gap:10px; }
+.plan-chat-body { min-height:300px; }
+.plan-composer { background:var(--card); border:1px solid var(--line); border-radius:12px;
+  padding:9px 10px 8px 13px; }
+.plan-composer textarea { width:100%; min-height:52px; max-height:160px; resize:vertical;
+  border:0; outline:none; background:transparent; font-size:13px; line-height:1.5;
+  color:var(--fg); }
+.plan-composer textarea::placeholder { color:var(--faint); }
+.plan-composer .row { display:flex; align-items:center; justify-content:space-between;
+  gap:10px; }
+.plan-composer .hint { color:var(--faint); font-size:10.5px; }
+.plan-card-wrap { display:flex; flex-direction:column; gap:10px; }
+.plan-item { background:var(--card); border:1px solid var(--line); border-radius:11px;
+  padding:11px 13px; display:flex; flex-direction:column; gap:8px; }
+.plan-item.invalid { border-color:var(--red); }
+.pi-head { display:flex; align-items:center; gap:8px; }
+.pi-num { flex:none; width:20px; height:20px; border-radius:50%; background:var(--pill);
+  color:var(--muted); display:grid; place-items:center; font-size:10px;
+  font-family:var(--code); }
+.pi-title { flex:1; }
+.pi-desc { min-height:56px; resize:vertical; font-size:12px; line-height:1.5; }
+.pi-row { display:grid; grid-template-columns:1fr 1fr; gap:9px; }
+.pi-row label { display:flex; flex-direction:column; gap:4px; color:var(--muted);
+  font-size:10.5px; }
+.pi-prompt { font-size:11.5px; }
+.pi-error { color:var(--red); font-size:10.5px; }
+.ctl { width:100%; height:30px; border:1px solid var(--line); border-radius:7px;
+  background:var(--card-2); color:var(--fg); font-size:12px; padding:0 8px; }
+textarea.ctl { height:auto; padding:7px 8px; }
+.ctl:focus { outline:none; border-color:var(--accent); }
+.run-wrap { display:flex; flex-direction:column; gap:10px; }
+.run-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.exec-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:10px; }
+.exec-panel { background:var(--card); border:1px solid var(--line); border-radius:11px;
+  overflow:hidden; display:flex; flex-direction:column; }
+.exec-panel.open { grid-column:1/-1; border-color:var(--accent); }
+.ep-head { display:flex; align-items:center; gap:9px; padding:10px 12px; cursor:pointer; }
+.ep-head:hover { background:var(--pill); }
+.ep-head .grow { flex:1; min-width:0; }
+.ep-head .name { display:flex; align-items:center; gap:6px; font-size:12.5px; font-weight:500; }
+.ep-head .sub { color:var(--muted); font-size:10.5px; margin-top:2px; }
+.ep-body { padding:0 12px 11px; }
+.ep-last { color:var(--fg-2); font-size:11.5px; line-height:1.5; overflow-wrap:anywhere; }
+.ep-recent { margin-top:6px; display:flex; flex-direction:column; gap:3px; }
+.ep-line { display:flex; align-items:center; gap:6px; color:var(--muted); font-size:10.5px;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ep-detail { padding:4px 12px 12px; border-top:1px solid var(--line-2); max-height:60vh;
+  overflow:auto; }
+.ep-hint { margin-top:6px; color:var(--faint); font-size:10px; }
+.nav-row.sub { height:26px; font-size:12px; padding-left:2px; }
+.nav-row.sub svg { width:14px; height:14px; }
+
 /* modal */
 .modal { position:fixed; inset:0; z-index:30; display:flex; align-items:flex-start;
   justify-content:center; padding:7vh 16px; background:rgba(0,0,0,.55); }
@@ -629,7 +682,18 @@ main { min-width:0; display:flex; flex-direction:column; min-height:0; backgroun
     </div>
     <div class="side-scroll">
       <div class="nav-gl">工作</div>
-      <button class="nav-row on" data-view="workbench">
+      <button class="nav-row on" data-view="clusterchat">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="10" r="2.5"/><circle cx="14" cy="5" r="2.5"/><circle cx="14" cy="15" r="2.5"/><path d="M8.4 9l3.3-2.6M8.4 11l3.3 2.6"/></g></svg>
+        <span>集群工作</span>
+        <em class="nav-count" id="planCount"></em>
+      </button>
+      <div class="agent-sub" id="clusterStatusSub">
+        <button class="nav-row sub" data-view="clusters">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="6"/><path d="M10 7v3.4l2.2 1.4"/></g></svg>
+          <span>状态</span>
+        </button>
+      </div>
+      <button class="nav-row" data-view="workbench">
         <svg viewBox="0 0 20 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="6" height="6" rx="1.4"/><rect x="11" y="3" width="6" height="6" rx="1.4"/><rect x="3" y="11" width="6" height="6" rx="1.4"/><rect x="11" y="11" width="6" height="6" rx="1.4"/></g></svg>
         <span>Agent 工作台</span>
         <em class="nav-count" id="agentCount"></em>
@@ -649,10 +713,6 @@ main { min-width:0; display:flex; flex-direction:column; min-height:0; backgroun
       <button class="nav-row" data-view="artifacts">
         <svg viewBox="0 0 20 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 2.8h7l4 4V17a.8.8 0 0 1-.8.8H5a.8.8 0 0 1-.8-.8V3.6A.8.8 0 0 1 5 2.8Z"/><path d="M12 2.8V7h4.2M6.8 10h6.4M6.8 12.6h6.4M6.8 15.2h4"/></g></svg>
         <span>交付</span>
-      </button>
-      <button class="nav-row" data-view="clusters">
-        <svg viewBox="0 0 20 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="10" r="2.5"/><circle cx="14" cy="5" r="2.5"/><circle cx="14" cy="15" r="2.5"/><path d="M8.4 9l3.3-2.6M8.4 11l3.3 2.6"/></g></svg>
-        <span>集群工作</span>
       </button>
       <div class="nav-gl">模型</div>
       <button class="nav-row" data-view="models">
@@ -944,11 +1004,13 @@ main { min-width:0; display:flex; flex-direction:column; min-height:0; backgroun
 const TOKEN_KEY = "sf.studio.token";
 const S = { token:"", agents:[], models:{models:[],channels:[],default:""}, agent:null, run:null,
             steps:[], artifacts:[], artifactGroups:[], stream:null, selectedArtifact:null, busy:false,
-            view:"workbench", runs:[], allArtifacts:[], usage:null, settings:null,
+            view:"clusterchat", runs:[], allArtifacts:[], usage:null, settings:null,
             providers:[], routes:[], capabilities:null, modelsTab:"agents", routeScanning:false,
             profiles:[], folds:{}, routesSummary:{}, openSessions:{}, agentSessions:{},
             activeSession:null, modelPickerOpen:false, modelFilter:"", library:null, libQuery:"",
             cluster:null, clusters:[], clusterTab:"roles", clusterOpen:{}, clusterLogs:{},
+            plan:null, planPhase:"chat", planRuns:[], planSteps:[], planStream:null,
+            clusterStream:null, panelSteps:{}, expandedRole:"",
             checks:{}, sessions:[], sessionQuery:"", sessionAgent:"", sessionArchived:false,
             sessionDetail:null, sessionRuns:[], session:null,
             ext:null, extTab:"memory",
@@ -1378,9 +1440,11 @@ function renderNav() {
   document.querySelectorAll(".nav-row[data-view]").forEach(el => {
     el.classList.toggle("on", el.dataset.view === S.view);
   });
-  // Agent 子栏只在「Agent 工作台」视图展开
+  // Agent 子栏只在「Agent 工作台」视图展开；集群状态子栏只在「集群工作」展开
   const sub = document.getElementById("agentSubList");
   if (sub) sub.classList.toggle("collapsed", S.view !== "workbench");
+  const clusterSub = document.getElementById("clusterStatusSub");
+  if (clusterSub) clusterSub.classList.toggle("collapsed", S.view !== "clusterchat");
 }
 
 function switchView(view) {
@@ -1451,6 +1515,16 @@ async function loadViewData(view) {
       if (S.view === "routes") renderView();
       if (!S.routes.length) loadRoutes();
       return;
+    } else if (view === "clusterchat") {
+      const plan = await ensurePlan();
+      S.view = "clusterchat";
+      S.planPhase = planPhaseOf(plan);
+      if (plan) S.planSteps = (plan.steps || []).slice();
+      renderView();
+      if (plan && S.planPhase === "run" && plan.cluster_id) {
+        await loadClusterRun(plan.cluster_id);
+      }
+      return;
     } else if (view === "clusters") {
       const q = S.cluster && S.cluster.id
         ? `?cluster_id=${encodeURIComponent(S.cluster.id)}` : "";
@@ -1481,6 +1555,7 @@ function renderWideView() {
   const box = document.getElementById("sessionInner");
   if (S.view === "runs") return renderRunsView(box);
   if (S.view === "sessions") return renderSessionsView(box);
+  if (S.view === "clusterchat") return renderClusterChatView(box);
   if (S.view === "library") return renderLibraryView(box);
   if (S.view === "routes") return renderRoutesView(box);
   if (S.view === "clusters") return renderClustersView(box);
@@ -3221,6 +3296,591 @@ async function addRoleFromAgent() {
 
 async function renderClustersViewPlaceholder() { /* 占位，避免误调用 */ }
 
+/* ========== 集群工作：对话 → 任务卡 → 并排执行 ========== */
+
+function planPhaseOf(plan) {
+  if (!plan) return "chat";
+  if (plan.status === "CONFIRMED" && plan.cluster_id) return "run";
+  if ((plan.items || []).length) return "plan";
+  return "chat";
+}
+
+async function ensurePlan() {
+  if (S.plan && S.plan.id) return S.plan;
+  try {
+    const data = await api("/api/studio/plans");
+    const plans = data.plans || [];
+    if (plans.length) {
+      const detail = await api(`/api/studio/plans/${encodeURIComponent(plans[0].id)}`);
+      S.plan = detail.plan;
+      S.planPhase = planPhaseOf(S.plan);
+      return S.plan;
+    }
+  } catch (e) { /* 没有计划是正常的 */ }
+  return null;
+}
+
+async function createNewPlan() {
+  if (!S.agents.length) { toast("先新建一个 Agent"); return; }
+  const lead = S.agents[0];
+  try {
+    const data = await api("/api/studio/plans", {
+      method:"POST",
+      body:JSON.stringify({lead_agent_id: lead.id, objective: ""}),
+    });
+    S.plan = data.plan;
+    S.planPhase = "chat";
+    S.planSteps = [];
+    renderClusterChatView(document.getElementById("sessionInner"));
+    toast(`已和 ${lead.name} 开始规划`);
+  } catch (e) { toast(e.message); }
+}
+
+async function openPlan(planId) {
+  closePlanStream();
+  try {
+    const data = await api(`/api/studio/plans/${encodeURIComponent(planId)}`);
+    S.plan = data.plan;
+    S.planPhase = planPhaseOf(S.plan);
+    S.planSteps = (S.plan.steps || []).slice();
+    renderClusterChatView(document.getElementById("sessionInner"));
+    if (S.planPhase === "chat" && S.plan.run &&
+        ["RUNNING", "QUEUED"].includes(S.plan.run.status)) {
+      openPlanStream(S.plan.run.id);
+    }
+    if (S.planPhase === "run" && S.plan.cluster_id) {
+      await loadClusterRun(S.plan.cluster_id);
+    }
+  } catch (e) { toast(e.message); }
+}
+
+function closePlanStream() {
+  if (S.planStream) { try { S.planStream.close(); } catch (e) {} S.planStream = null; }
+}
+
+function openPlanStream(runId) {
+  closePlanStream();
+  const url = `/api/studio/runs/${encodeURIComponent(runId)}/stream?token=${encodeURIComponent(S.token)}`;
+  const es = new EventSource(url);
+  S.planStream = es;
+  es.addEventListener("step", ev => {
+    try {
+      const step = JSON.parse(ev.data).step;
+      if (!step || !step.seq) return;
+      if (S.planSteps.some(s => s.seq === step.seq)) return;
+      S.planSteps.push(step);
+      renderPlanChat();
+    } catch (e) {}
+  });
+  es.addEventListener("step_update", ev => {
+    try {
+      const step = JSON.parse(ev.data).step;
+      if (!step || !step.id) return;
+      const existing = S.planSteps.find(s => s.id === step.id);
+      if (existing) { Object.assign(existing, step); }
+      else if (step.seq) { S.planSteps.push(step); S.planSteps.sort((a,b)=>(a.seq||0)-(b.seq||0)); }
+      patchPlanStep(step);
+    } catch (e) {}
+  });
+  es.addEventListener("run", ev => {
+    try {
+      S.plan.run = JSON.parse(ev.data).run;
+      renderPlanChat();
+    } catch (e) {}
+  });
+  es.addEventListener("done", () => {
+    closePlanStream();
+    renderPlanChat();
+  });
+  es.onerror = () => {};
+}
+
+function patchPlanStep(step) {
+  const box = document.getElementById("planChatBody");
+  if (!box) { renderPlanChat(); return; }
+  const body = document.getElementById(`plan-msg-${step.id}`);
+  if (body) {
+    body.textContent = step.detail || "";
+    body.classList.toggle("pending", Boolean((step.payload || {}).partial));
+    return;
+  }
+  renderPlanChat();
+}
+
+function renderPlanChat() {
+  const box = document.getElementById("planChatBody");
+  if (!box) return;
+  const scroll = document.getElementById("session");
+  const nearBottom = scroll
+    ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 220 : true;
+  if (!S.planSteps.length) {
+    box.innerHTML = `<div class="empty"><h2>先聊清楚要做什么</h2>
+      <p>描述你的目标；主 Agent 会追问细节。聊清楚后点「生成任务卡」。</p></div>`;
+  } else {
+    box.innerHTML = renderConversation(S.planSteps, S.plan && S.plan.run);
+    bindFolds(box);
+    // 把 assistant 消息 id 换成 plan- 前缀，避免和 Agent 工作台撞 id
+    box.querySelectorAll('[id^="msg-"]').forEach(el => {
+      el.id = "plan-" + el.id;
+    });
+  }
+  if (nearBottom && scroll) scroll.scrollTop = scroll.scrollHeight;
+}
+
+function renderPlanCard() {
+  const items = (S.plan && S.plan.items) || [];
+  const agents = S.agents || [];
+  const rows = items.map((item, index) => {
+    const invalid = Boolean(item.invalid);
+    const agentId = item.agent_id || "";
+    const models = channelModels((agents.find(a => a.id === agentId) || {}).provider_id || "");
+    return `<div class="plan-item ${invalid ? "invalid" : ""}" data-plan-item="${index}">
+      <div class="pi-head">
+        <span class="pi-num">${index + 1}</span>
+        <input class="ctl pi-title" data-pi="title" value="${esc(item.title || "")}" placeholder="任务标题">
+        <button class="btn small danger" data-pi-remove="${index}">移除</button>
+      </div>
+      <textarea class="ctl pi-desc" data-pi="description" placeholder="要做什么、交付什么文件">${esc(item.description || "")}</textarea>
+      <div class="pi-row">
+        <label>执行体<select class="ctl" data-pi="agent_id">
+          <option value="">选择 Agent</option>
+          ${agents.map(a => `<option value="${esc(a.id)}" ${a.id === agentId ? "selected" : ""}>${esc(a.name)} · ${esc(a.model || "默认")}</option>`).join("")}
+        </select></label>
+        <label>模型<input class="ctl" data-pi="model" list="piModels${index}" value="${esc(item.model || "")}" placeholder="默认">
+          <datalist id="piModels${index}">${models.map(m => `<option value="${esc(m)}"></option>`).join("")}</datalist>
+        </label>
+      </div>
+      <input class="ctl pi-prompt" data-pi="role_prompt" value="${esc(item.role_prompt || "")}" placeholder="本轮职责（可选）">
+      ${invalid ? `<div class="pi-error">${esc(item.invalid)}</div>` : ""}
+    </div>`;
+  }).join("");
+  return `<div class="plan-list">${rows || `<div class="empty-mini">还没有任务，点下方「添加任务」</div>`}</div>
+    <div class="view-actions" style="margin-top:10px;justify-content:flex-start">
+      <button class="btn" id="planAddItem">＋ 添加任务</button>
+    </div>`;
+}
+
+function readPlanItems() {
+  const items = [];
+  document.querySelectorAll("[data-plan-item]").forEach(card => {
+    const get = name => (card.querySelector(`[data-pi="${name}"]`) || {}).value || "";
+    const agentId = get("agent_id");
+    const agent = (S.agents || []).find(a => a.id === agentId);
+    items.push({
+      title: get("title").trim(),
+      description: get("description").trim(),
+      agent_id: agentId,
+      agent_name: agent ? agent.name : "",
+      model: get("model").trim(),
+      role_prompt: get("role_prompt").trim(),
+    });
+  });
+  return items.filter(item => item.title);
+}
+
+async function generatePlanCard() {
+  if (!S.plan) return;
+  try {
+    // 先让主 Agent 输出 JSON 计划，再解析
+    await api(`/api/studio/plans/${encodeURIComponent(S.plan.id)}/messages`, {
+      method:"POST",
+      body:JSON.stringify({text: PLAN_INSTRUCTION_TEXT()}),
+    });
+    toast("已请主 Agent 生成计划，等它输出后点「生成任务卡」");
+  } catch (e) { toast(e.message); }
+}
+
+function PLAN_INSTRUCTION_TEXT() {
+  return "现在请把上面的讨论整理成可执行的任务列表，只输出一个 JSON 数组，不要其它内容。"
+    + "每个元素包含 title、description、agent_name、role_prompt。"
+    + "可用执行者：" + (S.agents || []).map(a => a.name).join("、")
+    + "。任务之间要能并行，每个任务都要有明确的产出文件。只输出 JSON 数组。";
+}
+
+async function parsePlanCard() {
+  if (!S.plan) return;
+  // 先检查上一条回复里有没有 JSON；没有就再请主 Agent 输出一次
+  try {
+    let data = await api(`/api/studio/plans/${encodeURIComponent(S.plan.id)}/generate`,
+      {method:"POST", body:"{}"});
+    if (!data.parsed) {
+      // 主 Agent 没按格式输出：明确要求它只输出 JSON，然后再解析一次
+      toast("主 Agent 没输出 JSON，正在要求它只输出任务列表…");
+      await api(`/api/studio/plans/${encodeURIComponent(S.plan.id)}/messages`, {
+        method:"POST", body:JSON.stringify({text: PLAN_INSTRUCTION_TEXT()}),
+      });
+      // 等它跑完
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 2000));
+        const detail = await api(`/api/studio/plans/${encodeURIComponent(S.plan.id)}`);
+        S.plan = detail.plan;
+        S.planSteps = (detail.plan.steps || []).slice();
+        const run = detail.plan.run;
+        if (run && !["RUNNING", "QUEUED"].includes(run.status)) break;
+      }
+      data = await api(`/api/studio/plans/${encodeURIComponent(S.plan.id)}/generate`,
+        {method:"POST", body:"{}"});
+    }
+    if (!data.parsed) {
+      toast(`解析失败：${data.error || "模型没有输出 JSON"}`);
+      S.planParseError = {error: data.error, raw: data.raw};
+      S.planPhase = "plan";
+      renderClusterChatView(document.getElementById("sessionInner"));
+      return;
+    }
+    S.plan = data.plan;
+    S.planPhase = "plan";
+    S.planParseError = null;
+    renderClusterChatView(document.getElementById("sessionInner"));
+    toast(`已生成 ${(data.items || []).length} 个任务`);
+  } catch (e) { toast(e.message); }
+}
+
+async function confirmPlanRun() {
+  if (!S.plan) return;
+  const items = readPlanItems();
+  if (!items.length) { toast("至少需要一个任务"); return; }
+  const missing = items.filter(item => !item.agent_id);
+  if (missing.length) { toast("有任务没选执行体"); return; }
+  try {
+    const data = await api(`/api/studio/plans/${encodeURIComponent(S.plan.id)}/confirm`,
+      {method:"POST", body:JSON.stringify({items})});
+    S.plan = data.plan;
+    S.planPhase = "run";
+    S.cluster = data.cluster;
+    S.panelSteps = {};
+    renderClusterChatView(document.getElementById("sessionInner"));
+    toast("已开始执行");
+    if (S.cluster && S.cluster.id) openClusterStream(S.cluster.id);
+  } catch (e) { toast(e.message); }
+}
+
+function closeClusterStream() {
+  if (S.clusterStream) { try { S.clusterStream.close(); } catch (e) {} S.clusterStream = null; }
+}
+
+function openClusterStream(clusterId) {
+  closeClusterStream();
+  const url = `/api/studio/clusters/${encodeURIComponent(clusterId)}/stream?token=${encodeURIComponent(S.token)}`;
+  const es = new EventSource(url);
+  S.clusterStream = es;
+  es.addEventListener("cluster", ev => {
+    try {
+      const data = JSON.parse(ev.data);
+      S.cluster = {...(S.cluster || {}), ...(data.cluster || {})};
+      if (data.run) S.cluster.run = data.run;
+      renderRunPanels();
+    } catch (e) {}
+  });
+  es.addEventListener("step", ev => {
+    try {
+      const step = JSON.parse(ev.data).step;
+      if (!step || !step.role_id) return;
+      const list = S.panelSteps[step.role_id] || (S.panelSteps[step.role_id] = []);
+      if (list.some(s => s.seq === step.seq)) return;
+      list.push(step);
+      patchPanel(step.role_id);
+    } catch (e) {}
+  });
+  es.addEventListener("step_update", ev => {
+    try {
+      const step = JSON.parse(ev.data).step;
+      if (!step || !step.role_id) return;
+      const list = S.panelSteps[step.role_id] || (S.panelSteps[step.role_id] = []);
+      const existing = list.find(s => s.id === step.id);
+      if (existing) Object.assign(existing, step);
+      else if (step.seq) list.push(step);
+      patchPanel(step.role_id);
+    } catch (e) {}
+  });
+  es.addEventListener("role", ev => {
+    try {
+      const data = JSON.parse(ev.data);
+      const roles = (S.cluster || {}).roles || [];
+      const role = roles.find(r => r.id === data.role_id);
+      if (role) {
+        role.process = {...(role.process || {}), status: data.status};
+        if (data.exit_code != null) role.process.exit_code = data.exit_code;
+      }
+      renderRunPanels();
+    } catch (e) {}
+  });
+  es.addEventListener("done", () => {
+    closeClusterStream();
+    if (S.cluster && S.cluster.id) loadClusterRun(S.cluster.id, {reload: true});
+  });
+  es.onerror = () => {};
+}
+
+async function loadClusterRun(clusterId, opts) {
+  try {
+    const data = await api(`/api/studio/state?cluster_id=${encodeURIComponent(clusterId)}`);
+    S.cluster = data.cluster;
+    S.clusters = data.clusters || S.clusters || [];
+    // 先回放已有步骤，再看要不要开流
+    try {
+      const detail = await api(`/api/studio/clusters/${encodeURIComponent(clusterId)}`);
+      const full = detail.cluster || {};
+      const steps = full.steps || detail.steps || [];
+      S.cluster = full;
+      S.panelSteps = {};
+      for (const step of steps) {
+        const list = S.panelSteps[step.role_id] || (S.panelSteps[step.role_id] = []);
+        list.push(step);
+      }
+    } catch (e) { /* 回放失败不影响面板 */ }
+    renderRunPanels();
+    const run = S.cluster.run || {};
+    if (run.status === "RUNNING" && !S.clusterStream) {
+      openClusterStream(clusterId);
+    }
+  } catch (e) { toast(e.message); }
+}
+
+function panelStepSummary(roleId) {
+  const list = S.panelSteps[roleId] || [];
+  const last = list[list.length - 1];
+  if (!last) return "等待开始…";
+  return `${last.title}${last.detail ? " · " + firstLine(last.detail) : ""}`;
+}
+
+function renderRunPanels() {
+  const box = document.getElementById("runPanels");
+  if (!box) return;
+  const cluster = S.cluster || {};
+  const roles = cluster.roles || [];
+  if (!roles.length) {
+    box.innerHTML = `<div class="empty-mini">还没有执行体</div>`;
+    return;
+  }
+  const expanded = S.expandedRole;
+  box.innerHTML = roles.map(role => {
+    const steps = S.panelSteps[role.id] || [];
+    const proc = role.process || {};
+    const status = String(proc.status || "IDLE").toUpperCase();
+    const isOpen = expanded === role.id;
+    const recent = steps.slice(-4);
+    return `<div class="exec-panel ${isOpen ? "open" : ""}" data-panel="${esc(role.id)}">
+      <div class="ep-head" data-panel-toggle="${esc(role.id)}">
+        <div class="ac-avatar">${esc((role.name || "R").slice(0, 1).toUpperCase())}</div>
+        <div class="grow">
+          <div class="name">${esc(role.name)}
+            ${role.id === cluster.lead_role_id ? `<span class="tag accent">lead</span>` : ""}
+          </div>
+          <div class="sub">${esc(role.model || "默认模型")} · ${steps.length} 步</div>
+        </div>
+        <span class="status ${esc(status)}">${esc(status === "IDLE" ? "待命" : status)}</span>
+      </div>
+      ${isOpen
+        ? `<div class="ep-detail" id="panel-detail-${esc(role.id)}">${renderConversation(steps, {status: status === "EXITED" ? "DONE" : status})}</div>`
+        : `<div class="ep-body">
+            ${recent.length ? `<div class="ep-recent">${recent.map(s =>
+              `<div class="ep-line"><span class="tag">${esc(s.kind)}</span>${esc(s.title)}</div>`).join("")}</div>`
+              : `<div class="ep-last">${esc(panelStepSummary(role.id))}</div>`}
+            <div class="ep-hint">点开看完整步骤</div>
+          </div>`}
+    </div>`;
+  }).join("");
+  box.querySelectorAll("[data-panel-toggle]").forEach(el => el.onclick = () => {
+    S.expandedRole = S.expandedRole === el.dataset.panelToggle ? "" : el.dataset.panelToggle;
+    renderRunPanels();
+  });
+  box.querySelectorAll(".ep-detail").forEach(el => bindFolds(el));
+}
+
+function patchPanel(roleId) {
+  const panel = document.querySelector(`[data-panel="${roleId}"]`);
+  if (!panel) { renderRunPanels(); return; }
+  if (S.expandedRole === roleId) {
+    const detail = document.getElementById(`panel-detail-${roleId}`);
+    if (!detail) { renderRunPanels(); return; }
+    const scroll = document.getElementById("session");
+    const nearBottom = scroll
+      ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 240 : true;
+    detail.innerHTML = renderConversation(S.panelSteps[roleId] || [],
+      {status: "RUNNING"});
+    bindFolds(detail);
+    if (nearBottom && scroll) scroll.scrollTop = scroll.scrollHeight;
+    return;
+  }
+  const last = panel.querySelector(".ep-last");
+  if (last) last.textContent = panelStepSummary(roleId);
+}
+
+function renderClusterChatView(box) {
+  if (!box) return;
+  const plan = S.plan;
+  const phase = S.planPhase || planPhaseOf(plan);
+
+  const actions = [
+    `<button class="btn" id="ccNewPlan">＋ 新建规划</button>`,
+    plan ? `<button class="btn" id="ccPickPlan">切换规划</button>` : "",
+    phase === "chat" && plan ? `<button class="btn" id="ccParse">生成任务卡</button>` : "",
+    phase === "plan" ? `<button class="btn" id="ccBackChat">返回对话</button>` : "",
+    phase === "plan" ? `<button class="btn primary" id="ccConfirm">确认并执行</button>` : "",
+    phase === "run" ? `<button class="btn" id="ccBackPlan">查看任务卡</button>` : "",
+  ].filter(Boolean).join("");
+
+  const phaseTabs = `<div class="tabs">
+    <button class="tab ${phase === "chat" ? "on" : ""}" data-cphase="chat">1 · 对话</button>
+    <button class="tab ${phase === "plan" ? "on" : ""}" data-cphase="plan">2 · 任务卡</button>
+    <button class="tab ${phase === "run" ? "on" : ""}" data-cphase="run">3 · 执行</button>
+  </div>`;
+
+  if (!plan) {
+    box.innerHTML = `<div class="view-wrap">
+      <div class="view-head"><div><h2>集群工作</h2>
+        <p>先和主 Agent 聊清楚任务，再确认任务卡，最后多执行体并排执行。</p></div>
+        <div class="view-actions">${actions}</div></div>
+      <div class="empty"><h2>还没有规划</h2>
+        <p>点「新建规划」：选一个主 Agent，描述你的目标，它会追问细节并帮你拆任务。</p></div>
+    </div>`;
+    bindClusterChat(box, phase);
+    return;
+  }
+
+  let body = "";
+  if (phase === "chat") {
+    body = `<div class="plan-chat">
+      <div class="plan-chat-body" id="planChatBody"></div>
+      <div class="plan-composer">
+        <textarea id="planInput" placeholder="描述你的目标，或回答主 Agent 的追问…（Enter 发送）"></textarea>
+        <div class="row">
+          <span class="hint">${esc((plan.lead_name || "主 Agent"))} · 多轮对话，聊清楚后点「生成任务卡」</span>
+          <button class="send" id="planSend">发送 ↑</button>
+        </div>
+      </div>
+    </div>`;
+  } else if (phase === "plan") {
+    body = `<div class="plan-card-wrap">
+      ${S.planParseError ? `<div class="error">解析失败：${esc(S.planParseError.error)}
+        <details class="fold" style="margin-top:6px"><summary><span class="chev">▶</span>
+        <span class="label">查看模型原始输出</span></summary>
+        <div class="fold-body"><pre>${esc(S.planParseError.raw || "")}</pre></div></details></div>` : ""}
+      ${renderPlanCard()}
+    </div>`;
+  } else {
+    body = `<div class="run-wrap">
+      <div class="run-head">
+        <div><b>${esc((S.cluster && S.cluster.name) || "执行中")}</b>
+          <span class="muted" style="font-size:11px;margin-left:8px">${esc((S.cluster && S.cluster.objective) || "")}</span></div>
+        <span class="status ${esc(String(((S.cluster||{}).run||{}).status || "RUNNING").toUpperCase())}">${esc(((S.cluster||{}).run||{}).status || "RUNNING")}</span>
+      </div>
+      <div class="exec-grid" id="runPanels"></div>
+    </div>`;
+  }
+
+  box.innerHTML = `<div class="view-wrap">
+    <div class="view-head"><div>
+      <h2>${esc(plan.title || "集群工作")}</h2>
+      <p>${esc(plan.objective || "和主 Agent 聊清任务 → 确认任务卡 → 多执行体并排执行")}</p>
+    </div><div class="view-actions">${actions}</div></div>
+    ${phaseTabs}
+    <div id="clusterChatBody">${body}</div>
+  </div>`;
+
+  bindClusterChat(box, phase);
+  if (phase === "chat") {
+    renderPlanChat();
+    if (plan.run && ["RUNNING", "QUEUED"].includes(plan.run.status)) {
+      openPlanStream(plan.run.id);
+    }
+  } else if (phase === "run") {
+    renderRunPanels();
+    if (!S.cluster || !S.cluster.roles) loadClusterRun(plan.cluster_id);
+    else if (S.cluster.run && S.cluster.run.status === "RUNNING" && !S.clusterStream) {
+      openClusterStream(S.cluster.id);
+    }
+  }
+}
+
+function bindClusterChat(box, phase) {
+  const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.onclick = fn; };
+  bind("ccNewPlan", createNewPlan);
+  bind("ccPickPlan", showPlanPicker);
+  bind("ccParse", parsePlanCard);
+  bind("ccBackChat", () => { S.planPhase = "chat"; renderClusterChatView(box); });
+  bind("ccConfirm", confirmPlanRun);
+  bind("ccBackPlan", () => { S.planPhase = "plan"; renderClusterChatView(box); });
+  box.querySelectorAll("[data-cphase]").forEach(el => el.onclick = () => {
+    const next = el.dataset.cphase;
+    if (next === "run" && (!S.plan || !S.plan.cluster_id)) {
+      toast("先确认任务卡"); return;
+    }
+    S.planPhase = next;
+    renderClusterChatView(box);
+  });
+  const send = document.getElementById("planSend");
+  if (send) send.onclick = sendPlanMessage;
+  const input = document.getElementById("planInput");
+  if (input) input.addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendPlanMessage(); }
+  });
+  const add = document.getElementById("planAddItem");
+  if (add) add.onclick = () => {
+    const items = readPlanItems();
+    items.push({title: "新任务", description: "", agent_id: (S.agents[0] || {}).id || "",
+                agent_name: (S.agents[0] || {}).name || "", model: "", role_prompt: ""});
+    S.plan = {...S.plan, items};
+    renderClusterChatView(box);
+  };
+  box.querySelectorAll("[data-pi-remove]").forEach(el => el.onclick = () => {
+    const index = Number(el.dataset.piRemove);
+    const items = readPlanItems();
+    items.splice(index, 1);
+    S.plan = {...S.plan, items};
+    renderClusterChatView(box);
+  });
+  box.querySelectorAll('[data-pi="agent_id"]').forEach(select => select.onchange = () => {
+    const card = select.closest("[data-plan-item]");
+    const agent = (S.agents || []).find(a => a.id === select.value);
+    const modelInput = card.querySelector('[data-pi="model"]');
+    const datalist = card.querySelector("datalist");
+    const models = channelModels((agent || {}).provider_id || "");
+    if (datalist) datalist.innerHTML = models.map(m => `<option value="${esc(m)}"></option>`).join("");
+    if (modelInput && !models.includes(modelInput.value)) {
+      modelInput.value = (agent && agent.model) || models[0] || "";
+    }
+  });
+}
+
+async function sendPlanMessage() {
+  const input = document.getElementById("planInput");
+  const text = input ? input.value.trim() : "";
+  if (!text || !S.plan) return;
+  input.value = "";
+  // 本地先插入一条用户消息，避免等待
+  S.planSteps.push({id: `local-${Date.now()}`, seq: -Date.now(), kind: "task",
+                    title: "我", detail: text, payload: {}, created_at: ""});
+  renderPlanChat();
+  try {
+    const data = await api(`/api/studio/plans/${encodeURIComponent(S.plan.id)}/messages`, {
+      method:"POST", body:JSON.stringify({text}),
+    });
+    S.plan.run = data.run;
+    S.planSteps = [];
+    renderPlanChat();
+    if (data.run && data.run.id) openPlanStream(data.run.id);
+  } catch (e) { toast(e.message); }
+}
+
+async function showPlanPicker() {
+  try {
+    const data = await api("/api/studio/plans");
+    const plans = data.plans || [];
+    if (!plans.length) { toast("还没有规划"); return; }
+    const name = await textPrompt("切换规划",
+      "可用的规划：\n" + plans.map(p => `- ${p.title || p.id.slice(0, 8)}（${p.status}，${p.item_count} 任务）`).join("\n")
+      + "\n\n输入规划 id 或标题片段：", "");
+    if (!name) return;
+    const match = plans.find(p => p.id === name)
+      || plans.find(p => (p.title || "").includes(name));
+    if (!match) { toast("没找到这个规划"); return; }
+    await openPlan(match.id);
+  } catch (e) { toast(e.message); }
+}
+
 function renderClustersView(box) {
   if (!box) return;
   const cluster = S.cluster;
@@ -3681,6 +4341,7 @@ function renderHeader() {
       library: ["扩展库", "所有 Agent 的技能 / MCP / 插件集中管理，可一处勾选给多个 Agent"],
       routes: ["路由", "本机可用的模型网关：Claude 设置、magpie、Ollama、LM Studio，可一键加为渠道"],
       clusters: ["集群控制台", "lead + worker 多角色长周期任务"],
+      clusterchat: ["集群工作", "和主 Agent 聊清任务 → 确认任务卡 → 多执行体并排执行"],
       artifacts: ["交付", "所有 Agent 的成果物，同名文件按版本聚合"],
       models: ["模型与智能体", "执行体、渠道、模型、角色卡与本机路由"],
       usage: ["用量", "按 Agent 汇总的 tokens 与花费"],
@@ -4267,7 +4928,7 @@ document.getElementById("previewClose").onclick = () => {
   S.selectedArtifact = null; renderArtifacts();
 };
 
-loadAgents();
+loadAgents().then(() => { if (S.view === "clusterchat") loadViewData("clusterchat"); });
 setInterval(() => { if (S.agent && (!S.stream || S.stream.readyState === 2)) { /* idle refresh */ } }, 5000);
 </script>
 </body>

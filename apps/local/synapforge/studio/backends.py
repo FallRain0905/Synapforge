@@ -234,6 +234,10 @@ def build_invocation(role: dict[str, Any], *, prompt: str, mcp_config: Path,
             "--strict-mcp-config",
             "--permission-mode", "acceptEdits",
             "--allowedTools", tools,
+            # 集群角色也要结构化步骤流，才能和单 Agent 一样逐块显示
+            "--output-format", "stream-json",
+            "--verbose",
+            "--include-partial-messages",
         ]
         command += extra_args
         return Invocation(command=command, cwd=workspace,

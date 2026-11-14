@@ -9,6 +9,7 @@ from __future__ import annotations
 import collections
 import json
 import os
+import queue
 import subprocess
 import threading
 import time
@@ -26,6 +27,8 @@ from . import commands as studio_commands
 from . import plugins as studio_plugins
 from . import routing as studio_routing
 from . import store as studio_store
+from .agent_runtime import RunBroker
+from .step_parser import StepParser
 
 Runner = Callable[[dict[str, Any], backends.Invocation, Path, Any], tuple[int, str]]
 
@@ -50,7 +53,8 @@ class ClusterWorker:
     """一个集群一个线程；顺序执行，lead 优先。"""
 
     def __init__(self, cluster_id: str, state_path: str | Path | None, *,
-                 interval: float = 2.0, runner: Runner | None = None) -> None:
+                 interval: float = 2.0, runner: Runner | None = None,
+                 broker: RunBroker | None = None) -> None:
         self.cluster_id = str(cluster_id)
         self.state_path = state_path
         self.interval = max(0.5, float(interval))
@@ -65,6 +69,8 @@ class ClusterWorker:
         self._inflight: dict[str, threading.Thread] = {}
         self._inflight_lock = threading.Lock()
         self._bump_lock = threading.Lock()
+        self._broker = broker or RunBroker()
+        self._active_run_id = ""
         self._thread = threading.Thread(target=self._main, name=f"cluster-{cluster_id[-8:]}",
                                         daemon=True)
         self.error = ""
@@ -275,6 +281,16 @@ class ClusterWorker:
             })
             self._bump(store, run, role)
             self._process_ids[role["id"]] = process["id"]
+            self._active_run_id = str(run["id"])
+            # 角色开始跑：先把「收到任务」写进步骤流，前端面板立刻有内容
+            studio_store.append_cluster_step(
+                store, run_id=str(run["id"]), role_id=role["id"], kind="task",
+                title="开始执行", detail=str(role.get("current_prompt") or role["name"]),
+                process_id=str(process["id"]))
+            self._broker.publish(role["id"], {
+                "type": "role", "role_id": role["id"], "status": "RUNNING",
+                "name": role["name"], "model": role.get("model") or "",
+            })
 
             code, tail = self._runner(role, invocation, log_path, store)
             if code == 0:
@@ -286,6 +302,12 @@ class ClusterWorker:
             else:
                 status = "FAILED"
             studio_store.finish_process(store, process["id"], status=status, exit_code=code)
+            self._broker.publish(role["id"], {
+                "type": "role", "role_id": role["id"],
+                "status": "EXITED" if code == 0 else status,
+                "name": role["name"], "model": role.get("model") or "",
+                "exit_code": code,
+            })
 
             current = studio_store.get_run(store, run["id"]) or run
             checkpoint = {**(current.get("checkpoint") or {}),
@@ -472,6 +494,39 @@ class ClusterWorker:
 
     # ---- 默认进程执行 ------------------------------------------------------
 
+    def _make_parser(self, role: dict[str, Any], process_id: str) -> StepParser:
+        """给这次角色调用造一个解析器：step 落 local_cluster_steps，增量推 broker。"""
+
+        run_id = self._active_run_id
+        role_id = str(role["id"])
+        broker = self._broker
+
+        def emit(kind: str, title: str, detail: str,
+                 payload: dict[str, Any] | None) -> dict[str, Any]:
+            store = open_store(self.state_path)
+            try:
+                step = studio_store.append_cluster_step(
+                    store, run_id=run_id, role_id=role_id, kind=kind, title=title,
+                    detail=detail or "", payload=payload, process_id=process_id)
+            finally:
+                store.close()
+            broker.publish(role_id, {"type": "step", "step": step})
+            return step
+
+        def update(step_id: str, title: str, detail: str) -> None:
+            store = open_store(self.state_path)
+            try:
+                studio_store.update_cluster_step(store, step_id, title=title, detail=detail)
+            finally:
+                store.close()
+
+        def publish(event: dict[str, Any]) -> None:
+            step = dict(event.get("step") or {})
+            step["role_id"] = role_id
+            broker.publish(role_id, {**event, "step": step})
+
+        return StepParser(emit=emit, update=update, publish=publish)
+
     def _run_process(self, role: dict[str, Any], invocation: backends.Invocation,
                      log_path: Path, store: Any) -> tuple[int, str]:
         creationflags = 0
@@ -494,10 +549,11 @@ class ClusterWorker:
 
         with self._current_lock:
             self._current[role["id"]] = proc
-        process_id = self._process_ids.get(role["id"])
+        process_id = self._process_ids.get(role["id"]) or ""
         if process_id:
             studio_store.update_process_pid(store, process_id, proc.pid)
         code = -3
+        parser = self._make_parser(role, process_id)
         try:
             with log_path.open("a", encoding="utf-8") as handle:
                 handle.write(f"# pid={proc.pid}\n")
@@ -509,6 +565,10 @@ class ClusterWorker:
                         for line in proc.stdout:
                             handle.write(line)
                             handle.flush()
+                            try:
+                                parser.feed(line, backend=invocation.backend)
+                            except Exception:  # noqa: BLE001 — 解析失败不能中断进程
+                                pass
                     except (OSError, ValueError):
                         pass
 
@@ -530,6 +590,11 @@ class ClusterWorker:
         finally:
             with self._current_lock:
                 self._current.pop(role["id"], None)
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except (OSError, ValueError):
+                pass
         with self._current_lock:
             killed = role["id"] in self._killed
             self._killed.discard(role["id"])
@@ -556,6 +621,8 @@ class SupervisorManager:
         self._runner = runner
         self._lock = threading.Lock()
         self._workers: dict[str, ClusterWorker] = {}
+        # manager 持有共享 broker：SSE 订阅时 worker 可能还没创建
+        self._broker = RunBroker()
         self._recover()
 
     def _recover(self) -> None:
@@ -578,7 +645,7 @@ class SupervisorManager:
     def _store(self) -> Any:
         return open_store(self.state_path)
 
-    def start(self, cluster_id: str) -> dict[str, Any]:
+    def start(self, cluster_id: str, *, kickoff: bool = True) -> dict[str, Any]:
         with self._lock:
             worker = self._workers.get(cluster_id)
             if worker and worker.is_alive():
@@ -592,7 +659,8 @@ class SupervisorManager:
                 if cluster["status"] == "RUNNING":
                     run = studio_store.latest_run(store, cluster_id)
                     if run is None:
-                        result = studio_commands.start_cluster(store, cluster_id)
+                        result = studio_commands.start_cluster(
+                            store, cluster_id, kickoff=kickoff)
                     else:
                         result = {"started": False, "reason": "already_running", "run": run}
                 elif cluster["status"] == "PAUSED":
@@ -600,10 +668,12 @@ class SupervisorManager:
                     result = {"started": True, "resumed": True,
                               "run": studio_store.latest_run(store, cluster_id)}
                 else:
-                    result = studio_commands.start_cluster(store, cluster_id)
+                    result = studio_commands.start_cluster(
+                        store, cluster_id, kickoff=kickoff)
             finally:
                 store.close()
             worker = ClusterWorker(cluster_id, self.state_path, interval=self.interval,
+                                   broker=self._broker,
                                    runner=self._runner)
             self._workers[cluster_id] = worker
             worker.start()
@@ -631,6 +701,7 @@ class SupervisorManager:
             worker = self._workers.get(cluster_id)
             if not (worker and worker.is_alive()):
                 worker = ClusterWorker(cluster_id, self.state_path, interval=self.interval,
+                                   broker=self._broker,
                                        runner=self._runner)
                 self._workers[cluster_id] = worker
                 worker.start()
@@ -683,6 +754,12 @@ class SupervisorManager:
         with self._lock:
             return {cid: {"alive": w.is_alive(), "error": w.error}
                     for cid, w in self._workers.items()}
+
+    def subscribe(self, role_id: str) -> queue.Queue:
+        return self._broker.subscribe(str(role_id))
+
+    def unsubscribe(self, role_id: str, box: queue.Queue) -> None:
+        self._broker.unsubscribe(str(role_id), box)
 
     def log_tail(self, role_id: str, lines: int = 200) -> str:
         store = self._store()

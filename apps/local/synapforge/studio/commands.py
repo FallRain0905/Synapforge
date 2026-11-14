@@ -462,8 +462,12 @@ def delete_role(store: Any, role_id: str) -> dict[str, Any]:
     return {"deleted": True, "role_id": role_id, "name": role["name"]}
 
 
-def start_cluster(store: Any, cluster_id: str) -> dict[str, Any]:
-    """创建 run + lead 的 kickoff 任务；调度线程由 Supervisor 启动。"""
+def start_cluster(store: Any, cluster_id: str, *,
+                  kickoff: bool = True) -> dict[str, Any]:
+    """创建 run +（可选）lead 的 kickoff 任务；调度线程由 Supervisor 启动。
+
+    `kickoff=False` 用于「计划已确认、任务板已有任务」的场景：不再让 lead 重复拆解。
+    """
 
     cluster = get_cluster_or_error(store, cluster_id)
     roles = studio_store.list_roles(store, cluster_id)
@@ -479,20 +483,23 @@ def start_cluster(store: Any, cluster_id: str) -> dict[str, Any]:
 
     run = studio_store.create_run(store, cluster_id)
     studio_store.update_cluster(store, cluster_id, status="RUNNING")
-    roster = "\n".join(
-        f"- {r['name']}（{'lead' if r['id'] == lead['id'] else 'worker'}，agent_id={r['agent_id']}）"
-        for r in roles)
-    task = base.create_task(
-        store, project_id=cluster["project_id"],
-        title="拆解目标并派活",
-        description=(
-            f"集群目标：{cluster['objective']}\n\n角色名册：\n{roster}\n\n"
-            "你是 lead。先看任务板；如果还没有 worker 任务，把目标拆成 2-4 个可独立完成的任务，"
-            "用 synapforge_task_create 指派给对应 worker。不要替 worker 执行。"
-        ),
-        stage="kickoff", assignee_agent_id=lead["agent_id"], requires_review=False)
+    task = None
+    if kickoff:
+        roster = "\n".join(
+            f"- {r['name']}（{'lead' if r['id'] == lead['id'] else 'worker'}，agent_id={r['agent_id']}）"
+            for r in roles)
+        task = base.create_task(
+            store, project_id=cluster["project_id"],
+            title="拆解目标并派活",
+            description=(
+                f"集群目标：{cluster['objective']}\n\n角色名册：\n{roster}\n\n"
+                "你是 lead。先看任务板；如果还没有 worker 任务，把目标拆成 2-4 个可独立完成的任务，"
+                "用 synapforge_task_create 指派给对应 worker。不要替 worker 执行。"
+            ),
+            stage="kickoff", assignee_agent_id=lead["agent_id"], requires_review=False)
     _event(store, cluster["project_id"], "studio.cluster.started", "local-operator", {
-        "cluster_id": cluster_id, "run_id": run["id"], "kickoff_task_id": task["id"],
+        "cluster_id": cluster_id, "run_id": run["id"],
+        "kickoff_task_id": task["id"] if task else "",
     })
     return {"started": True, "run": run, "task": task, "cluster": cluster}
 

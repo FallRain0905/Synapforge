@@ -29,6 +29,7 @@ from . import routing as studio_routing
 from . import store as studio_store
 from .backends import _base_env, find_claude
 from .commands import StudioError
+from .step_parser import StepParser
 
 DEFAULT_TIMEOUT = 900
 STALL_TIMEOUT = 180
@@ -589,162 +590,55 @@ class AgentRunWorker:
         except Exception:  # noqa: BLE001
             pass
 
-    def _handle_stream_event(self, event: dict[str, Any]) -> None:
-        """`--include-partial-messages` 的逐块增量：边收边更新同一条 step。"""
+    def _parser(self) -> StepParser:
+        if getattr(self, "_step_parser", None) is None:
+            self._step_parser = StepParser(
+                emit=lambda kind, title, detail, payload: self._step_store(
+                    kind, title, detail, payload),
+                update=lambda step_id, title, detail: self._update_step(
+                    step_id, title, detail),
+                publish=lambda event: self.broker.publish(self.run_id, event),
+            )
+        return self._step_parser
 
-        etype = str(event.get("type") or "")
-        if etype == "content_block_start":
-            block = event.get("content_block") or {}
-            btype = str(block.get("type") or "")
-            index = int(event.get("index") or 0)
-            if btype == "thinking":
-                step = self._step_store("thinking", "思考中…", "",
-                                        payload={"partial": True})
-                self._blocks[index] = {"kind": "thinking", "step_id": step["id"],
-                                       "seq": step["seq"], "text": "", "written": 0.0}
-                self._streamed_blocks += 1
-            elif btype == "text":
-                step = self._step_store("assistant", "Assistant", "",
-                                        payload={"partial": True})
-                self._blocks[index] = {"kind": "assistant", "step_id": step["id"],
-                                       "seq": step["seq"], "text": "", "written": 0.0}
-                self._streamed_blocks += 1
-            return
-        if etype == "content_block_delta":
-            index = int(event.get("index") or 0)
-            state = self._blocks.get(index)
-            if state is None:
-                return
-            delta = event.get("delta") or {}
-            dtype = str(delta.get("type") or "")
-            chunk = ""
-            if dtype == "text_delta":
-                chunk = str(delta.get("text") or "")
-            elif dtype == "thinking_delta":
-                chunk = str(delta.get("thinking") or "")
-            if not chunk:
-                return
-            state["text"] += chunk
-            self._push_block(state, final=False)
-            return
-        if etype == "content_block_stop":
-            index = int(event.get("index") or 0)
-            state = self._blocks.pop(index, None)
-            if state is not None:
-                self._push_block(state, final=True)
-            return
-
-    def _push_block(self, state: dict[str, Any], *, final: bool) -> None:
-        now = time.time()
-        if not final and now - float(state.get("written") or 0) < 0.15:
-            return
-        state["written"] = now
-        text = _text(state["text"])
-        title = "Thinking" if state["kind"] == "thinking" else "Assistant"
-        step = {"id": state["step_id"], "run_id": self.run_id,
-                "seq": int(state.get("seq") or 0),
-                "kind": state["kind"], "title": title, "detail": text,
-                "payload": {"partial": not final}, "created_at": ""}
-        if final:
-            store = self._store()
-            try:
-                studio_store.update_agent_step(store, state["step_id"],
-                                               title=title, detail=text)
-            finally:
-                store.close()
-        else:
-            # 增量只推给 SSE，不每 100ms 写一次库；收尾时统一落盘。
-            self.broker.publish(self.run_id, {"type": "step_update", "step": step})
-            return
-        self.broker.publish(self.run_id, {"type": "step_update", "step": step})
+    def _update_step(self, step_id: str, title: str, detail: str) -> None:
+        store = self._store()
+        try:
+            studio_store.update_agent_step(store, step_id, title=title, detail=detail)
+        finally:
+            store.close()
 
     def _handle_line(self, line: str) -> None:
         raw = (line or "").strip()
         if not raw:
             return
-        if self._backend == "command":
-            # 自定义命令不保证 stream-json；逐行展示，最后几行作为结果摘要。
-            self._output_lines.append(raw)
-            self._step_store("output", "输出", _text(raw))
-            return
-        try:
-            event = json.loads(raw)
-        except json.JSONDecodeError:
-            self._step_store("raw", "输出", _text(raw))
-            return
-        if not isinstance(event, dict):
-            return
-        kind = str(event.get("type") or "")
-        if kind == "stream_event":
-            self._handle_stream_event(event.get("event") or {})
-            return
-        if kind == "system":
-            self._session_id = str(event.get("session_id") or self._session_id)
-            if self._session_id and self._session_id != self._session_recorded:
+        parser = self._parser()
+        parser.on_session = self._remember_session_id
+        parser.feed(raw, backend=self._backend)
+        self._session_id = parser.session_id or self._session_id
+        self._model = parser.model or self._model
+        self._result_text = parser.result_text or self._result_text
+        if parser.result_text:
+            self._ok = parser.ok
+        if parser.usage:
+            self._usage = dict(parser.usage)
+            if self._model:
                 store = self._store()
                 try:
-                    run = studio_store.get_agent_run(store, self.run_id)
-                    if run:
-                        self._remember_session(store, run, self._session_id)
+                    studio_store.update_agent_run(store, self.run_id, usage=self._usage)
                 finally:
                     store.close()
-            model = str(event.get("model") or self._model or "")
-            if model:
-                self._model = model
-            # Claude Code 每个 turn 都会发 system；只把第一张卡叫“会话开始”
-            if not self._session_announced:
-                self._session_announced = True
-                self._step_store("system", "会话开始",
-                                 f"model={model or '默认'}\nsession={self._session_id[:18]}")
+
+    def _remember_session_id(self, session_id: str) -> None:
+        if not session_id or session_id == self._session_recorded:
             return
-        if kind == "assistant":
-            message = event.get("message") or {}
-            usage = message.get("usage") or {}
-            if usage:
-                self._merge_usage(usage)
-            streamed = bool(self._streamed_blocks)
-            self._streamed_blocks = 0
-            for block in message.get("content") or []:
-                if not isinstance(block, dict):
-                    continue
-                btype = str(block.get("type") or "")
-                if btype == "text":
-                    if streamed:
-                        continue  # 已经逐块推过，避免重复
-                    text = _text(block.get("text"))
-                    if text.strip():
-                        self._step_store("assistant", "Assistant", text)
-                elif btype == "thinking":
-                    if streamed:
-                        continue
-                    self._step_store("thinking", "Thinking", _text(block.get("thinking")))
-                elif btype == "tool_use":
-                    name = str(block.get("name") or "tool")
-                    self._step_store("tool", f"Tool · {name}",
-                                     _text(_tool_input(block.get("input")), 2000),
-                                     payload={"tool": name})
-            return
-        if kind == "user":
-            message = event.get("message") or {}
-            for block in message.get("content") or []:
-                if not isinstance(block, dict):
-                    continue
-                if str(block.get("type")) == "tool_result":
-                    self._step_store("tool_result", "Tool result",
-                                     _text(_tool_result(block.get("content")), 4000),
-                                     payload={"is_error": bool(block.get("is_error"))})
-            return
-        if kind == "result":
-            self._session_id = str(event.get("session_id") or self._session_id)
-            self._result_text = _text(event.get("result") or event.get("error") or "")
-            self._ok = not bool(event.get("is_error")) and \
-                str(event.get("subtype") or "") in ("success", "")
-            self._merge_usage(event.get("usage") or {}, event)
-            self._step_store("result", "完成" if self._ok else "失败", self._result_text,
-                             payload={"cost_usd": event.get("total_cost_usd")})
-            return
-        # 未知事件不静默丢弃
-        self._step_store("raw", kind or "event", _text(raw))
+        store = self._store()
+        try:
+            run = studio_store.get_agent_run(store, self.run_id)
+            if run:
+                self._remember_session(store, run, session_id)
+        finally:
+            store.close()
 
     def _merge_usage(self, usage: dict[str, Any], result: dict[str, Any] | None = None) -> None:
         merged = dict(self._usage)

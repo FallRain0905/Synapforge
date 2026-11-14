@@ -30,6 +30,7 @@ from . import commands as studio_commands
 from . import providers as studio_providers
 from . import plugins as studio_plugins
 from . import profiles as studio_profiles
+from . import plans as studio_plans
 from . import routing as studio_routing
 from . import sessions as studio_sessions
 from . import store as studio_store
@@ -169,6 +170,23 @@ class _Handler(BaseHTTPRequestHandler):
             finally:
                 store.close()
             return
+        if tail == ["plans"]:
+            store = self._store()
+            try:
+                self._json({"ok": True, "plans": studio_plans.list_plans(store)})
+            finally:
+                store.close()
+            return
+        if len(tail) == 2 and tail[0] == "plans":
+            store = self._store()
+            try:
+                self._json({"ok": True, "plan": studio_plans.plan_state(store, tail[1])})
+            finally:
+                store.close()
+            return
+        if (len(tail) == 3 and tail[0] == "clusters" and tail[2] == "stream"):
+            self._stream_cluster(tail[1])
+            return
         if tail == ["clusters"]:
             store = self._store()
             try:
@@ -179,7 +197,11 @@ class _Handler(BaseHTTPRequestHandler):
         if len(tail) == 2 and tail[0] == "clusters":
             store = self._store()
             try:
-                self._json({"ok": True, "cluster": studio_commands.cluster_detail(store, tail[1])})
+                detail = studio_commands.cluster_detail(store, tail[1])
+                run = detail.get("run") or {}
+                detail["steps"] = (studio_store.list_cluster_steps(store, run["id"])
+                                   if run.get("id") else [])
+                self._json({"ok": True, "cluster": detail})
             finally:
                 store.close()
             return
@@ -483,6 +505,75 @@ class _Handler(BaseHTTPRequestHandler):
         finally:
             manager.unsubscribe(run_id, box)
 
+    def _stream_cluster(self, cluster_id: str) -> None:
+        """一个连接推该集群所有角色的步骤；payload 带 role_id，前端按角色分发。"""
+
+        store = self._store()
+        try:
+            cluster = studio_store.get_cluster(store, cluster_id)
+            run = studio_store.latest_run(store, cluster_id)
+            roles = studio_store.list_roles(store, cluster_id)
+            steps = studio_store.list_cluster_steps(store, run["id"]) if run else []
+        finally:
+            store.close()
+        if cluster is None:
+            self._fail("cluster_not_found", [cluster_id], status=404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        def send(event: str, data: dict[str, Any]) -> None:
+            self.wfile.write(
+                f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8"))
+            self.wfile.flush()
+
+        manager: SupervisorManager = getattr(self.server, "manager")
+        boxes = {role["id"]: manager.subscribe(role["id"]) for role in roles}
+        try:
+            send("cluster", {"type": "cluster", "cluster": cluster, "run": run,
+                             "roles": [{"id": r["id"], "name": r["name"],
+                                        "model": r.get("model") or "",
+                                        "agent_name": r.get("name") or ""} for r in roles]})
+            for step in steps:
+                send("step", {"type": "step", "step": step})
+            if not run or run["status"] != "RUNNING":
+                send("done", {"type": "done"})
+                return
+            while True:
+                got = False
+                for role_id, box in boxes.items():
+                    try:
+                        event = box.get_nowait()
+                    except queue.Empty:
+                        continue
+                    got = True
+                    if event.get("type") == "done":
+                        continue
+                    send(str(event.get("type") or "message"), event)
+                if got:
+                    continue
+                # 所有角色队列都空：等一小会，顺便发心跳
+                time.sleep(0.15)
+                store = self._store()
+                try:
+                    latest = studio_store.latest_run(store, cluster_id)
+                finally:
+                    store.close()
+                if latest is None or latest["status"] != "RUNNING":
+                    send("done", {"type": "done"})
+                    break
+                self.wfile.write(b": ping\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            for role_id, box in boxes.items():
+                manager.unsubscribe(role_id, box)
+
     # ---- POST / PATCH ------------------------------------------------------
 
     def do_POST(self) -> None:  # noqa: N802
@@ -531,6 +622,78 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, **result}, status=201)
             except ValueError as error:
                 self._fail("skill_import_failed", [str(error)])
+            finally:
+                store.close()
+            return
+
+        if method == "POST" and tail == ["plans"]:
+            store = self._store()
+            try:
+                plan = studio_plans.create_plan(
+                    store, lead_agent_id=str(body.get("lead_agent_id") or ""),
+                    title=str(body.get("title") or ""),
+                    objective=str(body.get("objective") or ""))
+                self._json({"ok": True, "plan": plan}, status=201)
+            finally:
+                store.close()
+            return
+
+        if (method == "POST" and len(tail) == 3 and tail[0] == "plans"
+                and tail[2] == "messages"):
+            store = self._store()
+            try:
+                result = studio_plans.send_message(
+                    store, tail[1], str(body.get("text") or ""))
+                agent_manager.start_agent(result["agent"]["id"])
+                self._json({"ok": True, **result}, status=201)
+            finally:
+                store.close()
+            return
+
+        if (method == "POST" and len(tail) == 3 and tail[0] == "plans"
+                and tail[2] == "generate"):
+            store = self._store()
+            try:
+                result = studio_plans.generate_plan(
+                    store, tail[1], text=str(body.get("text") or ""))
+                # 解析失败不是 HTTP 错误：顶层 ok 保持 True，让前端拿到原文自己展示
+                parsed = {k: v for k, v in result.items() if k != "ok"}
+                self._json({"ok": True, "parsed": bool(result.get("ok")), **parsed})
+            finally:
+                store.close()
+            return
+
+        if (method in ("PATCH", "PUT") and len(tail) == 3 and tail[0] == "plans"
+                and tail[2] == "items"):
+            store = self._store()
+            try:
+                result = studio_plans.update_items(
+                    store, tail[1], list(body.get("items") or []))
+                self._json({"ok": True, **result})
+            finally:
+                store.close()
+            return
+
+        if (method == "POST" and len(tail) == 3 and tail[0] == "plans"
+                and tail[2] == "confirm"):
+            store = self._store()
+            try:
+                items = body.get("items")
+                result = studio_plans.confirm_plan(
+                    store, tail[1], items=list(items) if isinstance(items, list) else None)
+                cluster_id = (result.get("cluster") or {}).get("id")
+                if cluster_id:
+                    manager.start(cluster_id, kickoff=False)
+                self._json({"ok": True, **result})
+            finally:
+                store.close()
+            return
+
+        if (method == "POST" and len(tail) == 3 and tail[0] == "plans"
+                and tail[2] == "discard"):
+            store = self._store()
+            try:
+                self._json({"ok": True, **studio_plans.discard_plan(store, tail[1])})
             finally:
                 store.close()
             return

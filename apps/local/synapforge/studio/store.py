@@ -116,6 +116,38 @@ CREATE TABLE IF NOT EXISTS local_provider_keys (
 CREATE INDEX IF NOT EXISTS idx_local_provider_keys_provider
     ON local_provider_keys(provider_id, sort_order);
 
+CREATE TABLE IF NOT EXISTS local_cluster_steps (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    role_id TEXT NOT NULL,
+    process_id TEXT NOT NULL DEFAULT '',
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    detail TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_local_cluster_steps_role_seq
+    ON local_cluster_steps(run_id, role_id, seq);
+
+CREATE TABLE IF NOT EXISTS local_cluster_plans (
+    id TEXT PRIMARY KEY,
+    lead_agent_id TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    objective TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'CHAT',
+    items_json TEXT NOT NULL DEFAULT '[]',
+    chat_run_id TEXT NOT NULL DEFAULT '',
+    cluster_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_local_cluster_plans_status
+    ON local_cluster_plans(status, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS local_agents (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -575,6 +607,168 @@ def running_processes(store: Any) -> list[dict[str, Any]]:
         "SELECT * FROM local_cluster_processes WHERE status IN ('STARTING','RUNNING')"
         " ORDER BY started_at DESC").fetchall()
     return [_process(r) for r in rows]
+
+
+# ---- 集群角色步骤流 ---------------------------------------------------------
+
+
+def _cluster_step(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "run_id": row["run_id"],
+        "role_id": row["role_id"],
+        "process_id": row["process_id"],
+        "seq": int(row["seq"]),
+        "kind": row["kind"],
+        "title": row["title"],
+        "detail": row["detail"],
+        "payload": _load(row["payload_json"], {}),
+        "created_at": row["created_at"],
+    }
+
+
+def append_cluster_step(store: Any, *, run_id: str, role_id: str, kind: str,
+                        title: str, detail: str = "",
+                        payload: dict[str, Any] | None = None,
+                        process_id: str = "") -> dict[str, Any]:
+    """seq 按 (run_id, role_id) 自增，各角色互不干扰。"""
+
+    row = store.db.execute(
+        "SELECT COALESCE(MAX(seq), 0) AS n FROM local_cluster_steps"
+        " WHERE run_id = ? AND role_id = ?", (str(run_id), str(role_id))).fetchone()
+    seq = int(row["n"]) + 1
+    step_id = new_id("cstep")
+    store.db.execute(
+        "INSERT INTO local_cluster_steps (id, run_id, role_id, process_id, seq, kind,"
+        " title, detail, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (step_id, str(run_id), str(role_id), str(process_id or ""), seq, kind,
+         title, str(detail or "")[:20000],
+         json.dumps(payload or {}, ensure_ascii=False), now_iso()))
+    store.db.commit()
+    return _cluster_step(store.db.execute(
+        "SELECT * FROM local_cluster_steps WHERE id = ?", (step_id,)).fetchone())
+
+
+def update_cluster_step(store: Any, step_id: str, *, title: str | None = None,
+                        detail: str | None = None,
+                        payload: dict[str, Any] | None = None) -> None:
+    sets: list[str] = []
+    params: list[Any] = []
+    if title is not None:
+        sets.append("title = ?")
+        params.append(str(title))
+    if detail is not None:
+        sets.append("detail = ?")
+        params.append(str(detail)[:20000])
+    if payload is not None:
+        sets.append("payload_json = ?")
+        params.append(json.dumps(payload, ensure_ascii=False))
+    if not sets:
+        return
+    params.append(str(step_id))
+    store.db.execute(f"UPDATE local_cluster_steps SET {', '.join(sets)} WHERE id = ?", params)
+    store.db.commit()
+
+
+def list_cluster_steps(store: Any, run_id: str, *, role_id: str | None = None,
+                       after_seq: int = 0, limit: int = 2000) -> list[dict[str, Any]]:
+    if role_id:
+        rows = store.db.execute(
+            "SELECT * FROM local_cluster_steps WHERE run_id = ? AND role_id = ? AND seq > ?"
+            " ORDER BY seq ASC LIMIT ?",
+            (str(run_id), str(role_id), int(after_seq), int(limit))).fetchall()
+    else:
+        rows = store.db.execute(
+            "SELECT * FROM local_cluster_steps WHERE run_id = ? AND seq > ?"
+            " ORDER BY role_id, seq ASC LIMIT ?",
+            (str(run_id), int(after_seq), int(limit))).fetchall()
+    return [_cluster_step(row) for row in rows]
+
+
+def count_cluster_steps(store: Any, run_id: str) -> dict[str, int]:
+    rows = store.db.execute(
+        "SELECT role_id, COUNT(*) AS n FROM local_cluster_steps WHERE run_id = ?"
+        " GROUP BY role_id", (str(run_id),)).fetchall()
+    return {row["role_id"]: int(row["n"]) for row in rows}
+
+
+# ---- 集群规划草稿 -----------------------------------------------------------
+
+
+def _plan(row: Any) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "lead_agent_id": row["lead_agent_id"],
+        "title": row["title"],
+        "objective": row["objective"],
+        "status": row["status"],
+        "items": _load(row["items_json"], []),
+        "chat_run_id": row["chat_run_id"],
+        "cluster_id": row["cluster_id"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def create_cluster_plan(store: Any, *, lead_agent_id: str, title: str = "",
+                        objective: str = "") -> dict[str, Any]:
+    plan_id = new_id("plan")
+    created = now_iso()
+    store.db.execute(
+        "INSERT INTO local_cluster_plans (id, lead_agent_id, title, objective, status,"
+        " items_json, chat_run_id, cluster_id, created_at, updated_at)"
+        " VALUES (?, ?, ?, ?, 'CHAT', '[]', '', '', ?, ?)",
+        (plan_id, str(lead_agent_id), str(title or ""), str(objective or ""),
+         created, created))
+    store.db.commit()
+    return get_cluster_plan(store, plan_id)  # type: ignore[return-value]
+
+
+def get_cluster_plan(store: Any, plan_id: str) -> dict[str, Any] | None:
+    row = store.db.execute("SELECT * FROM local_cluster_plans WHERE id = ?",
+                           (str(plan_id),)).fetchone()
+    return _plan(row) if row else None
+
+
+def list_cluster_plans(store: Any, *, status: str | None = None,
+                       limit: int = 50) -> list[dict[str, Any]]:
+    if status:
+        rows = store.db.execute(
+            "SELECT * FROM local_cluster_plans WHERE status = ?"
+            " ORDER BY updated_at DESC LIMIT ?", (str(status), int(limit))).fetchall()
+    else:
+        rows = store.db.execute(
+            "SELECT * FROM local_cluster_plans ORDER BY updated_at DESC LIMIT ?",
+            (int(limit),)).fetchall()
+    return [_plan(row) for row in rows]
+
+
+def update_cluster_plan(store: Any, plan_id: str, **fields: Any) -> dict[str, Any] | None:
+    allowed = {"title", "objective", "status", "items", "chat_run_id", "cluster_id"}
+    sets: list[str] = []
+    params: list[Any] = []
+    for key, value in fields.items():
+        if key not in allowed:
+            continue
+        if key == "items":
+            sets.append("items_json = ?")
+            params.append(json.dumps(value or [], ensure_ascii=False))
+        else:
+            sets.append(f"{key} = ?")
+            params.append(value)
+    if not sets:
+        return get_cluster_plan(store, plan_id)
+    sets.append("updated_at = ?")
+    params.append(now_iso())
+    params.append(str(plan_id))
+    store.db.execute(f"UPDATE local_cluster_plans SET {', '.join(sets)} WHERE id = ?", params)
+    store.db.commit()
+    return get_cluster_plan(store, plan_id)
+
+
+def delete_cluster_plan(store: Any, plan_id: str) -> None:
+    store.db.execute("DELETE FROM local_cluster_plans WHERE id = ?", (str(plan_id),))
+    store.db.commit()
 
 
 # ---- 单 Agent 工作台 --------------------------------------------------------
