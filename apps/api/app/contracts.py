@@ -21,6 +21,10 @@ class TaskStatus(str, Enum):
     READY = "READY"
     CLAIMED = "CLAIMED"
     RUNNING = "RUNNING"
+    # WAITING：节点在等一个**会来的**外部输入（信息请求已发出，阻塞级别 required）。
+    # 与 BLOCKED 的区别是 BLOCKED 需要编排决策才能走，WAITING 只需要回复到达。
+    # coordination.TRANSITIONS 早就有 RUNNING ↔ WAITING，本枚举此前落后于迁移表。
+    WAITING = "WAITING"
     WAITING_REVIEW = "WAITING_REVIEW"
     APPROVED = "APPROVED"
     BLOCKED = "BLOCKED"
@@ -2414,6 +2418,23 @@ class AgentChatTurnEventReport(APIModel):
     occurred_at: datetime | None = None
 
 
+class MyAgentExecutorSetup(APIModel):
+    """执行体侧平台渠道 provider 配置（方案 A 的下发体，2026-10-02）。
+
+    给**执行体内核**用（持有项目能力令牌的那一方）：它据此在本机写一份**项目隔离**的
+    opencode provider 配置——baseURL 指回平台代理端点、apiKey 用这次响应里的
+    `provider_api_key`（就是它自己请求时带来的那枚授权令牌，原样回传、浏览器永远拿不到）。
+    `provider` 是执行体 opencode.json 里的别名（模型串 `<provider>/<model>` 的前半段）。
+    """
+
+    provider: str
+    base_url: str
+    provider_api_key: str
+    models: list[str] = Field(default_factory=list)
+    # 生成时间（ISO）：执行体据此判断配置是否需要刷新（授权重签/令牌轮换后再取一次即可）。
+    issued_at: datetime
+
+
 class MyAgentRole(APIModel):
     """执行体上报的一个角色（opencode 的 agent）：名字 + 说明 + 能不能动手 + 定义指纹。
 
@@ -2436,6 +2457,15 @@ class MyAgentRole(APIModel):
     installed_at: str = ""
 
 
+class MyAgentPlatformModel(APIModel):
+    """平台渠道在「我的智能体」页呈现的一条模型（方案 A：执行体经平台代理消费平台渠道）。
+
+    `model` 是渠道里的模型名（也是执行体侧 provider 配置里的 models 键，`-m <provider>/<它>` 的后半段）。
+    """
+
+    model: str
+
+
 class MyAgentEndpoint(APIModel):
     """「我的智能体」页面用的执行体条目：设备 + Agent + 可用模型 + 可用角色 + 会话数。"""
 
@@ -2450,6 +2480,15 @@ class MyAgentEndpoint(APIModel):
     executor: str = ""
     models: list[str] = Field(default_factory=list)
     default_model: str = ""
+    # 平台渠道模型（方案 A）：该成员组织里启用渠道的模型合集。**能不能用**由执行体的
+    # provider 配置决定（配置经 `GET /api/my-agent/executor-setup` 下发给执行体，浏览器拿不到令牌）——
+    # 页面按 `platform_models_available` 如实显示"配置不可用"状态，不把渠道模型静默混进本地列表。
+    platform_models: list[MyAgentPlatformModel] = Field(default_factory=list)
+    # True = 执行体侧已具备走平台渠道的配置基础（opencode 在装 + 授权含 llm.invoke）；
+    # False = 页面明确显示「需要配置/授权」，不许静默回落。
+    platform_models_available: bool = False
+    # 平台渠道模型在执行体 opencode.json 里的 provider 别名前缀（`<provider>/<model>` 的前半段）
+    platform_provider: str = ""
     # 空列表 = 这台执行体没有可选角色：页面只显示「默认」，不显示空下拉
     roles: list[MyAgentRole] = Field(default_factory=list)
     conversation_count: int = 0
@@ -2481,3 +2520,86 @@ class LlmQuotaSet(APIModel):
     """成员免费额度（token 上限）；负数 = 不限量。"""
 
     token_limit: int
+
+
+# ---- 工作流 Copilot（会话式工作流搭建助手） ---------------------------------
+# 定义形状权威是 docs/WORKFLOW_SCHEMA.md（服务端 workflow_service.validate_definition
+# 校验）；这里只定义会话/轮次的请求响应外壳。AI 永远不能发布/运行：publish 与 run
+# 都要求人工 confirmed=true 且带最新 draft_revision（过期拒绝）。
+
+
+class WorkflowCopilotSessionCreate(APIModel):
+    """新建 Copilot 会话：owner = 当前成员；project_id 可选（绑定即做项目成员校验）。"""
+
+    title: str = Field(default="", max_length=200)
+    project_id: UUID | None = None
+
+
+class WorkflowCopilotTurnRequest(APIModel):
+    """一轮用户输入：自由文本描述或对上一轮 synapforge-choice 的结构化回答。
+
+    structured_answer 是机器可读的 {question_id: value}——服务端校验其对应的问题
+    确实是本轮助手问出来的才落 decisions；自由文本永远不进决策记录。
+    """
+
+    message: str = Field(min_length=1, max_length=8000)
+    structured_answer: dict[str, Any] | None = None
+
+
+class WorkflowCopilotTurnResponse(APIModel):
+    """一轮结果：助手回复文本 + 解析/修复后的当前草稿状态。draft_stale 供 UI 提示
+    "看过的草稿已过期"。"""
+
+    turn: dict[str, Any]
+    session: dict[str, Any]
+    draft: dict[str, Any] | None = None
+    draft_revision: int = 0
+    draft_valid: bool = False
+    validation_errors: list[str] = Field(default_factory=list)
+
+
+class WorkflowCopilotChoiceAnswer(APIModel):
+    """synapforge-choice 的结构化回答提交：机器可读 answers + 可选的自由补充。
+
+    服务端必须先校验 choice_id/问题集合与上一轮记录一致（invalid_choice 拒绝），
+    校验通过才记录决策并作为下一轮输入。
+    """
+
+    choice_id: str = Field(min_length=1, max_length=120)
+    answers: dict[str, Any]
+    message: str = Field(default="", max_length=8000)
+
+
+class WorkflowCopilotDraftUpdate(APIModel):
+    """人工编辑草稿（JSON）保存：独立于 AI 轮次的显式动作，立即重校验并推进修订号。"""
+
+    definition: dict[str, Any]
+
+
+class WorkflowCopilotPreviewResponse(APIModel):
+    """草稿试运行复用 workflow_service.preview_definition 的形状（不创建任何对象）。"""
+
+    definition: dict[str, Any]
+    draft_revision: int
+    draft_hash: str
+    preview: dict[str, Any]
+
+
+class WorkflowCopilotPublishRequest(APIModel):
+    """发布草稿为新工作流包：confirmed=true + 当前 draft_revision（防过期提交）。
+
+    重复发布幂等：published_revision/hash 一致时返回既有 workflow（不建第二个包）。
+    """
+
+    confirmed: bool
+    draft_revision: int
+
+
+class WorkflowCopilotRunRequest(APIModel):
+    """把已发布版本应用到项目：与发布**分开的第二次显式确认**；服务端再做项目
+    权限路由检查（不走中间件旁路）并核对发布回执修订。"""
+
+    project_id: UUID
+    confirmed: bool
+    published_revision: int | None = None
+    inputs: dict[str, Any] = Field(default_factory=dict)

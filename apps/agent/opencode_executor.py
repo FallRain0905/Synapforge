@@ -25,6 +25,8 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 from typing import Any
 
 # 通用 CLI 通道的命令模板：`--format json` 是适配器解析的前提；`--auto` 让无人值守时不必等审批
@@ -32,8 +34,102 @@ from typing import Any
 # 模板必须含 `{prompt}`（平台校验 `cli_executor_template_requires_prompt_placeholder`）。
 OPENCODE_WORKER_TEMPLATE = ("opencode", "run", "--format", "json", "--auto", "{prompt}")
 
-# 与 executor_events._OPENCODE_FILE_TOOLS 保持一致：这些工具产生"文件被改"而不是"调了个工具"
+# 平台渠道 provider 的 opencode 配置目录/文件名（方案 A，2026-10-02）。
+# 每个项目一份（`providers/<project_id>.json`），经 `OPENCODE_CONFIG` 交给执行体——
+# **项目隔离**：不同项目各指各的平台代理端点与令牌，互不串用（防跨项目泄漏/竞态）。
+OPENCODE_PROVIDER_DIRNAME = "opencode-providers"
+
+# 与文件工具清单保持一致：这些工具产生"文件被改"而不是"调了个工具"
 _FILE_TOOLS = ("write", "edit")
+
+
+def platform_provider_config_path(config_root: Path, project_id: str) -> Path:
+    """某项目的平台渠道 provider 配置文件路径（`<root>/opencode-providers/<project_id>.json`）。
+
+    `project_id` 必须非空且不带路径分隔符（uuid 形态天然满足）；防御性检查防止把
+    恶意/损坏的 project_id 拼成路径逃逸。
+    """
+
+    key = str(project_id or "").strip()
+    if not key or "/" in key or "\\" in key or ".." in key:
+        raise ValueError("platform_provider_project_id_invalid")
+    return Path(config_root) / OPENCODE_PROVIDER_DIRNAME / f"{key}.json"
+
+
+def write_platform_provider_config(
+    config_root: Path,
+    project_id: str,
+    *,
+    provider: str,
+    base_url: str,
+    api_key: str,
+    models: list[str],
+) -> Path:
+    """把平台渠道 provider 写成**项目隔离**的 opencode 配置（0600），返回文件路径。
+
+    - 形状与 `deploy/cloud-agent/configure-opencode-provider.sh` 的合并写法一致
+      （npm=@ai-sdk/openai-compatible、options.baseURL/apiKey、models 逐个登记）；
+    - **合并而非覆盖**：文件已存在时只更新本 provider 条目，其它内容原样保留；
+    - `models` 为空时抛错：没有渠道模型就不该写配置（**不静默回落**到全局配置的 provider）；
+    - 文件 0600（Windows 上 os.chmod 只影响只读位，尽力而为；令牌本来就在本机凭据里，不新增暴露面）。
+    """
+
+    key = str(provider or "").strip()
+    base = str(base_url or "").strip().rstrip("/")
+    token = str(api_key or "").strip()
+    cleaned = [str(item).strip() for item in (models or []) if str(item).strip()]
+    if not key:
+        raise ValueError("platform_provider_name_required")
+    if not base.startswith(("http://", "https://")):
+        raise ValueError("platform_provider_base_url_invalid")
+    if not token:
+        raise ValueError("platform_provider_api_key_required")
+    if not cleaned:
+        # 空模型清单 = 平台侧没有可用渠道：明确失败，不写一个"看起来配好了"的空壳
+        raise ValueError("platform_provider_models_required")
+
+    path = platform_provider_config_path(config_root, project_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    config: dict[str, Any] = {}
+    if path.exists():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                config = loaded
+        except ValueError:
+            config = {}  # 坏文件重建（0600、本机执行体用户属主，风险可控）
+    config.setdefault("$schema", "https://opencode.ai/config.json")
+    providers = config.setdefault("provider", {})
+    if not isinstance(providers, dict):
+        providers = {}
+        config["provider"] = providers
+    providers[key] = {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": key,
+        "options": {"baseURL": base, "apiKey": token},
+        "models": {model: {"name": model} for model in cleaned},
+    }
+    path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass  # Windows 的 chmod 语义受限；目录已在用户私有状态目录下
+    return path
+
+
+def read_platform_provider_models(config_root: Path, project_id: str) -> list[str]:
+    """读某项目平台渠道 provider 已登记的模型名（探测/展示用；读不到就是空列表，不编）。"""
+
+    path = platform_provider_config_path(config_root, project_id)
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    entry = (config or {}).get("provider", {}).get("synapforge") if isinstance(config, dict) else None
+    models = (entry or {}).get("models") if isinstance(entry, dict) else None
+    if not isinstance(models, dict):
+        return []
+    return [str(name) for name in models if str(name).strip()]
 
 
 def parse_opencode_jsonl(raw: str) -> dict:
@@ -165,4 +261,12 @@ def summarize_opencode_result(exit_code: int | None, parsed: dict, run_id: str) 
     return exit_code == 0, summary
 
 
-__all__ = ["OPENCODE_WORKER_TEMPLATE", "parse_opencode_jsonl", "summarize_opencode_result"]
+__all__ = [
+    "OPENCODE_PROVIDER_DIRNAME",
+    "OPENCODE_WORKER_TEMPLATE",
+    "parse_opencode_jsonl",
+    "platform_provider_config_path",
+    "read_platform_provider_models",
+    "summarize_opencode_result",
+    "write_platform_provider_config",
+]

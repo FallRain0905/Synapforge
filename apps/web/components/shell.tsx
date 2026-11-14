@@ -18,7 +18,7 @@ import {
   UserRound,
   X,
 } from "lucide-react";
-import { NAV_SECTIONS, NAV_STORAGE_KEY, findSection, pageMeta, type NavBadge, type NavItem, type NavSection } from "../lib/nav";
+import { HUBS, NAV_STORAGE_KEY, findNavLocation, pageMeta, type NavBadge, type NavItem, type NavHub } from "../lib/nav";
 import { useWorkspace } from "../lib/workspace";
 import { useAuth } from "../lib/auth";
 import { useTheme } from "../lib/theme";
@@ -146,12 +146,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     [taskAttention, pendingReview, projects.length, packState],
   );
 
-  const activeSection = findSection(pathname);
+  const activeLocation = findNavLocation(pathname);
   const onlineAgents = dashboard.agents.filter((agent) => String(agent.status) === "online").length;
   const latestSeen = dashboard.agents[0]?.last_seen ?? "";
 
-  const sectionOpen = (section: NavSection) =>
-    section.items.length === 1 ? true : openSections[section.id] ?? section.id === activeSection?.id;
+  // 六主导航：Hub 默认收起二级（当前 Hub 自动展开）；开合记忆沿用 localStorage。
+  const hubOpen = (hub: NavHub) =>
+    openSections[hub.href] ?? activeLocation?.hub.href === hub.href;
 
   const renderItem = (item: NavItem, nested: boolean) => {
     const active = pathname === item.href;
@@ -174,6 +175,24 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     );
   };
 
+  const renderHubItem = (item: NavItem) => {
+    const value = item.badge ? badgeValue(item.badge) : 0;
+    return (
+      <Link
+        key={item.href}
+        href={item.href}
+        className="nav-item nav-item-child"
+        data-testid={item.testId}
+        title={item.hint}
+        onClick={() => setMobileNav(false)}
+      >
+        <item.icon size={15} />
+        <span>{item.label}</span>
+        {item.badge && item.badge !== "projects" && value > 0 && <span className="nav-dot" />}
+      </Link>
+    );
+  };
+
   if (bareRoute) {
     return (
       <>
@@ -188,7 +207,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {mobileNav && <div className="nav-scrim" role="presentation" data-testid="nav-scrim" onClick={() => setMobileNav(false)} />}
       <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`.trim()}>
         <div className="brand-row">
-          <div className="brand-mark"><Network size={18} /></div>
           <span className="brand-name">synapforge</span>
           <span className="mobile-only" style={{ marginLeft: "auto" }}>
             <button className="app-icon" aria-label="关闭导航" onClick={() => setMobileNav(false)}><X size={17} /></button>
@@ -209,40 +227,52 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <FolderPlus size={16} />
           </button>
         </div>
-        <nav className="primary-nav">
-          {NAV_SECTIONS.map((section) => {
-            const single = section.items.length === 1;
-            const open = sectionOpen(section);
-            const isActiveSection = section.id === activeSection?.id;
-            const sectionAlert = section.items.reduce(
-              (sum, item) => sum + (item.badge && item.badge !== "projects" && badgeValue(item.badge) > 0 ? 1 : 0),
-              0,
-            );
+        <nav className="primary-nav" aria-label="主导航">
+          {HUBS.map((hub) => {
+            const open = hubOpen(hub);
+            const isActiveHub = activeLocation?.hub.href === hub.href;
+            const hubBadgeValue = hub.badge ? badgeValue(hub.badge) : 0;
             return (
-              <div className="nav-section" key={section.id}>
-                {single ? (
-                  renderItem(section.items[0], false)
-                ) : (
-                  <>
+              <div className="nav-section nav-hub" key={hub.href}>
+                <div className={`nav-hub-row ${isActiveHub ? "is-active-hub" : ""}`.trim()} data-testid={`nav-hub-${hub.testId.replace(/^nav-/, "")}`}>
+                  <Link
+                    href={hub.href}
+                    className={`nav-item ${isActiveHub ? "nav-item-active" : ""}`.trim()}
+                    data-testid={hub.testId}
+                    title={hub.hint}
+                    onClick={() => setMobileNav(false)}
+                  >
+                    <hub.icon size={17} />
+                    <span>{hub.label}</span>
+                    {hubBadgeValue > 0 &&
+                      (hub.badge === "projects" ? (
+                        <span className="nav-count">{hubBadgeValue}</span>
+                      ) : (
+                        <span className="nav-dot" />
+                      ))}
+                  </Link>
+                  {hub.children.length > 0 && (
                     <button
                       type="button"
-                      className={`nav-group-button ${isActiveSection ? "is-active" : ""}`.trim()}
-                      onClick={() => toggleSection(section.id, !open)}
+                      className="nav-hub-toggle"
+                      aria-label={open ? `收起${hub.label}的子页面` : `展开${hub.label}的子页面`}
                       aria-expanded={open}
-                      aria-controls={`nav-children-${section.id}`}
-                      title={`${section.label} · ${section.hint}`}
-                      data-testid={`nav-group-${section.id}`}
+                      aria-controls={`nav-children-${hub.testId}`}
+                      data-testid={`nav-group-${hub.testId.replace(/^nav-/, "")}`}
+                      title={open ? "收起子页面" : `${hub.children.length} 个子页面`}
+                      onClick={() => toggleSection(hub.href, !open)}
                     >
-                      <section.icon size={17} />
-                      <span>{section.label}</span>
-                      {sectionAlert > 0 && <span className="nav-dot" />}
-                      {!open && <span className="nav-count nav-count-plain">{section.items.length}</span>}
                       <ChevronRight size={14} className={`nav-group-chevron ${open ? "is-open" : ""}`.trim()} />
                     </button>
-                    <div className={`nav-children ${open ? "is-open" : ""}`.trim()} id={`nav-children-${section.id}`}>
-                      {section.items.map((item) => renderItem(item, true))}
-                    </div>
-                  </>
+                  )}
+                </div>
+                {hub.children.length > 0 && (
+                  <div
+                    className={`nav-children ${open ? "is-open" : ""}`.trim()}
+                    id={`nav-children-${hub.testId}`}
+                  >
+                    {hub.children.map((item) => renderHubItem(item))}
+                  </div>
                 )}
               </div>
             );
@@ -383,8 +413,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </main>
       {/* 桌面端：本机 Agent 面板（读内核契约 v1，与服务器数据无关） */}
       <LocalAgentPanel open={kernelOpen} onClose={() => setKernelOpen(false)} />
-      <MobileTabs badges={{ tasks: taskAttention, review: pendingReview }} onMore={() => setMobileNav(true)} />
-      {toast && <div className="toast" role="status" data-testid="toast">{toast}</div>}
+      <MobileTabs badges={{ tasks: taskAttention, review: pendingReview }} onMore={() => setMobileNav(true)} />      {toast && <div className="toast" role="status" data-testid="toast">{toast}</div>}
       {jumpOpen && <QuickJump open={jumpOpen} onClose={() => setJumpOpen(false)} />}
       {createOpen && <CreateProjectModal open={createOpen} onClose={() => setCreateOpen(false)} />}
     </div>

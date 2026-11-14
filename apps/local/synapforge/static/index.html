@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>synapforge · 本地协作</title>
+<style>
+  :root {
+    --bg: #fbfbfa;
+    --panel: #ffffff;
+    --line: #e8e6e3;
+    --ink: #24211d;
+    --muted: #8a857e;
+    --soft: #f4f2ef;
+    --accent: #2f6f54;
+    --ask: #2f5f8f;
+    --answer: #2f6f54;
+    --concern: #a8542d;
+    --artifact: #6b4f8a;
+    --work: #4a4a4a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .app { display: flex; height: 100dvh; overflow: hidden; }
+
+  /* ---- 左侧：Agent 列表 ---- */
+  .sidebar {
+    width: 268px; flex: 0 0 268px; background: var(--soft);
+    border-right: 1px solid var(--line); display: flex; flex-direction: column;
+  }
+  .brand {
+    padding: 18px 18px 10px; font-weight: 650; letter-spacing: .2px;
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .brand span { font-weight: 400; font-size: 11px; color: var(--muted); letter-spacing: 0; }
+  .agents { flex: 1 1 auto; overflow-y: auto; padding: 6px 8px 12px; min-height: 0; }
+  .agent {
+    display: flex; gap: 10px; align-items: center; padding: 9px 10px;
+    border-radius: 10px; cursor: pointer; border: 1px solid transparent;
+  }
+  .agent:hover { background: #edeae6; }
+  .agent.active { background: var(--panel); border-color: var(--line); }
+  .agent.group { margin-bottom: 6px; }
+  .agent.group .avatar { background: #4a5568; color: #fff; }
+  .agent.group .name { font-weight: 620; }
+  .arrow { color: var(--muted); font-size: 11px; margin-left: 6px; }
+  .avatar {
+    width: 30px; height: 30px; flex: 0 0 30px; border-radius: 50%;
+    background: #ddd8d2; color: #5a544d; display: grid; place-items: center;
+    font-size: 13px; font-weight: 600; text-transform: uppercase;
+  }
+  .agent.active .avatar { background: var(--accent); color: #fff; }
+  .agent .meta { min-width: 0; flex: 1 1 auto; }
+  .agent .name {
+    font-weight: 560; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .agent .sub {
+    font-size: 11.5px; color: var(--muted); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis;
+  }
+  .badges { display: flex; gap: 4px; flex: 0 0 auto; }
+  .badge {
+    font-size: 10.5px; padding: 1px 6px; border-radius: 999px;
+    background: #e6e2dd; color: #6a645d; min-width: 18px; text-align: center;
+  }
+  .badge.hot { background: #d8e8df; color: var(--accent); }
+  .sidebar .foot {
+    padding: 10px 18px; border-top: 1px solid var(--line);
+    font-size: 11px; color: var(--muted);
+  }
+
+  /* ---- 右侧 ---- */
+  .main { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; }
+  .topbar {
+    padding: 14px 24px; border-bottom: 1px solid var(--line); background: var(--panel);
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  }
+  .who { display: flex; align-items: center; gap: 12px; min-width: 0; }
+  .who .avatar { width: 34px; height: 34px; flex-basis: 34px; background: var(--accent); color: #fff; }
+  .who h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  .who p { margin: 0; font-size: 11.5px; color: var(--muted); }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+  .chip {
+    font-size: 11.5px; padding: 3px 9px; border-radius: 999px;
+    background: var(--soft); color: #5d5751; border: 1px solid var(--line);
+  }
+
+  .stream { flex: 1 1 auto; overflow-y: auto; padding: 22px 24px 60px; min-height: 0; }
+  .row { display: flex; gap: 12px; margin-bottom: 16px; }
+  .row .avatar { width: 28px; height: 28px; flex-basis: 28px; font-size: 12px; }
+  .bubble { min-width: 0; max-width: 860px; }
+  .bubble .head {
+    display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px;
+  }
+  .bubble .label { font-size: 12px; font-weight: 650; }
+  .bubble .time { font-size: 11px; color: var(--muted); }
+  .bubble .body { font-size: 13.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .bubble .body.empty { color: var(--muted); font-style: italic; }
+  .bubble .kv { margin-top: 4px; font-size: 11.5px; color: var(--muted); }
+  .bubble code {
+    background: var(--soft); padding: 1px 5px; border-radius: 4px;
+    font: 12px/1.4 ui-monospace, Consolas, monospace;
+  }
+  .k-ask .label { color: var(--ask); }
+  .k-answer .label { color: var(--answer); }
+  .k-concern .label { color: var(--concern); }
+  .k-artifact .label { color: var(--artifact); }
+  .k-work .label { color: var(--work); }
+  .k-ask .bubble, .k-ask .body { color: var(--ink); }
+
+  .section {
+    margin: 4px 0 18px; padding: 12px 14px; border: 1px dashed var(--line);
+    border-radius: 10px; background: #fffdf8;
+  }
+  .section h2 { font-size: 11.5px; text-transform: uppercase; letter-spacing: .08em;
+                color: var(--muted); margin: 0 0 6px; font-weight: 600; }
+  .section .line { font-size: 12.5px; margin: 3px 0; }
+  .empty-state { color: var(--muted); padding: 40px 4px; font-size: 13px; }
+  .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #c3bdb5; }
+  .dot.on { background: var(--accent); }
+  .err { color: #a33; font-size: 12.5px; }
+
+  /* ---- 群聊消息 ---- */
+  .k-message .label { color: #1f2937; }
+  .k-message .bubble .body {
+    background: #fff; border: 1px solid var(--line); border-radius: 12px;
+    padding: 9px 13px; display: inline-block; max-width: 100%;
+  }
+  .row.mine { flex-direction: row-reverse; }
+  .row.mine .bubble .head { justify-content: flex-end; }
+  .row.mine .k-message .bubble .body,
+  .row.mine .bubble .body {
+    background: #e8f1ec; border-color: #cfe0d6;
+  }
+  .row.mine .avatar { background: #2f6f54; color: #fff; }
+
+  /* ---- 输入区 ---- */
+  .composer {
+    border-top: 1px solid var(--line); background: var(--panel);
+    padding: 12px 24px 16px; display: flex; gap: 10px; align-items: flex-end;
+  }
+  .composer textarea {
+    flex: 1 1 auto; min-height: 44px; max-height: 140px; resize: vertical;
+    border: 1px solid var(--line); border-radius: 12px; padding: 11px 13px;
+    font: inherit; color: var(--ink); background: var(--bg); outline: none;
+  }
+  .composer textarea:focus { border-color: #b9cfc4; box-shadow: 0 0 0 3px #e6efe9; }
+  .composer button {
+    flex: 0 0 auto; height: 44px; padding: 0 20px; border: 0; border-radius: 12px;
+    background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .composer button:disabled { opacity: .55; cursor: default; }
+  .composer.hidden { display: none; }
+  .hint { font-size: 11px; color: var(--muted); padding: 0 24px 8px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">synapforge <span>本地 · 只读</span></div>
+    <div class="agents" id="agents"></div>
+    <div class="foot" id="foot">连接中…</div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <div class="who">
+        <div class="avatar" id="curAvatar">·</div>
+        <div>
+          <h1 id="curName">选择一个 Agent</h1>
+          <p id="curMeta"></p>
+        </div>
+      </div>
+      <div class="chips" id="curChips"></div>
+    </header>
+    <section class="stream" id="stream">
+      <div class="empty-state">左侧选择 Agent 查看它的活动。</div>
+    </section>
+    <form class="composer hidden" id="composer">
+      <textarea id="composeInput" rows="1"
+                placeholder="在群聊里说点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
+      <button type="submit" id="sendBtn">发送</button>
+    </form>
+  </main>
+</div>
+
+<script>
+const state = { agents: [], current: null, mode: "agent", timer: null, groupInfo: null };
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+function initial(name) { return (name || "?").trim().charAt(0) || "?"; }
+// 每个名字一个稳定的颜色，同一个 Agent 在任何视图里都同色
+function hueOf(name) {
+  let h = 0;
+  const s = String(name || "?");
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
+  return h;
+}
+function avatarHtml(name) {
+  return '<div class="avatar" style="background:hsl(' + hueOf(name) +
+    ',32%,52%);color:#fff">' + esc(initial(name)) + "</div>";
+}
+function ago(iso) {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (isNaN(t)) return iso;
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return s + " 秒前";
+  if (s < 3600) return Math.round(s / 60) + " 分钟前";
+  if (s < 86400) return Math.round(s / 3600) + " 小时前";
+  return new Date(t).toLocaleString("zh-CN", { hour12: false });
+}
+function clock(iso) {
+  const t = Date.parse(iso);
+  if (isNaN(t)) return iso || "";
+  return new Date(t).toLocaleTimeString("zh-CN", { hour12: false });
+}
+
+async function jget(url) {
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+
+async function loadAgents() {
+  try {
+    const data = await jget("/api/agents");
+    state.agents = data.agents || [];
+    document.getElementById("foot").textContent =
+      state.agents.length + " 个 Agent · 自动刷新中";
+    renderAgents();
+    if (!state.current && state.agents.length) selectAgent(state.agents[0].agent_id);
+    applyAgentToHeader();
+  } catch (e) {
+    document.getElementById("foot").innerHTML =
+      '<span class="err">读取失败：' + esc(e.message) + "</span>";
+  }
+}
+
+function renderAgents() {
+  const box = document.getElementById("agents");
+  const groupActive = state.mode === "group" ? " active" : "";
+  const groupItem =
+    '<div class="agent group' + groupActive + '" data-id="__group__">' +
+      '<div class="avatar">群</div>' +
+      '<div class="meta"><div class="name">群聊 · 全部 Agent</div>' +
+      '<div class="sub">所有 Agent 合成一条时间线</div></div>' +
+    "</div>";
+  box.innerHTML = groupItem + state.agents.map(a => {
+    const active = (state.mode !== "group" && a.agent_id === state.current) ? " active" : "";
+    const badges = [];
+    if (a.in_flight) badges.push('<span class="badge hot">' + a.in_flight + " 进行中</span>");
+    if (a.open_requests) badges.push('<span class="badge hot">' + a.open_requests + " 待答</span>");
+    if (a.artifacts) badges.push('<span class="badge">' + a.artifacts + " 成果物</span>");
+    const sub = a.last_event_at ? "最近活动 " + ago(a.last_event_at) : "暂无活动";
+    return '<div class="agent' + active + '" data-id="' + esc(a.agent_id) + '">' +
+      avatarHtml(a.display_name) +
+      '<div class="meta"><div class="name">' + esc(a.display_name) + "</div>" +
+      '<div class="sub">' + esc(sub) + "</div></div>" +
+      '<div class="badges">' + badges.join("") + "</div></div>";
+  }).join("");
+
+  box.querySelectorAll(".agent").forEach(el => {
+    el.addEventListener("click", () => selectAgent(el.dataset.id));
+  });
+}
+
+function currentAgent() {
+  return state.agents.find(a => a.agent_id === state.current) || null;
+}
+
+function applyAgentToHeader() {
+  if (state.mode === "group") {
+    const info = state.groupInfo || {};
+    document.getElementById("curName").textContent = "群聊 · " + (info.project || "全部 Agent");
+    document.getElementById("curAvatar").textContent = "群";
+    document.getElementById("curMeta").textContent =
+      (info.agents || 0) + " 个 Agent 参与 · " + (info.events || 0) + " 条消息 · 自动刷新";
+    document.getElementById("curChips").innerHTML = "";
+    return;
+  }
+  const a = currentAgent();
+  if (!a) return;
+  document.getElementById("curName").textContent = a.display_name;
+  document.getElementById("curAvatar").textContent = initial(a.display_name);
+  document.getElementById("curMeta").textContent =
+    a.agent_id + " · " + (a.in_flight || 0) + " 个进行中任务 · " +
+    (a.artifacts || 0) + " 个成果物" +
+    (a.last_seen ? " · 心跳 " + ago(a.last_seen) : "");
+  const chips = [];
+  if (a.open_requests) chips.push('<span class="chip">待回答 ' + a.open_requests + "</span>");
+  chips.push('<span class="chip"><span class="dot ' + (a.in_flight ? "on" : "") +
+    '"></span> ' + (a.in_flight ? "执行中" : "空闲") + "</span>");
+  document.getElementById("curChips").innerHTML = chips.join("");
+}
+
+function selectAgent(id) {
+  const mode = id === "__group__" ? "group" : "agent";
+  if (state.current === id && state.mode === mode) return;
+  state.current = id;
+  state.mode = mode;
+  // 记进地址栏：刷新/重开页面能回到同一个视图，也方便把链接发给别人
+  history.replaceState(null, "", "#" + encodeURIComponent(id));
+  renderAgents();
+  applyAgentToHeader();
+  syncComposer();
+  document.getElementById("stream").innerHTML = '<div class="empty-state">加载中…</div>';
+  loadStream();
+  if (state.timer) clearInterval(state.timer);
+  state.timer = setInterval(loadStream, 2500);
+}
+
+async function loadStream() {
+  if (state.mode === "group") return loadGroup();
+  const id = state.current;
+  if (!id) return;
+  let data;
+  try {
+    data = await jget("/api/agents/" + encodeURIComponent(id) + "/stream?limit=300");
+  } catch (e) {
+    document.getElementById("stream").innerHTML =
+      '<div class="empty-state err">读取失败：' + esc(e.message) + "</div>";
+    return;
+  }
+  if (state.current !== id) return;   // 期间切换了 Agent，丢弃旧响应
+
+  const box = document.getElementById("stream");
+  const parts = [];
+
+  if ((data.assigned_to_me || []).length) {
+    parts.push('<div class="section"><h2>派给它 · 还没领</h2>' +
+      data.assigned_to_me.map(t => '<div class="line">· ' + esc(t.title) +
+        ' <code>' + esc(t.status) + "</code>" +
+        (t.stage ? " · " + esc(t.stage) : "") + "</div>").join("") +
+      "</div>");
+  }
+  if ((data.pending || []).length) {
+    parts.push('<div class="section"><h2>等它回答</h2>' +
+      data.pending.map(r => '<div class="line">· ' + esc(r.question) +
+        ' <code>' + esc(r.status) + "</code> ← " + esc(r.requester_agent_id) + "</div>").join("") +
+      "</div>");
+  }
+  if ((data.waiting_on || []).length) {
+    parts.push('<div class="section"><h2>它在等别人</h2>' +
+      data.waiting_on.map(r => '<div class="line">· ' + esc(r.question) +
+        ' <code>' + esc(r.status) + "</code> → " + esc(r.provider_agent_id) + "</div>").join("") +
+      "</div>");
+  }
+
+  if (!(data.events || []).length) {
+    parts.push('<div class="empty-state">这个 Agent 还没有活动记录。</div>');
+  } else {
+    const name = (currentAgent() || {}).display_name || id;
+    parts.push(data.events.map(e => {
+      const kv = Object.entries(e.meta || {})
+        .filter(([, v]) => v !== null && v !== undefined && v !== "")
+        .map(([k, v]) => k + "=" + v).join(" · ");
+      const bodyText = e.text || e.subject || "";
+      const body = bodyText
+        ? '<div class="body">' + esc(bodyText) + "</div>"
+        : '<div class="body empty">（这一步没有文字）</div>';
+      return '<div class="row k-' + esc(e.kind) + '">' +
+        '<div class="avatar">' + esc(initial(name)) + "</div>" +
+        '<div class="bubble"><div class="head">' +
+        '<span class="label">' + esc(e.label) + "</span>" +
+        '<span class="time">' + esc(clock(e.at)) + " · " + esc(ago(e.at)) + "</span></div>" +
+        body + (kv ? '<div class="kv">' + esc(kv) + "</div>" : "") +
+        "</div></div>";
+    }).join(""));
+  }
+
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  box.innerHTML = parts.join("");
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+async function loadGroup() {
+  let data;
+  try {
+    data = await jget("/api/group/stream?limit=300");
+  } catch (e) {
+    document.getElementById("stream").innerHTML =
+      '<div class="empty-state err">读取失败：' + esc(e.message) + "</div>";
+    return;
+  }
+  if (state.mode !== "group") return;
+
+  state.groupInfo = {
+    project: data.project_name || "全部 Agent",
+    project_id: data.project_id,
+    agents: (data.agents || []).length,
+    events: (data.events || []).length,
+  };
+  applyAgentToHeader();
+
+  const box = document.getElementById("stream");
+  const parts = [];
+  if (!(data.events || []).length) {
+    parts.push('<div class="empty-state">这个项目还没有协作记录。</div>');
+  } else {
+    parts.push(data.events.map(e => {
+      const sender = e.from_name || e.actor_name || e.actor || "?";
+      const arrow = e.to_name ? '<span class="arrow">→ ' + esc(e.to_name) + "</span>" : "";
+      const kv = Object.entries(e.meta || {})
+        .filter(([, v]) => v !== null && v !== undefined && v !== "")
+        .map(([k, v]) => k + "=" + v).join(" · ");
+      const bodyText = e.text || e.subject || "";
+      const body = bodyText
+        ? '<div class="body">' + esc(bodyText) + "</div>"
+        : '<div class="body empty">（这一步没有文字）</div>';
+      const mine = e.sender_kind === "member" ? " mine" : "";
+      return '<div class="row k-' + esc(e.kind) + mine + '">' +
+        avatarHtml(sender) +
+        '<div class="bubble"><div class="head">' +
+        '<span class="label">' + esc(sender) + "</span>" + arrow +
+        '<span class="time">' + esc(e.label) + " · " + esc(clock(e.at)) + "</span></div>" +
+        body + (kv ? '<div class="kv">' + esc(kv) + "</div>" : "") +
+        "</div></div>";
+    }).join(""));
+  }
+
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  box.innerHTML = parts.join("");
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+// ---- 群聊输入框（唯一写入口；后端调用的是和 CLI 同一个函数）----
+const composer = document.getElementById("composer");
+const composeInput = document.getElementById("composeInput");
+const sendBtn = document.getElementById("sendBtn");
+
+function syncComposer() {
+  composer.classList.toggle("hidden", state.mode !== "group");
+}
+
+composer.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = composeInput.value.trim();
+  if (!text) return;
+  sendBtn.disabled = true;
+  try {
+    const response = await fetch("/api/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text,
+        project_id: (state.groupInfo || {}).project_id,
+      }),
+    });
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.error || ("HTTP " + response.status));
+    }
+    composeInput.value = "";
+    await loadGroup();
+  } catch (error) {
+    alert("发送失败：" + error.message);
+  } finally {
+    sendBtn.disabled = false;
+  }
+});
+
+composeInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    composer.requestSubmit();
+  }
+});
+
+// 地址栏里带了选择就恢复它（#__group__ 或 #agent-xxx）
+// 注意：变量不能叫 initial——上面已有 `function initial(name)`，同名会让整段脚本语法错误。
+const initialView = decodeURIComponent((location.hash || "").slice(1));
+if (initialView) {
+  state.current = initialView;
+  state.mode = initialView === "__group__" ? "group" : "agent";
+}
+// 只改 hash 不会重新加载页面，所以还要监听 hashchange（链接可以直接分享）
+window.addEventListener("hashchange", () => {
+  const id = decodeURIComponent((location.hash || "").slice(1));
+  if (id && id !== state.current) selectAgent(id);
+});
+
+const restored = Boolean(initialView);
+syncComposer();
+loadAgents();
+setInterval(loadAgents, 3000);
+// 从地址栏恢复时 selectAgent 会因"状态已匹配"提前返回，这里显式拉起首次加载与轮询
+if (restored) {
+  loadStream();
+  state.timer = setInterval(loadStream, 2500);
+}
+</script>
+</body>
+</html>

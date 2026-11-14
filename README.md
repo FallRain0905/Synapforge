@@ -12,6 +12,28 @@
 - 面向项目负责人的协作工作台
 - 平台 LLM 渠道与全员免费额度：管理员录入 OpenAI 兼容上游，成员用平台额度调用（含渠道检测/测速）
 
+## 本地 Agent 集群（synapforge studio）
+
+不依赖服务器、没有登录：`python scripts/synapforge_studio.py` 在本机 `127.0.0.1` 启动。
+
+- **Agent 工作台（默认 `/`）**：新建 Agent、选执行体/渠道/模型、写角色卡，安排一个任务，
+  按主流 Agent 的对话样式实时看回答（正文逐块生长，思考/工具/系统步骤可折叠）、
+  上下文用量和交付预览。
+- **会话（侧栏）**：同一 Claude session 的多次运行聚合，可搜索、重命名、继续、导出 Markdown。
+- **模型与智能体（侧栏）**：每个 Agent 的执行体、渠道、模型、角色卡集中管理；
+  渠道支持手工填 base URL / key / 模型、连接检测与深度检测、**多 key 池（失败自动换 key）**；
+  可导入 Claude Code 设置、扫描本机 magpie / Ollama / LM Studio 路由并直接当模型用。
+- **扩展（Agent 卡）**：按 Agent 编辑 `CLAUDE.md/AGENTS.md` 记忆，挂载技能（支持从本地目录导入）到工作区，
+  用 strict `--mcp-config` 只启用选中的 MCP；支持安装本地 Claude Code 插件
+  （skills / MCP / 子代理一起带入）。
+- **方案（Profile）**：把所有 Agent 的执行体/渠道/模型/角色卡/扩展存成一个名字，一键切换。
+- **集群工作（侧栏「工作」组）**：把多个 Agent 组成 **lead + worker** 集群，用共享任务板 /
+  ask-answer / 成果物跑长周期任务。角色**直接复用已有 Agent**（继承渠道、模型、角色卡、
+  技能、MCP、插件，只额外填本轮职责），worker **可并发**；原生视图含角色/任务/事件/
+  成果物/运行/预算六个 Tab，可暂停、恢复、停止、人工复核。
+
+详见 [docs/STUDIO_USAGE.md](docs/STUDIO_USAGE.md)。
+
 ## 项目结构
 
 ```text

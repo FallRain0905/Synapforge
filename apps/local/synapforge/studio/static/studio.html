@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>synapforge studio · 本地 Agent 集群</title>
+<script>try{const t=localStorage.getItem("sf.studio.theme"); if(t==="light"||t==="dark") document.documentElement.dataset.theme=t;}catch(e){}</script>
+<style>
+/* 集群控制台 — 与 Agent 工作台同一套 magpie 深色设计 */
+:root {
+  --bg:#1a1a1e; --card:#232327; --card-2:#1f1f23; --pill:#2d2d33; --pill-hover:#36363d;
+  --seg-edge:inset 0 .5px 0 rgba(255,255,255,.08),0 1px 2px rgba(0,0,0,.3);
+  --line:#333339; --line-2:#2c2c32; --fg:#ededf1; --fg-2:#b9b9c1;
+  --muted:#8b8b94; --faint:#56565f; --ctl-fg:#a1a1aa;
+  --accent:#a5b4fc; --accent-soft:#2b2c47;
+  --green:#6fd99b; --green-soft:#1e3a2b;
+  --red:#f28b82; --red-soft:#45272a;
+  --amber:#f2b544; --amber-soft:#3f3220;
+  --blue:#7dd3fc; --blue-soft:#1c3a46;
+  --shadow:0 16px 44px rgba(0,0,0,.55),0 2px 8px rgba(0,0,0,.3),0 0 0 .5px rgba(255,255,255,.1);
+  --font:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
+  --code:"Cascadia Mono",Consolas,"Microsoft YaHei UI","Microsoft YaHei",monospace;
+  --radius:10px; color-scheme:dark;
+}
+:root[data-theme="light"] {
+  --bg:#f4f4f6; --card:#ffffff; --card-2:#f9f9fb; --pill:#f1f1f4; --pill-hover:#e9e9ee;
+  --seg-edge:0 1px 2px rgba(0,0,0,.14),0 0 0 .5px rgba(0,0,0,.08);
+  --line:#e3e3e8; --line-2:#ececf0; --fg:#1c1c21; --fg-2:#4b4b53;
+  --muted:#85858d; --faint:#b9b9c2; --ctl-fg:#63636b;
+  --accent:#4f46e5; --accent-soft:#eeedfd;
+  --green:#189a58; --green-soft:#e4f6ec;
+  --red:#d64545; --red-soft:#fbe9e9;
+  --amber:#b45309; --amber-soft:#fbf0df;
+  --blue:#0e7490; --blue-soft:#e0f2f7;
+  --shadow:0 16px 44px rgba(20,22,30,.16),0 2px 8px rgba(20,22,30,.06),0 0 0 .5px rgba(20,22,30,.1);
+  color-scheme:light;
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+html,body { height:100%; }
+body { font:400 13px/1.4 var(--font); color:var(--fg); background:var(--bg);
+  -webkit-font-smoothing:antialiased; user-select:none; -webkit-user-select:none; cursor:default; }
+button,input,textarea,select { font:inherit; color:inherit; }
+button { cursor:pointer; }
+a { color:inherit; text-decoration:none; }
+:where(p,pre,code,.detail,.log,.prompt,textarea,input) { user-select:text; -webkit-user-select:text; }
+.hidden { display:none !important; }
+.mono { font-family:var(--code); }
+.muted { color:var(--muted); }
+
+.app { display:grid; grid-template-columns:232px minmax(0,1fr) 340px; height:100vh; }
+@media (max-width:1220px) { .app { grid-template-columns:212px minmax(0,1fr); } .inspector { display:none; } }
+@media (max-width:820px) { .app { grid-template-columns:minmax(0,1fr); } .sidebar { display:none; } }
+/* 内嵌到工作台时隐藏自己的侧栏，避免和主侧栏重复 */
+:root[data-embed="1"] .app { grid-template-columns:minmax(0,1fr) 320px; }
+:root[data-embed="1"] .sidebar { display:none; }
+@media (max-width:1100px) { :root[data-embed="1"] .app { grid-template-columns:minmax(0,1fr); }
+  :root[data-embed="1"] .inspector { display:none; } }
+
+/* sidebar */
+.sidebar { background:var(--bg); border-right:.5px solid var(--line); display:flex;
+  flex-direction:column; min-height:0; }
+.brand { flex:none; height:46px; display:flex; flex-direction:column; justify-content:center;
+  padding:0 16px; font-size:13px; font-weight:600; letter-spacing:-.005em; }
+.brand small { display:block; color:var(--muted); font-size:10.5px; font-weight:400; margin-top:1px; }
+.side-scroll { flex:1; min-height:0; overflow-y:auto; padding:0 10px 10px; scrollbar-width:none; }
+.side-scroll::-webkit-scrollbar { display:none; }
+.side-label { padding:12px 8px 4px; font-size:11px; font-weight:500; letter-spacing:.04em; color:var(--muted); }
+.new-btn { width:100%; height:30px; margin:2px 0 4px; border:1px dashed var(--line);
+  border-radius:7px; background:none; color:var(--muted); font-size:12px; }
+.new-btn:hover { background:var(--pill); color:var(--fg); border-style:solid; }
+.cluster-item { padding:7px 8px; border-radius:7px; cursor:pointer; }
+.cluster-item:hover { background:var(--pill); }
+.cluster-item.active { background:var(--card); box-shadow:var(--seg-edge); }
+.cluster-item .name { font-size:12.5px; font-weight:500; white-space:nowrap; overflow:hidden;
+  text-overflow:ellipsis; }
+.cluster-item .meta { display:flex; align-items:center; gap:6px; margin-top:2px;
+  color:var(--muted); font-size:10.5px; }
+.nav-link { display:flex; align-items:center; gap:8px; height:30px; padding:0 8px;
+  border-radius:7px; color:var(--fg-2); font-size:12.5px; }
+.nav-link:hover { background:var(--pill); color:var(--fg); }
+.nav-link.on { background:var(--card); color:var(--fg); box-shadow:var(--seg-edge); font-weight:500; }
+.dot { width:7px; height:7px; border-radius:50%; background:var(--faint); display:inline-block; }
+.dot.on { background:var(--green); }
+.dot.run { background:var(--amber); }
+.dot.err { background:var(--red); }
+.side-foot { flex:none; border-top:.5px solid var(--line-2); padding:9px 16px 11px;
+  color:var(--muted); font-size:11px; }
+
+/* main */
+main { min-width:0; display:flex; flex-direction:column; min-height:0; }
+.topbar { flex:none; height:52px; display:flex; align-items:center; gap:14px; padding:0 20px;
+  border-bottom:.5px solid var(--line); }
+.topbar .title { min-width:0; flex:1; }
+.topbar h1 { margin:0; font-size:14px; font-weight:500; letter-spacing:-.005em;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.topbar p { margin:2px 0 0; color:var(--muted); font-size:11.5px; white-space:nowrap;
+  overflow:hidden; text-overflow:ellipsis; }
+.actions { display:flex; align-items:center; gap:7px; flex-wrap:wrap; justify-content:flex-end; }
+.btn { height:28px; padding:0 10px; border:1px solid transparent; border-radius:7px;
+  background:var(--pill); color:var(--fg-2); font-size:12px; }
+.btn:hover { background:var(--pill-hover); color:var(--fg); }
+.btn.primary { background:var(--fg); color:var(--bg); }
+.btn.primary:hover { filter:brightness(1.04); }
+.btn.danger { background:transparent; color:var(--red); }
+.btn.danger:hover { background:var(--red-soft); }
+.btn.small { height:24px; padding:0 8px; font-size:11.5px; border-radius:6px; }
+.btn:disabled { opacity:.45; cursor:default; }
+.status { display:inline-flex; align-items:center; gap:6px; height:26px; padding:0 9px;
+  border-radius:7px; background:var(--pill); color:var(--muted); font-size:11.5px; }
+.status::before { content:""; width:6px; height:6px; border-radius:50%; background:currentColor; }
+.status.RUNNING,.status.DONE { background:var(--green-soft); color:var(--green); }
+.status.PAUSED,.status.QUEUED { background:var(--amber-soft); color:var(--amber); }
+.status.STOPPED,.status.FAILED { background:var(--red-soft); color:var(--red); }
+.chip { display:inline-flex; align-items:center; gap:6px; height:26px; padding:0 9px;
+  border-radius:7px; background:var(--pill); color:var(--fg-2); font-size:11.5px; }
+.metric-row { display:flex; gap:8px; padding:10px 20px; border-bottom:.5px solid var(--line); flex-wrap:wrap; }
+.metric { background:var(--card); border:1px solid var(--line); border-radius:8px;
+  padding:7px 10px; min-width:86px; }
+.metric b { display:block; font-size:16px; font-weight:500; letter-spacing:-.01em; }
+.metric span { color:var(--muted); font-size:10.5px; }
+.tabs { display:flex; gap:2px; padding:8px 20px 0; border-bottom:.5px solid var(--line); }
+.tab { height:28px; padding:0 10px; border:0; border-radius:7px 7px 0 0; background:none;
+  color:var(--muted); font-size:12px; }
+.tab:hover { color:var(--fg); }
+.tab.active { color:var(--fg); background:var(--card); box-shadow:var(--seg-edge); font-weight:500; }
+.content { padding:14px 20px 26px; overflow:auto; flex:1; min-height:0; }
+.panel { background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+.empty { min-height:42vh; display:grid; place-content:center; text-align:center; color:var(--muted); }
+.empty h2 { color:var(--fg); font-size:14px; font-weight:500; margin:0 0 4px; }
+.empty p { font-size:12px; }
+.table { width:100%; border-collapse:collapse; background:var(--card); border:1px solid var(--line);
+  border-radius:10px; overflow:hidden; }
+.table th { text-align:left; padding:8px 11px; font-size:10.5px; font-weight:500;
+  color:var(--muted); background:var(--card-2); border-bottom:1px solid var(--line-2); }
+.table td { padding:8px 11px; font-size:12px; color:var(--fg-2); border-bottom:1px solid var(--line-2); }
+.table tr:last-child td { border-bottom:0; }
+.table tr:hover td { background:var(--pill); }
+.table .strong { color:var(--fg); font-weight:500; }
+.panel table { width:100%; border-collapse:collapse; }
+.panel th { text-align:left; padding:8px 11px; font-size:10.5px; font-weight:500;
+  color:var(--muted); background:var(--card-2); border-bottom:1px solid var(--line-2); }
+.panel td { padding:8px 11px; font-size:12px; color:var(--fg-2); border-bottom:1px solid var(--line-2); }
+.panel tr:last-child td { border-bottom:0; }
+.panel tr:hover td { background:var(--pill); }
+.pill { display:inline-block; font-size:9.5px; border-radius:5px; padding:1px 5px;
+  background:var(--pill); color:var(--muted); text-transform:uppercase; letter-spacing:.03em; }
+.pill.READY,.pill.CLAIMED { background:var(--accent-soft); color:var(--accent); }
+.pill.RUNNING,.pill.APPROVED,.pill.DONE { background:var(--green-soft); color:var(--green); }
+.pill.WAITING,.pill.WAITING_REVIEW { background:var(--amber-soft); color:var(--amber); }
+.pill.FAILED,.pill.BLOCKED { background:var(--red-soft); color:var(--red); }
+.role-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px; }
+.role-card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+  padding:11px; cursor:pointer; }
+.role-card:hover { border-color:var(--line); background:var(--pill); }
+.role-card.active { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent-soft); }
+.role-card h3 { margin:0; font-size:12.5px; font-weight:500; display:flex; align-items:center; gap:7px; }
+.role-card .sub { color:var(--muted); font-size:10.5px; margin-top:3px; }
+.role-card .task { margin-top:8px; padding-top:8px; border-top:1px solid var(--line-2); font-size:11.5px; }
+.badges { display:flex; gap:5px; flex-wrap:wrap; margin-top:7px; }
+.badge { font-size:10px; border-radius:5px; padding:1px 5px; background:var(--pill); color:var(--muted); }
+.event { display:grid; grid-template-columns:56px 150px minmax(0,1fr); gap:8px;
+  padding:7px 11px; border-bottom:1px solid var(--line-2); font-size:11.5px; }
+.event:last-child { border-bottom:0; }
+.event .seq { color:var(--faint); font-family:var(--code); font-size:10px; }
+.event .type { color:var(--accent); font-family:var(--code); font-size:10px;
+  overflow:hidden; text-overflow:ellipsis; }
+.event .who { color:var(--muted); }
+.artifact { display:flex; align-items:center; gap:9px; padding:9px 11px;
+  border-bottom:1px solid var(--line-2); }
+.artifact:last-child { border-bottom:0; }
+.artifact b { font-size:12px; font-weight:500; }
+.artifact .meta { color:var(--muted); font-size:10.5px; }
+.row-actions { display:flex; gap:5px; justify-content:flex-end; }
+
+/* inspector */
+.inspector { background:var(--bg); border-left:.5px solid var(--line); display:flex;
+  flex-direction:column; min-height:0; }
+.inspector-head { padding:13px 15px; border-bottom:.5px solid var(--line); }
+.inspector-head h2 { margin:0; font-size:13px; font-weight:500; }
+.inspector-head p { margin:3px 0 0; color:var(--muted); font-size:11px; }
+.inspector-body { padding:14px; overflow:auto; flex:1; min-height:0; }
+.kv { display:grid; grid-template-columns:76px minmax(0,1fr); gap:5px 8px; font-size:11.5px; }
+.kv dt { color:var(--muted); }
+.kv dd { margin:0; color:var(--fg-2); overflow-wrap:anywhere; }
+.prompt { background:var(--card-2); border-radius:7px; padding:8px 9px; font-size:11.5px;
+  white-space:pre-wrap; max-height:120px; overflow:auto; color:var(--fg-2); }
+.log { background:#141416; color:#d6ded8; border-radius:7px; padding:9px;
+  font:11px/1.5 var(--code); white-space:pre-wrap; max-height:220px; overflow:auto; }
+.composer { border-top:.5px solid var(--line); padding:11px 13px; display:flex;
+  flex-direction:column; gap:7px; }
+.composer textarea { width:100%; min-height:56px; resize:vertical; border:1px solid var(--line);
+  border-radius:7px; padding:7px 8px; background:var(--card-2); color:var(--fg); font-size:12px; }
+.composer .row { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.composer .hint { color:var(--muted); font-size:10.5px; }
+
+/* modal */
+.modal { position:fixed; inset:0; z-index:30; display:flex; align-items:flex-start;
+  justify-content:center; padding:7vh 16px; background:rgba(0,0,0,.55); }
+.modal.hidden { display:none; }
+.modal-card { width:min(700px,100%); max-height:86vh; overflow:auto; background:var(--card);
+  border:1px solid var(--line); border-radius:14px; box-shadow:var(--shadow); padding:20px 22px; }
+.modal-card h2 { margin:0 0 4px; font-size:15px; font-weight:500; }
+.modal-card .lead { color:var(--muted); font-size:11.5px; margin-bottom:16px; line-height:1.5; }
+.form-grid { display:grid; grid-template-columns:1fr 1fr; gap:11px; }
+.form-grid .full { grid-column:1/-1; }
+.form-grid label.f { display:flex; flex-direction:column; gap:5px; color:var(--muted); font-size:11px; }
+.form-grid input,.form-grid textarea,.form-grid select { width:100%; border:1px solid var(--line);
+  border-radius:7px; padding:7px 8px; background:var(--card-2); color:var(--fg); font-size:12px; }
+.form-grid textarea { min-height:56px; resize:vertical; }
+.form-grid input:focus,.form-grid textarea:focus { outline:none; border-color:var(--accent); }
+.role-row { border:1px solid var(--line); border-radius:10px; padding:11px; margin-top:9px;
+  background:var(--card-2); }
+.role-row .head { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+.role-row .head b { font-size:12px; font-weight:500; }
+.modal-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:16px; }
+.error { color:var(--red); font-size:11.5px; white-space:pre-wrap; margin-bottom:10px; }
+.toast { position:fixed; right:18px; bottom:18px; z-index:40; background:var(--card);
+  border:1px solid var(--line); color:var(--fg); padding:9px 12px; border-radius:8px;
+  font-size:12px; box-shadow:var(--shadow); opacity:0; transform:translateY(6px);
+  transition:.16s; pointer-events:none; }
+.toast.show { opacity:1; transform:none; }
+
+</style>
+<script>try{const t=localStorage.getItem("sf.studio.theme"); if(t==="light"||t==="dark") document.documentElement.dataset.theme=t;
+if(new URL(location.href).searchParams.get("embed")==="1") document.documentElement.dataset.embed="1";}catch(e){}</script>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">synapforge studio<small>本地 Agent 集群 · 无服务器</small></div>
+    <div class="side-scroll">
+      <div class="side-label">集群</div>
+      <button class="new-btn" id="newCluster">＋ 新建集群</button>
+      <div id="clusterList"></div>
+      <div class="side-label">导航</div>
+      <a class="nav-link" href="/">← Agent 工作台</a>
+      <a class="nav-link on" href="/clusters">集群控制台</a>
+    </div>
+    <div class="side-foot" id="sideFoot">本机 · 127.0.0.1</div>
+  </aside>
+
+  <main>
+    <div class="topbar">
+      <div class="title"><h1 id="clusterName">选择或新建一个集群</h1><p id="clusterObjective">一个目标 + 一个 lead + 若干 worker</p></div>
+      <div class="actions" id="clusterActions"></div>
+      <button class="btn" id="themeToggle" title="切换明暗主题">◐</button>
+    </div>
+    <div class="metric-row" id="metrics"></div>
+    <div class="tabs" id="tabs">
+      <button class="tab active" data-tab="tasks">任务</button>
+      <button class="tab" data-tab="events">事件</button>
+      <button class="tab" data-tab="artifacts">成果物</button>
+      <button class="tab" data-tab="roles">角色</button>
+    </div>
+    <div class="content" id="content"><div class="empty"><h2>还没有集群</h2><p>点左上角「新建集群」：填一个目标，加一个 lead 和几个 worker，然后启动。</p></div></div>
+  </main>
+
+  <aside class="inspector">
+    <div class="inspector-head"><h2 id="inspectorTitle">角色详情</h2><p id="inspectorSub">选中一个角色查看日志、配置和发指令</p></div>
+    <div class="inspector-body" id="inspectorBody"></div>
+    <div class="composer">
+      <textarea id="compose" placeholder="给选中的角色发一条指令；不选角色则广播给全集群…"></textarea>
+      <div class="row"><span class="hint" id="composeHint">指令会变成任务 + 群聊消息</span><button class="btn primary small" id="send">发送</button></div>
+    </div>
+  </aside>
+</div>
+
+<div class="modal hidden" id="modal">
+  <div class="modal-card">
+    <h2>新建 Agent 集群</h2>
+    <div class="lead">一个 lead 负责拆解/派活/终审；worker 负责执行。每个角色是一次性 CLI 会话，状态落 SQLite。</div>
+    <div class="error hidden" id="modalError"></div>
+    <div class="form-grid">
+      <label class="f">集群名<input id="fName" placeholder="例如：C题四问"></label>
+      <label class="f">工作区<input id="fWorkspace" placeholder="留空自动放到 ~/.synapforge/workspace"></label>
+      <label class="f full">目标<textarea id="fObjective" placeholder="例如：完成 C 题四问的模型、代码与论文初稿"></textarea></label>
+      <label class="f">最长运行（分钟）<input id="fWall" type="number" value="480" min="1"></label>
+      <label class="f">最多轮次<input id="fRounds" type="number" value="200" min="1"></label>
+    </div>
+    <div style="display:flex;gap:16px;margin-top:10px;font-size:12px;color:var(--muted);flex-wrap:wrap">
+      <label><input type="checkbox" id="fAuto" checked> 自动批准任务复核</label>
+      <label><input type="checkbox" id="fHuman"> 人工复核（停在 WAITING_REVIEW）</label>
+      <label><input type="checkbox" id="fBash"> 允许 Claude 使用 Bash</label>
+    </div>
+    <h3 style="font-size:13px;margin:18px 0 6px">Lead</h3>
+    <div class="role-row" id="leadRow">
+      <div class="head"><b>Lead（规划/派活/终审）</b></div>
+      <div class="form-grid">
+        <label class="f">名字<input class="role-name" value="Lead"></label>
+        <label class="f">执行体<select class="role-backend"><option value="claude">Claude Code</option><option value="command">自定义命令</option></select></label>
+        <label class="f">模型（可选）<input class="role-model" placeholder="例如 claude-sonnet-4-5"></label>
+        <label class="f role-command hidden">命令模板<textarea class="role-cmd" placeholder="zcode run --prompt {prompt}"></textarea></label>
+        <label class="f full">职责 / system prompt<textarea class="role-prompt">你是 lead：拆解目标、给 worker 派活、做终审；不要替 worker 执行具体产出。</textarea></label>
+      </div>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px">
+      <h3 style="font-size:13px;margin:0">Workers</h3>
+      <button class="btn small" id="addWorker">＋ 添加 worker</button>
+    </div>
+    <div id="workerRows"></div>
+    <div class="modal-actions">
+      <button class="btn" id="cancelModal">取消</button>
+      <button class="btn primary" id="createCluster">创建并启动</button>
+    </div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const TOKEN_KEY = "sf.studio.token";
+const S = { token: "", clusters: [], cluster: null, agents: [], supervisor: {}, tab: "tasks", role: null, logs: "", busy: false, timer: null };
+
+function tokenFromUrl() {
+  const u = new URL(location.href);
+  const t = u.searchParams.get("token");
+  if (t) sessionStorage.setItem(TOKEN_KEY, t);
+  return t || sessionStorage.getItem(TOKEN_KEY) || "";
+}
+S.token = tokenFromUrl();
+
+function esc(v) {
+  return String(v == null ? "" : v).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function toast(msg) {
+  const el = document.getElementById("toast");
+  el.textContent = msg; el.classList.add("show");
+  clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove("show"), 2200);
+}
+function statusPill(status) {
+  const s = String(status || "?").toUpperCase();
+  return `<span class="status ${esc(s)}">${esc(s)}</span>`;
+}
+function taskPill(status) { return `<span class="pill ${esc(String(status||"").toUpperCase())}">${esc(status)}</span>`; }
+function secs(v) { v = Math.max(0, Number(v)||0); const m = Math.floor(v/60); return m >= 60 ? `${Math.floor(m/60)}h ${m%60}m` : `${m}m`; }
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({"X-Studio-Token": S.token}, opts.headers || {});
+  if (opts.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+  const res = await fetch(path, Object.assign({}, opts, {headers}));
+  let data = null;
+  try { data = await res.json(); } catch (e) { data = {ok:false, code:"bad_response", errors:[String(e)]}; }
+  if (!res.ok || data.ok === false) {
+    const err = new Error((data && (data.code || "http_error")) + (data.errors && data.errors.length ? ": " + data.errors.join("; ") : ""));
+    err.payload = data; throw err;
+  }
+  return data;
+}
+
+async function refresh() {
+  if (S.busy) return;
+  try {
+    const q = S.cluster ? `?cluster_id=${encodeURIComponent(S.cluster.id)}` : "";
+    const data = await api(`/api/studio/state${q}`);
+    S.clusters = data.clusters || S.clusters;
+    S.agents = data.agents || [];
+    S.supervisor = data.supervisor || {};
+    if (data.cluster) S.cluster = data.cluster;
+    if (!S.cluster && S.clusters.length) { S.cluster = {id:S.clusters[0].id}; return refresh(); }
+    if (S.cluster && !S.cluster.roles && S.cluster.id) {
+      const detail = await api(`/api/studio/state?cluster_id=${encodeURIComponent(S.cluster.id)}`);
+      S.cluster = detail.cluster;
+    }
+    const old = S.role;
+    if (old && S.cluster && S.cluster.roles) S.role = S.cluster.roles.find(r => r.id === old) || null;
+    if (!S.role && S.cluster && S.cluster.roles && S.cluster.roles.length) S.role = S.cluster.roles[0];
+    if (S.role) {
+      const logs = await api(`/api/studio/roles/${encodeURIComponent(S.role.id)}/logs?lines=160`);
+      S.logs = logs.log || "";
+    }
+    render();
+  } catch (e) {
+    if (String(e.message).startsWith("unauthorized")) {
+      document.getElementById("content").innerHTML = `<div class="empty"><h2>需要启动 token</h2><p>请用启动时打印的带 <code>?token=…</code> 的地址打开；或刷新后重试。</p></div>`;
+    } else {
+      console.error(e);
+    }
+  }
+}
+
+function render() {
+  renderSidebar(); renderHeader(); renderMetrics(); renderTabs(); renderContent(); renderInspector();
+}
+
+function renderSidebar() {
+  const list = document.getElementById("clusterList");
+  if (!S.clusters.length) { list.innerHTML = `<div class="cluster-item"><div class="name">还没有集群</div><div class="meta">点上面新建</div></div>`; }
+  else list.innerHTML = S.clusters.map(c => {
+    const run = c.run || {};
+    const active = S.cluster && S.cluster.id === c.id;
+    const cls = run.status === "RUNNING" ? "run" : (run.status === "DONE" ? "on" : "");
+    return `<div class="cluster-item ${active?"active":""}" data-id="${esc(c.id)}">
+      <div class="name">${esc(c.name)}</div>
+      <div class="meta"><span class="dot ${cls}"></span>${esc(run.status || c.status || "READY")} · ${c.role_count || 0} 角色</div>
+    </div>`;
+  }).join("");
+  list.querySelectorAll(".cluster-item[data-id]").forEach(el => el.onclick = () => {
+    S.cluster = {id: el.dataset.id}; S.role = null; S.logs = ""; refresh();
+  });
+  const online = (S.agents || []).filter(a => a.available && a.id !== "command");
+  document.getElementById("sideFoot").innerHTML = `本机 · 127.0.0.1<br>${online.length} 个执行体可用`;
+}
+
+function renderHeader() {
+  const c = S.cluster;
+  document.getElementById("clusterName").textContent = c ? c.name : "选择或新建一个集群";
+  document.getElementById("clusterObjective").textContent = c ? c.objective : "一个目标 + 一个 lead + 若干 worker";
+  const actions = document.getElementById("clusterActions");
+  if (!c || !c.roles) { actions.innerHTML = `<button class="btn primary" onclick="openModal()">新建集群</button>`; return; }
+  const run = c.run || {};
+  const running = run.status === "RUNNING";
+  const paused = run.status === "PAUSED";
+  actions.innerHTML = `
+    ${statusPill(run.status || c.status)}
+    ${running ? `<button class="btn" data-act="pause">暂停</button>` : ""}
+    ${paused ? `<button class="btn primary" data-act="resume">恢复</button>` : ""}
+    ${running || paused ? `<button class="btn danger" data-act="stop">停止</button>` : ""}
+    ${!running && !paused ? `<button class="btn primary" data-act="start">启动</button>` : ""}
+    <button class="btn" data-act="refresh">刷新</button>`;
+  actions.querySelectorAll("[data-act]").forEach(el => el.onclick = () => clusterAction(el.dataset.act));
+}
+
+function renderMetrics() {
+  const c = S.cluster, m = document.getElementById("metrics");
+  if (!c || !c.roles) { m.innerHTML = ""; return; }
+  const run = c.run || {};
+  const by = (c.stats && c.stats.by_status) || {};
+  const runningRoles = c.roles.filter(r => r.process && r.process.status === "RUNNING").length;
+  m.innerHTML = `
+    <div class="metric"><b>${secs(run.elapsed_seconds)}</b><span>已运行</span></div>
+    <div class="metric"><b>${run.round || 0}</b><span>轮次</span></div>
+    <div class="metric"><b>${runningRoles}/${c.roles.length}</b><span>角色在跑</span></div>
+    <div class="metric"><b>${c.stats ? c.stats.tasks : 0}</b><span>任务</span></div>
+    <div class="metric"><b>${by.APPROVED || 0}</b><span>已批准</span></div>
+    <div class="metric"><b>${c.stats ? c.stats.artifacts : 0}</b><span>成果物</span></div>`;
+}
+
+function renderTabs() {
+  document.querySelectorAll(".tab").forEach(el => el.classList.toggle("active", el.dataset.tab === S.tab));
+}
+document.getElementById("tabs").addEventListener("click", e => {
+  const btn = e.target.closest(".tab"); if (!btn) return;
+  S.tab = btn.dataset.tab; render();
+});
+
+function renderContent() {
+  const c = S.cluster, box = document.getElementById("content");
+  if (!c || !c.roles) { box.innerHTML = `<div class="empty"><h2>还没有集群</h2><p>点左上角「新建集群」：填一个目标，加一个 lead 和几个 worker，然后启动。</p></div>`; return; }
+  if (S.tab === "tasks") return renderTasks(box, c);
+  if (S.tab === "events") return renderEvents(box, c);
+  if (S.tab === "artifacts") return renderArtifacts(box, c);
+  return renderRoles(box, c);
+}
+
+function renderTasks(box, c) {
+  const tasks = (c.tasks || []).slice().sort((a,b) => (a.updated_at||"").localeCompare(b.updated_at||""));
+  if (!tasks.length) { box.innerHTML = `<div class="empty"><h2>还没有任务</h2><p>启动集群后，lead 会先建任务并派给 worker。</p></div>`; return; }
+  box.innerHTML = `<div class="panel"><table><thead><tr><th>任务</th><th>状态</th><th>角色</th><th>阶段</th><th></th></tr></thead><tbody>
+    ${tasks.map(t => `<tr>
+      <td><b>${esc(t.title)}</b>${t.description ? `<div class="muted" style="font-size:11.5px;margin-top:2px;max-width:520px;white-space:pre-wrap">${esc(String(t.description).slice(0,220))}</div>` : ""}</td>
+      <td>${taskPill(t.status)}</td>
+      <td>${esc(t.role_name || t.assignee || "")}</td>
+      <td class="muted">${esc(t.stage)}</td>
+      <td class="row-actions">${String(t.status).toUpperCase() === "WAITING_REVIEW" ? `
+        <button class="btn small" data-review="APPROVED" data-task="${esc(t.id)}">批准</button>
+        <button class="btn small" data-review="NEEDS_REVISION" data-task="${esc(t.id)}">退回</button>` : ""}</td>
+    </tr>`).join("")}
+  </tbody></table></div>`;
+  box.querySelectorAll("[data-review]").forEach(el => el.onclick = () => reviewTask(el.dataset.task, el.dataset.review));
+}
+
+function renderEvents(box, c) {
+  const events = (c.events || []).slice().reverse();
+  if (!events.length) { box.innerHTML = `<div class="empty"><h2>还没有事件</h2></div>`; return; }
+  box.innerHTML = `<div class="panel" style="padding:10px 14px">${events.map(e => `
+    <div class="event"><span class="seq">#${esc(e.sequence)}</span><span class="type">${esc(e.event_type)}</span>
+    <span><span class="who">${esc(e.actor)}</span>${e.payload && Object.keys(e.payload).length ? ` · <span class="muted">${esc(JSON.stringify(e.payload).slice(0,180))}</span>` : ""}</span></div>`).join("")}</div>`;
+}
+
+function renderArtifacts(box, c) {
+  const items = c.artifacts || [];
+  if (!items.length) { box.innerHTML = `<div class="empty"><h2>还没有成果物</h2><p>worker 完成任务时会把工作区文件登记成成果物。</p></div>`; return; }
+  box.innerHTML = `<div class="panel">${items.map(a => `<div class="artifact">
+    <div style="flex:1;min-width:0"><b>${esc(a.name)}</b><div class="meta">${esc(a.artifact_type || "file")} · ${esc(a.status || "")} · ${esc(a.size_bytes || 0)} B</div></div>
+    <span class="mono muted">${esc(String(a.output_hash || "").slice(0,12))}</span>
+    ${String(a.status).toUpperCase() === "PENDING_REVIEW" ? `<div class="row-actions">
+      <button class="btn small" data-artifact-review="APPROVED" data-artifact="${esc(a.id)}">批准</button>
+      <button class="btn small" data-artifact-review="NEEDS_REVISION" data-artifact="${esc(a.id)}">退回</button>
+    </div>` : ""}
+  </div>`).join("")}</div>`;
+  box.querySelectorAll("[data-artifact-review]").forEach(el => el.onclick = () => reviewArtifact(el.dataset.artifact, el.dataset.artifactReview));
+}
+
+function renderRoles(box, c) {
+  box.innerHTML = `<div class="role-grid">${(c.roles || []).map(r => {
+    const proc = r.process || {};
+    const inbox = r.inbox || {};
+    const isLead = r.id === c.lead_role_id;
+    const active = S.role && S.role.id === r.id;
+    return `<div class="role-card ${active?"active":""}" data-role="${esc(r.id)}">
+      <h3>${esc(r.name)} <span class="pill ${isLead?"RUNNING":""}">${isLead?"lead":"worker"}</span></h3>
+      <div class="sub">${esc(r.backend)}${r.model ? " · " + esc(r.model) : ""} · ${esc(String(proc.status||"空闲"))}</div>
+      <div class="badges">
+        <span class="badge">待领 ${inbox.assigned_to_me||0}</span>
+        <span class="badge">在跑 ${inbox.in_flight||0}</span>
+        <span class="badge">待答 ${inbox.to_answer||0}</span>
+        <span class="badge">待消费 ${inbox.to_consume||0}</span>
+      </div>
+      <div class="task">${r.current_task ? `当前：<b>${esc(r.current_task.title)}</b> ${taskPill(r.current_task.status)}` : `<span class="muted">没有在手的任务</span>`}</div>
+    </div>`;
+  }).join("")}</div>`;
+  box.querySelectorAll("[data-role]").forEach(el => el.onclick = () => { S.role = (S.cluster.roles||[]).find(r => r.id === el.dataset.role); S.logs=""; refresh(); });
+}
+
+function renderInspector() {
+  const body = document.getElementById("inspectorBody");
+  const title = document.getElementById("inspectorTitle");
+  const sub = document.getElementById("inspectorSub");
+  const r = S.role;
+  if (!r) { title.textContent = "角色详情"; sub.textContent = "选中一个角色查看日志、配置和发指令"; body.innerHTML = `<div class="muted" style="font-size:12px">启动集群后，点左侧角色卡片或「角色」Tab 选中一个角色。</div>`; return; }
+  const isLead = S.cluster && r.id === S.cluster.lead_role_id;
+  title.textContent = r.name;
+  sub.textContent = `${isLead?"lead":"worker"} · ${r.backend}${r.model ? " · " + r.model : ""}`;
+  const proc = r.process || {};
+  body.innerHTML = `
+    <dl class="kv">
+      <dt>状态</dt><dd>${esc(proc.status || "空闲")}${proc.pid ? ` · pid ${esc(proc.pid)}` : ""}</dd>
+      <dt>Agent</dt><dd class="mono">${esc(r.agent_id)}</dd>
+      <dt>工作区</dt><dd class="mono">${esc(r.workspace)}</dd>
+      <dt>当前任务</dt><dd>${r.current_task ? esc(r.current_task.title) + " " + taskPill(r.current_task.status) : "<span class='muted'>无</span>"}</dd>
+    </dl>
+    <div style="display:flex;gap:6px;margin:10px 0">
+      <button class="btn small" id="roleStart">单独启动</button>
+      <button class="btn small danger" id="roleStop">停止当前进程</button>
+    </div>
+    <div class="muted" style="font-size:11px;margin:10px 0 4px">职责 / prompt</div>
+    <div class="prompt">${esc(r.system_prompt || "（未设置）")}</div>
+    <div class="muted" style="font-size:11px;margin:12px 0 4px">最近日志</div>
+    <div class="log" id="logBox">${esc(S.logs || "（还没有运行日志）")}</div>`;
+  document.getElementById("roleStart").onclick = () => roleAction(r.id, "start");
+  document.getElementById("roleStop").onclick = () => roleAction(r.id, "stop");
+  const logBox = document.getElementById("logBox"); if (logBox) logBox.scrollTop = logBox.scrollHeight;
+}
+
+async function clusterAction(act) {
+  if (!S.cluster) return;
+  if (act === "refresh") { toast("已刷新"); return refresh(); }
+  S.busy = true;
+  try {
+    await api(`/api/studio/clusters/${encodeURIComponent(S.cluster.id)}/${act}`, {method:"POST", body:"{}"});
+    toast(act === "start" ? "已启动" : act === "pause" ? "已暂停" : act === "resume" ? "已恢复" : "已停止");
+  } catch (e) { toast(e.message); }
+  finally { S.busy = false; refresh(); }
+}
+async function roleAction(roleId, act) {
+  S.busy = true;
+  try { await api(`/api/studio/roles/${encodeURIComponent(roleId)}/${act}`, {method:"POST", body:"{}"}); toast(act==="start"?"已唤醒":"已停止该角色进程"); }
+  catch (e) { toast(e.message); }
+  finally { S.busy = false; refresh(); }
+}
+async function reviewTask(taskId, verdict) {
+  S.busy = true;
+  try { await api(`/api/studio/tasks/${encodeURIComponent(taskId)}/review`, {method:"POST", body:JSON.stringify({verdict, summary: verdict==="APPROVED"?"本地控制台批准":"本地控制台退回"})}); toast(verdict==="APPROVED"?"已批准":"已退回"); }
+  catch (e) { toast(e.message); }
+  finally { S.busy = false; refresh(); }
+}
+async function reviewArtifact(artifactId, verdict) {
+  S.busy = true;
+  try { await api(`/api/studio/artifacts/${encodeURIComponent(artifactId)}/review`, {method:"POST", body:JSON.stringify({verdict, summary: verdict==="APPROVED"?"本地控制台批准":"本地控制台退回"})}); toast(verdict==="APPROVED"?"成果物已批准":"成果物已退回"); }
+  catch (e) { toast(e.message); }
+  finally { S.busy = false; refresh(); }
+}
+document.getElementById("send").onclick = async () => {
+  const text = document.getElementById("compose").value.trim();
+  if (!text || !S.cluster) { toast("先选集群并输入指令"); return; }
+  S.busy = true;
+  try {
+    await api("/api/studio/instructions", {method:"POST", body:JSON.stringify({cluster_id:S.cluster.id, text, role_id:S.role?S.role.id:null})});
+    document.getElementById("compose").value = ""; toast("已发送");
+  } catch (e) { toast(e.message); }
+  finally { S.busy = false; refresh(); }
+};
+
+/* ---- 新建集群 ---- */
+function openModal() {
+  document.getElementById("modal").classList.remove("hidden");
+  document.getElementById("workerRows").innerHTML = "";
+  addWorkerRow();
+}
+function closeModal() { document.getElementById("modal").classList.add("hidden"); }
+function roleRowHtml(isLead) {
+  return `<div class="form-grid">
+    <label class="f">名字<input class="role-name" value="${isLead?"Lead":"Worker"}"></label>
+    <label class="f">执行体<select class="role-backend"><option value="claude">Claude Code</option><option value="command">自定义命令</option></select></label>
+    <label class="f">模型（可选）<input class="role-model" placeholder="claude-sonnet-4-5"></label>
+    <label class="f role-command hidden">命令模板<textarea class="role-cmd" placeholder="zcode run --prompt {prompt}"></textarea></label>
+    <label class="f full">职责 / system prompt<textarea class="role-prompt">${isLead?"你是 lead：拆解目标、给 worker 派活、做终审；不要替 worker 执行具体产出。":"按 lead 派发的任务执行；缺信息先问，完成后写文件并登记成果物。"}</textarea></label>
+  </div>`;
+}
+function addWorkerRow() {
+  const wrap = document.createElement("div");
+  wrap.className = "role-row";
+  wrap.innerHTML = `<div class="head"><b>Worker</b><button class="btn small danger" data-remove>移除</button></div>${roleRowHtml(false)}`;
+  document.getElementById("workerRows").appendChild(wrap);
+  bindBackend(wrap);
+  wrap.querySelector("[data-remove]").onclick = () => wrap.remove();
+}
+function bindBackend(scope) {
+  const sel = scope.querySelector(".role-backend");
+  const cmd = scope.querySelector(".role-command");
+  const toggle = () => cmd.classList.toggle("hidden", sel.value !== "command");
+  sel.addEventListener("change", toggle); toggle();
+}
+document.getElementById("newCluster").onclick = openModal;
+document.getElementById("themeToggle").onclick = () => {
+  const current = document.documentElement.dataset.theme === "light" ? "light" : "dark";
+  const next = current === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem("sf.studio.theme", next); } catch (e) {}
+};
+document.getElementById("addWorker").onclick = addWorkerRow;
+document.getElementById("cancelModal").onclick = closeModal;
+bindBackend(document.getElementById("leadRow"));
+
+function rolePayload(scope) {
+  const backend = scope.querySelector(".role-backend").value;
+  const cmd = scope.querySelector(".role-cmd").value.trim();
+  const body = {
+    name: scope.querySelector(".role-name").value.trim(),
+    backend,
+    model: scope.querySelector(".role-model").value.trim(),
+    system_prompt: scope.querySelector(".role-prompt").value.trim(),
+    args: backend === "command" && cmd ? [cmd] : []
+  };
+  return body;
+}
+document.getElementById("createCluster").onclick = async () => {
+  const err = document.getElementById("modalError");
+  err.classList.add("hidden");
+  const lead = rolePayload(document.getElementById("leadRow"));
+  const roles = Array.from(document.querySelectorAll("#workerRows .role-row")).map(rolePayload);
+  const body = {
+    name: document.getElementById("fName").value.trim(),
+    objective: document.getElementById("fObjective").value.trim(),
+    workspace_root: document.getElementById("fWorkspace").value.trim(),
+    lead, roles,
+    policy: {
+      max_wall_minutes: Number(document.getElementById("fWall").value)||480,
+      max_rounds: Number(document.getElementById("fRounds").value)||200,
+      auto_approve: document.getElementById("fAuto").checked,
+      human_review: document.getElementById("fHuman").checked,
+      allow_bash: document.getElementById("fBash").checked
+    }
+  };
+  if (!body.name || !body.objective) { err.textContent = "集群名和目标必填"; err.classList.remove("hidden"); return; }
+  if (!roles.length || roles.some(r => !r.name)) { err.textContent = "至少一个 worker，且每个角色都要有名字"; err.classList.remove("hidden"); return; }
+  S.busy = true;
+  try {
+    const data = await api("/api/studio/clusters", {method:"POST", body:JSON.stringify(body)});
+    closeModal();
+    S.cluster = data.cluster; S.role = null; S.logs = "";
+    await api(`/api/studio/clusters/${encodeURIComponent(data.cluster.id)}/start`, {method:"POST", body:"{}"});
+    toast("集群已创建并启动");
+  } catch (e) { err.textContent = e.message; err.classList.remove("hidden"); }
+  finally { S.busy = false; refresh(); }
+};
+
+refresh();
+S.timer = setInterval(refresh, 1600);
+</script>
+</body>
+</html>

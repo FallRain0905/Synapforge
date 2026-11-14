@@ -280,15 +280,39 @@ def create_information_request(
             request.get("response_deadline"), timestamp, timestamp,
         ),
     )
+    # 节点效果必须真的落到节点上：只记 node_effect 不移动任务状态，等于"等待中"只是一句备注。
+    # 合法源状态只有 RUNNING（迁移表口径）；源状态不匹配时如实说明原因，不静默假装已生效。
+    node_effect_result: dict[str, Any] | None = None
+    if blocking == "required" and requester_task_id:
+        task_row = store.db.execute(
+            "SELECT status FROM tasks WHERE id = ?", (requester_task_id,)
+        ).fetchone()
+        current = str(task_row["status"]).upper() if task_row is not None else None
+        if current == "RUNNING":
+            coordination.check_transition("task", "RUNNING", "WAITING")
+            store.db.execute(
+                "UPDATE tasks SET status = 'WAITING', updated_at = ? WHERE id = ?",
+                (timestamp, requester_task_id),
+            )
+            node_effect_result = {"effect": "WAITING", "reason": "information_requested"}
+        else:
+            node_effect_result = {
+                "effect": "NONE",
+                "reason": f"task status={current or 'missing'} 不是 WAITING 的合法源状态（只有 RUNNING）",
+            }
     store.db.commit()
     _event(store, project_id, "project.information_request.created", requester_agent_id,
            {"request_id": request_id, "requester_agent_id": requester_agent_id,
             "provider_agent_id": body.get("provider_agent_id"), "request_type": request["request_type"],
             "blocking": blocking, "question": str(request["question"])[:200],
-            "response_deadline": request.get("response_deadline")},
+            "response_deadline": request.get("response_deadline"),
+            "node_effect_result": node_effect_result},
            actor_kind="agent")
     row = store.db.execute("SELECT * FROM information_requests WHERE id = ?", (request_id,)).fetchone()
-    return _request_view(row)
+    view = _request_view(row)
+    if node_effect_result is not None:
+        view["node_effect_result"] = node_effect_result
+    return view
 
 
 def _request_view(row: Any) -> dict[str, Any]:
@@ -448,11 +472,25 @@ def consume_information_request(store: Any, request_id: UUID, requester_agent_id
             "UPDATE tasks SET status = 'BLOCKED', blocked_reason = ?, updated_at = ? WHERE id = ?",
             (f"information_request:{request_id}", _now(), str(requester_task_id)),
         )
+    # 回复可消费 → 节点从 WAITING 回到 RUNNING（与 create 侧的 RUNNING→WAITING 成对，
+    # 否则"等到了就继续"同样只是一句备注）。
+    resumed = False
+    if effect == "RUNNING" and requester_task_id:
+        task_row = store.db.execute(
+            "SELECT status FROM tasks WHERE id = ?", (str(requester_task_id),)
+        ).fetchone()
+        if task_row is not None and str(task_row["status"]).upper() == "WAITING":
+            coordination.check_transition("task", "WAITING", "RUNNING")
+            store.db.execute(
+                "UPDATE tasks SET status = 'RUNNING', updated_at = ? WHERE id = ?",
+                (_now(), str(requester_task_id)),
+            )
+            resumed = True
     store.db.commit()
     _event(store, UUID(row["project_id"]), "project.information_request.consumed", requester_agent_id,
            {"request_id": str(request_id), "node_effect": effect}, actor_kind="agent")
     view = _request_view(_load_request(store, request_id))
-    view["node_effect_result"] = {"effect": effect, "reason": reason}
+    view["node_effect_result"] = {"effect": effect, "reason": reason, "task_resumed": resumed}
     return view
 
 

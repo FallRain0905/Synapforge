@@ -1,0 +1,8 @@
+# API 运行依赖（SQLite + 本地对象存储形态；不含 PostgreSQL / S3 可选件）
+fastapi==0.141.1
+uvicorn==0.52.4
+pydantic==2.13.5
+python-multipart==0.0.32
+cryptography==50.0.1
+PyYAML==6.0.3
+websockets==17.1

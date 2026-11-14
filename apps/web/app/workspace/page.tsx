@@ -11,6 +11,7 @@ import {
   ClipboardCheck,
   Cpu,
   Info,
+  Layers3,
   Loader2,
   MessagesSquare,
   Paperclip,
@@ -21,6 +22,7 @@ import {
   Workflow,
 } from "lucide-react";
 import { ArtifactDrawer } from "../../components/artifact-drawer";
+import { ProjectOverviewView } from "../../components/overview/project-overview";
 import { ProductionPathView, TeamView } from "../../components/project-team";
 import { PageHeading, formatTime } from "../../components/shell";
 import { ConfirmDialog, EmptyState, LoadingSkeleton, Metric, Modal, Panel, Progress, StatusPill } from "../../components/ui"
@@ -51,12 +53,13 @@ import { useAuth } from "../../lib/auth";
 import { useWorkspace } from "../../lib/workspace";
 
 const TABS = [
+  { id: "overview", label: "概览", icon: Layers3, hint: "项目总览：队伍、Agent 与门禁的当前状态（原首页内容）" },
   { id: "chat", label: "聊天", icon: MessagesSquare, hint: "人和 Agent 的主反馈流" },
   { id: "tasks", label: "任务", icon: ClipboardCheck, hint: "谁在做什么、还差什么" },
   { id: "team", label: "团队", icon: Users, hint: "每个 Agent 在跑什么、在等什么、下一件" },
   { id: "production", label: "生产", icon: Workflow, hint: "成果物 → 交接 → 下游任务的因果链" },
   { id: "artifacts", label: "成果空间", icon: Box, hint: "成果物、交接与文档入口" },
-  { id: "overview", label: "概览", icon: Info, hint: "立项目标、人数与推进模式" },
+  { id: "info", label: "信息", icon: Info, hint: "立项目标、人数与推进模式" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -113,7 +116,7 @@ export default function WorkspacePage() {
   const { ready, authenticated } = useAuth();
   const { projectId, project, projects, dashboard, selectProject, notify, connected, subscribeMessages, refresh } =
     useWorkspace();
-  const [tab, setTab] = useState<TabId>("chat");
+  const [tab, setTab] = useState<TabId>("overview");
   const [overview, setOverview] = useState<ProjectWorkspaceOverview | null>(null);
   const [messages, setMessages] = useState<ProjectMessage[]>([]);
   const [draft, setDraft] = useState("");
@@ -173,9 +176,67 @@ export default function WorkspacePage() {
      读 window.location.search 而不是 useSearchParams——保持静态预渲染不被打断（沿用时间线页的做法）。 */
   useEffect(() => {
     if (!ready || !authenticated || typeof window === "undefined") return;
-    const wanted = new URLSearchParams(window.location.search).get("project");
+    const params = new URLSearchParams(window.location.search);
+    const wanted = params.get("project");
     if (wanted && projects.some((item) => item.id === wanted) && wanted !== projectId) selectProject(wanted);
+    /* 六主导航：?tab= 深链落地（/workspace?tab=chat 这类老链接继续有效；原「概览」Tab 更名 info 后
+       旧 ?tab=overview 链接落在新总览 Tab 上，信息不丢）。 */
+    const wantedTab = params.get("tab");
+    if (wantedTab) {
+      const normalized = (wantedTab.startsWith("/") ? wantedTab.slice(1) : wantedTab) as TabId;
+      if (TABS.some((item) => item.id === normalized)) setTab(normalized);
+    }
   }, [ready, authenticated, projects, projectId, selectProject]);
+
+  /** Hub 级 URL 同步：切 Tab / 切项目都原地改 query（不推历史、不丢其它参数）；popstate 还原。 */
+  const syncUrl = useCallback(
+    (next: { tab?: TabId; project?: string }) => {
+      if (typeof window === "undefined") return;
+      const url = new URL(window.location.href);
+      if (next.tab && next.tab !== "overview") url.searchParams.set("tab", next.tab);
+      else url.searchParams.delete("tab");
+      if (next.project) url.searchParams.set("project", next.project);
+      window.history.replaceState(window.history.state, "", url.toString());
+    },
+    [],
+  );
+
+  const switchTab = useCallback(
+    (next: TabId) => {
+      setTab(next);
+      syncUrl({ tab: next });
+    },
+    [syncUrl],
+  );
+
+  const switchProject = useCallback(
+    (nextId: string) => {
+      selectProject(nextId);
+      syncUrl({ project: nextId, tab });
+    },
+    [selectProject, syncUrl, tab],
+  );
+
+  // 浏览器前进/后退：把 Tab 与项目还原回 URL 里的状态（replaceState 不推栈，popstate 只来自外部导航）
+  useEffect(() => {
+    const onPop = () => {
+      if (typeof window === "undefined") return;
+      const params = new URLSearchParams(window.location.search);
+      const wantedTab = params.get("tab");
+      if (wantedTab) {
+        const normalized = (wantedTab.startsWith("/") ? wantedTab.slice(1) : wantedTab) as TabId;
+        if (TABS.some((item) => item.id === normalized)) setTab(normalized);
+      } else {
+        setTab("overview");
+      }
+      const wantedProject = params.get("project");
+      if (wantedProject && projects.some((item) => item.id === wantedProject) && wantedProject !== projectId) {
+        selectProject(wantedProject);
+      }
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [projects, projectId, selectProject]);
 
   const load = useCallback(async () => {
     if (!projectId) {
@@ -702,7 +763,7 @@ export default function WorkspacePage() {
               role="tab"
               aria-selected={active}
               className={`tab${active ? " tab-active" : ""}`}
-              onClick={() => setTab(item.id)}
+              onClick={() => switchTab(item.id)}
               data-testid={`workspace-tab-${item.id}`}
               title={item.hint}
             >
@@ -716,6 +777,10 @@ export default function WorkspacePage() {
 
       <div className={`grid grid-main-side workspace-grid${tab === "chat" ? " is-fill" : ""}`}>
         <div className="grid workspace-main">
+          {tab === "overview" ? (
+            <ProjectOverviewView suppressHeading />
+          ) : null}
+
           {tab === "chat" ? (
             <Panel
               title="项目群聊"
@@ -1364,8 +1429,8 @@ export default function WorkspacePage() {
             </Panel>
           ) : null}
 
-          {tab === "overview" ? (
-            <Panel title="项目概览" subtitle="立项目标、人数与任务推进方式">
+          {tab === "info" ? (
+            <Panel title="项目信息" subtitle="立项目标、人数与任务推进方式">
               <div className="kv-list">
                 <div className="kv">
                   <span className="kv-key"><Target size={14} /> 项目目标</span>
@@ -1482,7 +1547,7 @@ export default function WorkspacePage() {
               <Metric label="已批准" value={overview?.artifacts.approved ?? 0} detail="可下游使用" tone="positive" />
             </div>
             <div className="link-row">
-              <button type="button" className="button button-secondary" onClick={() => setTab("artifacts")} data-testid="open-artifacts">
+              <button type="button" className="button button-secondary" onClick={() => switchTab("artifacts")} data-testid="open-artifacts">
                 <Box size={14} /> 打开成果空间
               </button>
               <Link className="inline-link" href="/handoffs">交接中心</Link>

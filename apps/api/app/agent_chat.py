@@ -39,6 +39,7 @@ from .contracts import (
     AgentConversationPromote,
     AgentConversationPromoteResult,
     MyAgentEndpoint,
+    MyAgentPlatformModel,
     MyAgentRole,
     TaskCreate,
 )
@@ -47,6 +48,12 @@ from .contracts import (
 DEFAULT_COMMAND_TEMPLATE = ["opencode", "run", "--format", "json", "--auto", "{prompt}"]
 # 一轮的默认租约：执行体崩了不会把会话卡死（过期可被重新领取）。
 DEFAULT_CLAIM_LEASE_SECONDS = 1800
+
+# 平台渠道模型在执行体侧 opencode provider 配置里的别名（方案 A，2026-10-02）。
+# 执行体的项目级 opencode.json 写 provider=synapforge → baseURL=平台代理端点 →
+# 模型串 `<别名>/<渠道模型名>`。**只是展示/配置用**：代理端点按模型名（后半段）路由渠道，
+# 不校验前缀；没有渠道的成员这里就是空列表，页面如实显示"平台渠道不可用"，不编。
+PLATFORM_PROVIDER_ALIAS = "synapforge"
 
 # ---- 实时桥（W1.3，消费工作包 C 的 stream_bridge）--------------------------------
 #
@@ -482,6 +489,11 @@ def list_my_agents(store: Any, member_id: str) -> list[MyAgentEndpoint]:
 
     模型来源两处，按可信度排序：设备最近一次心跳自报的 `resource_summary["models"]`（执行体真探测到的），
     其次 Agent 注册时自报的 `model_name`（静态值，只当兜底）。**没有就如实留空**，不编。
+
+    平台渠道模型（方案 A，2026-10-02）：`models` 里**只放执行体本地探测到的**（本地视角），
+    平台渠道另列 `platform_models`——两边的"能不能用"由执行体侧 provider 配置决定
+    （`GET /api/my-agent/executor-setup` 下发；浏览器不参与）。渠道模型与本地模型**不合并**：
+    混在一起会出现"选了但执行体连不上"的假选项。
     """
 
     ensure_schema(store)
@@ -520,6 +532,29 @@ def list_my_agents(store: Any, member_id: str) -> list[MyAgentEndpoint]:
             default_model = registered_model
         if default_model and default_model not in models:
             models = [default_model, *models]
+        # 平台渠道模型（方案 A）：成员组织里启用渠道的合集。执行体带 llm.invoke 授权
+        # 且至少有一条渠道可用时才列为"可配置"；渠道一条没有就是空列表 + available=False。
+        # （agents 表没有 organization_id——组织从**拥有者成员**上取，口径与代理端点一致）
+        owner = store.db.execute(
+            "SELECT m.organization_id AS organization_id FROM agents a JOIN human_members m ON m.id = a.owner_member_id"
+            " WHERE a.agent_id = ?",
+            (str(row["agent_id"] or ""),),
+        ).fetchone()
+        organization_id = str(owner["organization_id"]) if owner and owner["organization_id"] else ""
+        platform_models: list[MyAgentPlatformModel] = []
+        platform_available = False
+        try:
+            from . import llm_channels
+
+            for name in llm_channels.available_models(store, organization_id=organization_id):
+                platform_models.append(MyAgentPlatformModel(model=name))
+            # "可配置" = 授权里有 llm.invoke **且**至少有一条渠道模型——少一个都如实报 False
+            platform_available = bool(platform_models) and _grant_has_llm_invoke(
+                store, str(row["device_id"]), project_id
+            )
+        except Exception:  # noqa: BLE001 - 渠道模块异常不影响执行体列表本身
+            platform_models = []
+            platform_available = False
         # 角色（M-6）：同样来自执行体心跳的真探测（`opencode agent list` + 角色文件的说明）。
         # 探不到就是空列表——页面据此**只显示「默认」**，不显示点不动的假选项。
         roles: list[MyAgentRole] = []
@@ -556,14 +591,33 @@ def list_my_agents(store: Any, member_id: str) -> list[MyAgentEndpoint]:
                 executor=str(summary.get("executor") or ""),
                 models=models,
                 default_model=default_model,
+                platform_models=platform_models,
+                # 只有"授权里有 llm.invoke 且至少有一条渠道模型"才算可配置——少一个都如实报 False
+                platform_models_available=platform_available,
+                platform_provider=PLATFORM_PROVIDER_ALIAS if platform_available else "",
                 roles=roles,
                 conversation_count=store.db.execute(
                     "SELECT COUNT(*) AS c FROM agent_conversations WHERE member_id = ? AND device_id = ? AND archived_at IS NULL",
                     (member_id, str(row["device_id"])),
                 ).fetchone()["c"],
             )
-    )
+        )
     return endpoints
+
+
+def _grant_has_llm_invoke(store: Any, device_id: str, project_id: str) -> bool:
+    """这台设备在该项目的**现行授权**里有没有 llm.invoke（旧授权串没有它 ⇒ 要重签）。
+
+    与 create_conversation 挑 chat.run 的口径一致：同一设备同项目可能有多条历史授权，
+    要看有没有**任何一条未撤销未过期**的授权带这个能力，不能只看最新一条。
+    """
+
+    rows = store.db.execute(
+        "SELECT capabilities FROM device_project_grants "
+        "WHERE device_id = ? AND project_id = ? AND revoked_at IS NULL AND expires_at > ?",
+        (device_id, project_id, _now()),
+    ).fetchall()
+    return any("llm.invoke" in _json(row["capabilities"], []) for row in rows)
 
 
 # ---- 会话 ------------------------------------------------------------------
@@ -1055,8 +1109,39 @@ def promote_conversation(
     )
 
 
+def executor_platform_setup(
+    store: Any, agent_id: str, project_id: UUID, base_url: str, provider_api_key: str
+) -> dict[str, Any]:
+    """执行体侧平台渠道 provider 配置（方案 A 下发体，2026-10-02）。
+
+    **鉴权在路由层**（`llm.invoke` 能力 + agent 归属，与代理端点同一套）——这里只管组装：
+    - `base_url`：平台代理端点（`<平台>/api/agent/llm/v1/<agent_id>/<project_id>`）；
+    - `provider_api_key`：**调用方带来的那枚授权令牌原样回传**——它本来就是执行体持有的
+      项目能力令牌，平台不经手保存（库里只有哈希），浏览器永远拿不到；
+    - `models`：成员组织里启用渠道的模型合集（执行体 provider 配置的 models 键来源）；
+    - 没有任何启用渠道时如实给空 models——执行体侧**不写** provider 配置，也不得回落。
+    """
+
+    from . import llm_channels
+    from datetime import datetime as _datetime
+
+    agent = store.db.execute(
+        "SELECT owner_member_id FROM agents WHERE agent_id = ?", (agent_id,)
+    ).fetchone()
+    if agent is None:
+        raise AgentChatError("agent_not_found")
+    owner = store.get_member(str(agent["owner_member_id"]))
+    models = llm_channels.available_models(store, organization_id=str(owner.organization_id))
+    return {
+        "provider": PLATFORM_PROVIDER_ALIAS,
+        "base_url": base_url,
+        "provider_api_key": str(provider_api_key or ""),
+        "models": models,
+        "issued_at": _datetime.now(UTC),
+    }
+
+
 def ensure_turn_owned(store: Any, turn_id: UUID, member_id: str) -> None:
-    """SSE 订阅前的可见性门：轮次必须属于该成员的会话（与 list_turn_events 同口径，但不搬数据）。"""
 
     ensure_schema(store)
     owned = store.db.execute(
@@ -1083,6 +1168,7 @@ __all__ = [
     "AgentChatError",
     "DEFAULT_CLAIM_LEASE_SECONDS",
     "DEFAULT_COMMAND_TEMPLATE",
+    "PLATFORM_PROVIDER_ALIAS",
     "append_message",
     "bridge",
     "cancel_turn",
@@ -1094,6 +1180,7 @@ __all__ = [
     "delete_conversation",
     "ensure_schema",
     "ensure_turn_owned",
+    "executor_platform_setup",
     "get_conversation",
     "get_turn",
     "list_conversations",

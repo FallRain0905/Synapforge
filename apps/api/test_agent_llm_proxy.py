@@ -247,3 +247,115 @@ class ProxyStreamTest(AgentLlmProxyTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MyAgentPlatformModelsTest(AgentLlmProxyTest):
+    """`GET /api/my-agent/agents` 的平台渠道字段（方案 A，2026-10-02）。
+
+    口径：platform_models 只在"授权含 llm.invoke 且组织里至少一条启用渠道"时可用；
+    渠道模型**不混进**本地 models；不可用要如实给 False（页面显示"配置不可用"，不静默回落）。
+    """
+
+    def my_agents(self) -> dict:
+        """让设备出现在执行体列表里：`list_my_agents` 不要求心跳，只要求 owner + 活动授权。"""
+        response = self.client.get("/api/my-agent/agents", headers=self.admin_headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        return {row["device_id"]: row for row in response.json()}
+
+    def test_platform_models_listed_and_available(self) -> None:
+        upstream = self.make_upstream()
+        self.create_channel(upstream, ["chan-model-a", "chan-model-b"])
+        rows = self._agents()
+        self.assertIn(DEVICE, rows)
+        endpoint = rows[DEVICE]
+        self.assertEqual(endpoint["platform_models"], [{"model": "chan-model-a"}, {"model": "chan-model-b"}])
+        self.assertTrue(endpoint["platform_models_available"])
+        self.assertEqual(endpoint["platform_provider"], "synapforge")
+        # 这台设备没有心跳自报本地模型：本地 models 就是空——渠道模型不混进来（关键断言）
+        self.assertEqual(endpoint["models"], [])
+
+    def test_platform_models_unavailable_without_channel(self) -> None:
+        upstream = self.make_upstream()  # 有上游但**没建渠道**
+        rows = self._agents()
+        endpoint = rows[DEVICE]
+        self.assertEqual(endpoint["platform_models"], [])
+        self.assertFalse(endpoint["platform_models_available"])
+        self.assertEqual(endpoint["platform_provider"], "")
+
+    def test_platform_models_unavailable_without_llm_invoke(self) -> None:
+        upstream = self.make_upstream()
+        self.create_channel(upstream, ["chan-model-a"])
+        # 撤掉带 llm.invoke 的授权，换成只授 chat.run 的旧式授权
+        grants = self.store.db.execute(
+            "SELECT id FROM device_project_grants WHERE device_id = ?", (DEVICE,)
+        ).fetchall()
+        for row in grants:
+            self.store.revoke_device_project_grant(UUID(row["id"]), ADMIN)
+        self.store.create_device_project_grant(
+            self.project_id(), DeviceProjectGrantCreate(device_id=DEVICE, capabilities=["chat.run"]), ADMIN
+        )
+        rows = self._agents()
+        endpoint = rows[DEVICE]
+        self.assertEqual(endpoint["platform_models"], [{"model": "chan-model-a"}])  # 渠道在，能"看"
+        self.assertFalse(endpoint["platform_models_available"])  # 但授权没有 llm.invoke ⇒ 不可配置
+        self.assertEqual(endpoint["platform_provider"], "")
+
+    def _agents(self) -> dict:
+        response = self.client.get("/api/my-agent/agents", headers=self.admin_headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        return {row["device_id"]: row for row in response.json()}
+
+
+class ExecutorSetupTest(AgentLlmProxyTest):
+    """`GET /api/agents/{agent_id}/llm-setup/{project_id}`（执行体内核专用，2026-10-02）。
+
+    浏览器拿不到令牌；执行体用它已持有的授权令牌换取 provider 配置——
+    apiKey 是**同一枚令牌原样回传**，平台不落库。
+    """
+
+    def setup_request(self, token: str, agent_id: str = AGENT) -> object:
+        return self.client.get(
+            f"/api/agents/{agent_id}/llm-setup/{self.project_id()}",
+            headers=self.auth(token),
+        )
+
+    def test_setup_returns_provider_config_with_token_echo(self) -> None:
+        upstream = self.make_upstream()
+        self.create_channel(upstream, ["chan-model-a", "chan-model-b"])
+        token = self.grant_credential.project_token
+        response = self.setup_request(token)
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertEqual(body["provider"], "synapforge")
+        self.assertTrue(body["base_url"].endswith(f"/api/agent/llm/v1/{AGENT}/{self.project_id()}"))
+        # 令牌**原样回传**（执行体写进本机 0600 配置；浏览器/平台库都不持有）
+        self.assertEqual(body["provider_api_key"], token)
+        self.assertEqual(body["models"], ["chan-model-a", "chan-model-b"])
+        self.assertTrue(body["issued_at"])
+
+    def test_setup_without_channels_gives_empty_models(self) -> None:
+        upstream = self.make_upstream()  # 不建渠道
+        response = self.setup_request(self.grant_credential.project_token)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["models"], [])
+
+    def test_setup_requires_valid_token(self) -> None:
+        upstream = self.make_upstream()
+        self.create_channel(upstream, ["chan-model-a"])
+        self.assertEqual(self.setup_request("prj_not-a-real-token").status_code, 401)
+
+    def test_setup_requires_llm_invoke_capability(self) -> None:
+        upstream = self.make_upstream()
+        self.create_channel(upstream, ["chan-model-a"])
+        restricted = self.store.create_device_project_grant(
+            self.project_id(), DeviceProjectGrantCreate(device_id=DEVICE, capabilities=["chat.run"]), ADMIN
+        )
+        response = self.setup_request(restricted.project_token)
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("device_capability_denied", response.json()["detail"])
+
+    def test_setup_rejects_agent_mismatch(self) -> None:
+        upstream = self.make_upstream()
+        self.create_channel(upstream, ["chan-model-a"])
+        response = self.setup_request(self.grant_credential.project_token, agent_id="agent-someone-else")
+        self.assertEqual(response.status_code, 403)

@@ -46,6 +46,7 @@ from .contracts import (
     AgentChatTurnEventReport,
     AgentConnection,
     MyAgentEndpoint,
+    MyAgentExecutorSetup,
     Agent,
     AgentProjectGrant,
     AgentTaskClaimRequest,
@@ -199,8 +200,16 @@ from .path_privacy import public_agent, public_artifact, public_run
 from . import archive, drive, drive_grants, file_transfers, llm_channels, workspace_files
 from .cumcm_importer import CumcmHandoffImporter, CumcmImporter
 from .gateway import GatewayProtocolError, GatewayService
-from . import agent_chat, ai_chat, ai_probe, boundary_gate, builtin_workflows, collaboration, coordination_store, convert_queue, delivery, document_api, kb_gateway, knowledge_base, observability, pack_api, personal_drive, project_team, stream_bridge, workflow_engine, workflow_service
+from . import agent_chat, ai_chat, ai_probe, boundary_gate, builtin_workflows, collaboration, coordination_store, convert_queue, delivery, document_api, kb_gateway, knowledge_base, observability, pack_api, personal_drive, project_team, stream_bridge, workflow_copilot, workflow_engine, workflow_service
 from .contracts import LlmChannelCreate, LlmChannelUpdate, LlmQuotaSet
+from .contracts import (
+    WorkflowCopilotSessionCreate,
+    WorkflowCopilotTurnRequest,
+    WorkflowCopilotChoiceAnswer,
+    WorkflowCopilotDraftUpdate,
+    WorkflowCopilotPublishRequest,
+    WorkflowCopilotRunRequest,
+)
 from packages.competition_packs import CompetitionPackError
 
 
@@ -213,6 +222,8 @@ drive.ensure_schema(store)
 DRIVE_BACKFILL = drive.backfill_legacy(store)
 # LLM 渠道与全员免费额度（管理员「渠道」页 + 成员代理端点）：启动建表（幂等）
 llm_channels.ensure_schema(store)
+# 工作流 Copilot 会话/轮次/决策表（迁移 041 的 dev SQLite 对应物）：启动建表（幂等）
+workflow_copilot.ensure_schema(store)
 importer = CumcmImporter(store)
 handoff_importer = CumcmHandoffImporter(store)
 gateway = GatewayService(store)
@@ -441,6 +452,10 @@ async def enforce_project_authorization(request: Request, call_next: Any) -> Any
     # Agent-only routes authenticate with a project capability token in the
     # route handler; they do not carry a human session bearer.
     if path.startswith("/api/agent/"):
+        return await call_next(request)
+    # 执行体用已有项目能力令牌换取平台 provider 配置；由路由复用
+    # _agent_llm_context 做 Bearer + llm.invoke + agent 归属校验，不能先被人类会话门禁拦截。
+    if "/llm-setup/" in path:
         return await call_next(request)
     # 同理：任何带项目能力令牌的请求都交给 handler 按能力校验。
     # 少了这条，Agent 的 HTTP 领取链路（/api/agents/{id}/tasks/claim 等，worker-run 走的就是它）
@@ -1424,6 +1439,154 @@ def workflow_draft_from_project(project_id: UUID) -> dict[str, Any]:
         return workflow_service.draft_from_project(store, project_id)
     except workflow_service.WorkflowError as error:
         raise _workflow_http_error(error) from error
+
+
+# ---- 工作流 Copilot（会话式搭建助手）----------------------------------------
+# 红线：AI 永远不能发布/运行——publish 与 run 都要求人工 confirmed=true，并做
+# 修订号 stale 检查；run 在服务端再做项目权限检查（不依赖中间件路径推断）。
+
+
+def _copilot_http_error(error: workflow_copilot.WorkflowCopilotError) -> HTTPException:
+    status = {
+        "copilot_session_not_found": 404,
+        "copilot_draft_empty": 422,
+        "copilot_draft_invalid": 422,
+        "copilot_choice_invalid": 422,
+        "copilot_choice_required": 409,
+        "copilot_draft_unparseable": 502,
+        "copilot_publish_not_confirmed": 422,
+        "copilot_run_not_confirmed": 422,
+        "copilot_not_published": 409,
+        "copilot_draft_stale": 409,
+        "workflow_definition_invalid": 422,
+        "workflow_key_exists": 409,
+        "workflow_not_found": 404,
+        "workflow_version_not_found": 404,
+        "workflow_nodes_unresolvable": 422,
+        "ai_credentials_missing": 400,
+        "llm_quota_exceeded": 429,
+    }.get(error.code, 502 if error.code.startswith(("llm_", "ai_")) else 400)
+    return HTTPException(status_code=status, detail={"code": error.code, "errors": error.errors})
+
+
+@app.get("/api/workflows/copilot/models", response_model=list[str])
+def list_copilot_models(request: Request) -> list[str]:
+    """Copilot 可选模型（/ask 同口径：启用渠道的模型列表）。"""
+
+    return workflow_copilot.available_models(store, _request_member_id(request))
+
+
+@app.get("/api/workflows/copilot/sessions", response_model=list[dict[str, Any]])
+def list_copilot_sessions(project_id: UUID | None = Query(default=None), request: Request = None) -> list[dict[str, Any]]:
+    """恢复会话列表（owner 本人 + 本组织；可按项目过滤）。"""
+
+    member = _request_member(request)
+    return workflow_copilot.list_sessions(store, member.id, project_id=str(project_id) if project_id else None)
+
+
+@app.post("/api/workflows/copilot/sessions", response_model=dict[str, Any], status_code=201)
+def create_copilot_session(data: WorkflowCopilotSessionCreate, request: Request) -> dict[str, Any]:
+    """新建 Copilot 会话：owner = 当前成员；绑定项目时服务端校验项目成员资格。"""
+
+    member = _request_member(request)
+    try:
+        return workflow_copilot.create_session(
+            store, organization_id=member.organization_id, member_id=member.id,
+            title=data.title, project_id=str(data.project_id) if data.project_id else None,
+        )
+    except workflow_copilot.WorkflowCopilotError as error:
+        raise _copilot_http_error(error) from error
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
+
+
+@app.get("/api/workflows/copilot/sessions/{session_id}", response_model=dict[str, Any])
+def get_copilot_session(session_id: UUID, request: Request) -> dict[str, Any]:
+    """会话详情（含草稿与全部轮次，供 UI 恢复）。"""
+
+    try:
+        return workflow_copilot.get_session(store, str(session_id), _request_member_id(request))
+    except workflow_copilot.WorkflowCopilotError as error:
+        raise _copilot_http_error(error) from error
+
+
+@app.post("/api/workflows/copilot/sessions/{session_id}/turns", response_model=dict[str, Any])
+def create_copilot_turn(session_id: UUID, data: WorkflowCopilotTurnRequest, request: Request) -> dict[str, Any]:
+    """跑一轮：结构化回答（可选）先过服务端校验，再调 chat_routed 出草稿（有界自动修复）。"""
+
+    try:
+        return workflow_copilot.run_turn(
+            store, str(session_id), member_id=_request_member_id(request),
+            message=data.message, structured_answer=data.structured_answer,
+        )
+    except workflow_copilot.WorkflowCopilotError as error:
+        raise _copilot_http_error(error) from error
+
+
+@app.post("/api/workflows/copilot/sessions/{session_id}/choice", response_model=dict[str, Any])
+def answer_copilot_choice(session_id: UUID, data: WorkflowCopilotChoiceAnswer, request: Request) -> dict[str, Any]:
+    """提交 synapforge-choice 的结构化回答（等价 turns 带 structured_answer 的独立入口）。"""
+
+    try:
+        return workflow_copilot.run_turn(
+            store, str(session_id), member_id=_request_member_id(request),
+            message="（提交选择）" if not data.message else data.message,
+            structured_answer=data.answers,
+            choice_id=data.choice_id,
+        )
+    except workflow_copilot.WorkflowCopilotError as error:
+        raise _copilot_http_error(error) from error
+
+
+@app.put("/api/workflows/copilot/sessions/{session_id}/draft", response_model=dict[str, Any])
+def save_copilot_draft(session_id: UUID, data: WorkflowCopilotDraftUpdate, request: Request) -> dict[str, Any]:
+    """人工编辑草稿（JSON）保存：立即重校验并推进修订号。"""
+
+    try:
+        return workflow_copilot.save_draft(
+            store, str(session_id), member_id=_request_member_id(request), definition=data.definition
+        )
+    except workflow_copilot.WorkflowCopilotError as error:
+        raise _copilot_http_error(error) from error
+
+
+@app.post("/api/workflows/copilot/sessions/{session_id}/preview", response_model=dict[str, Any])
+def preview_copilot_draft(session_id: UUID, request: Request) -> dict[str, Any]:
+    """草稿试运行：复用 workflow_service.preview_definition，零副作用。"""
+
+    try:
+        return workflow_copilot.preview_draft(store, str(session_id), _request_member_id(request))
+    except workflow_copilot.WorkflowCopilotError as error:
+        raise _copilot_http_error(error) from error
+
+
+@app.post("/api/workflows/copilot/sessions/{session_id}/publish", response_model=dict[str, Any])
+def publish_copilot_draft(session_id: UUID, data: WorkflowCopilotPublishRequest, request: Request) -> dict[str, Any]:
+    """发布草稿为新工作流包：人工 confirmed=true + 当前修订号（stale 拒绝）；重复发布幂等。"""
+
+    try:
+        return workflow_copilot.publish_draft(
+            store, str(session_id), member_id=_request_member_id(request),
+            confirmed=data.confirmed, draft_revision=data.draft_revision,
+        )
+    except workflow_copilot.WorkflowCopilotError as error:
+        raise _copilot_http_error(error) from error
+
+
+@app.post("/api/workflows/copilot/sessions/{session_id}/run", response_model=dict[str, Any])
+def run_copilot_published(session_id: UUID, data: WorkflowCopilotRunRequest, request: Request) -> dict[str, Any]:
+    """应用已发布版本：与发布分开的第二次显式确认；服务端做项目权限检查与修订核对。"""
+
+    try:
+        return workflow_copilot.run_published(
+            store, str(session_id), member_id=_request_member_id(request),
+            project_id=str(data.project_id), confirmed=data.confirmed,
+            published_revision=data.published_revision, inputs=data.inputs,
+        )
+    except workflow_copilot.WorkflowCopilotError as error:
+        raise _copilot_http_error(error) from error
+    except PermissionError as error:
+        raise HTTPException(status_code=403, detail=str(error)) from error
 
 
 # ---- 协作协议接线（D1：阶段报告 / 运行时信息请求；协议权威 coordination.py）--------
@@ -5344,3 +5507,31 @@ async def agent_llm_chat_completions(agent_id: str, project_id: str, request: Re
         )
     except llm_channels.LlmChannelError as error:
         raise _llm_channel_http_error(error) from error
+
+
+@app.get("/api/agents/{agent_id}/llm-setup/{project_id}", response_model=MyAgentExecutorSetup)
+def agent_llm_executor_setup(agent_id: str, project_id: str, request: Request) -> MyAgentExecutorSetup:
+    """执行体侧平台渠道 provider 配置下发（方案 A 收口，2026-10-02）。
+
+    执行体内核用**自己已持有的项目能力令牌**换取一份 opencode provider 配置：
+    baseURL 指回平台代理端点、apiKey 就是它带来的那枚令牌（原样回传，不落库、不进浏览器）。
+    有了它，执行体把配置写到**项目隔离**的 opencode.json（0600）后即可用
+    `synapforge/<渠道模型>` 跑模型——平台渠道模型从"能看"到"能跑"。
+
+    鉴权与代理端点完全同一套：令牌必须带 ``llm.invoke``、属于路径上的 agent；
+    无渠道模型时给空 models（执行体侧不写配置，不静默回落到别的 provider）。
+    """
+
+    member_id, _organization_id = _agent_llm_context(agent_id, project_id, request)
+    base_url = f"{str(request.base_url).rstrip('/')}/api/agent/llm/v1/{agent_id}/{project_id}"
+    authorization = request.headers.get("Authorization", "")
+    _, _, token = authorization.partition(" ")
+    try:
+        payload = agent_chat.executor_platform_setup(
+            store, agent_id, UUID(project_id), base_url, provider_api_key=token.strip()
+        )
+    except agent_chat.AgentChatError as error:
+        raise _agent_chat_http_error(error) from error
+    # member_id 仅用于口径对齐（额度归属校验在代理端点里做）；这里不额外消费它
+    _ = member_id
+    return MyAgentExecutorSetup(**payload)

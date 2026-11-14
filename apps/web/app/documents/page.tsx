@@ -1,10 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import { ArrowUpRight, FileText, RefreshCcw } from "lucide-react";
 import { PageHeading, formatTime } from "../../components/shell";
-import { EmptyState, Modal, Panel } from "../../components/ui"
+import { HubTabs } from "../../components/hub-tabs";
+import { EmptyState, LoadingSkeleton, Modal, Panel } from "../../components/ui"
 import { PAGE_GRID } from "../../lib/page-layout";
+import { hubTabsOf } from "../../lib/nav";
 import {
   DocumentComment,
   DocumentDiff,
@@ -32,6 +35,16 @@ import {
 import { CollaborativeDocument, createCollaborativeDocument } from "../../lib/collab";
 import { projectSocketUrl } from "../../lib/api";
 import { useWorkspace } from "../../lib/workspace";
+
+/** 二级 Tab（成果物库 / 个人云盘）按需加载：原页面模块原样复用，代码各自分片。 */
+const ArtifactsEmbedded = dynamic(() => import("../artifacts/content"), {
+  ssr: false,
+  loading: () => <LoadingSkeleton rows={5} label="正在加载成果物库…" />,
+});
+const DriveEmbedded = dynamic(() => import("../drive/content"), {
+  ssr: false,
+  loading: () => <LoadingSkeleton rows={5} label="正在加载个人云盘…" />,
+});
 
 const DOCUMENT_TYPES = ["paper_source", "model_spec", "problem_analysis", "audit_report", "review_report", "submission_bundle", "experiment_plan"];
 const LAYER_LABEL: Record<string, string> = { draft: "草稿", submitted: "提交", approved: "批准" };
@@ -74,6 +87,9 @@ export default function DocumentsPage() {
   const [savedAt, setSavedAt] = useState("");
   const [saving, setSaving] = useState(false);
   const collabRef = useRef<CollaborativeDocument | null>(null);
+  // Hub 层 Tab（文档 / 成果物 / 云盘）：URL ?tab= 同步由 HubTabs 负责
+  const hubTabs = useMemo(() => hubTabsOf("/documents"), []);
+  const [hubTab, setHubTab] = useState(hubTabs[0].href);
 
   const documents = useMemo(
     () => dashboard.artifacts.filter((artifact) => DOCUMENT_TYPES.includes(artifact.artifact_type)),
@@ -251,15 +267,18 @@ export default function DocumentsPage() {
   return (
     <div className="page-content" id="documents" style={PAGE_GRID}>
       <PageHeading
-        hint="草稿 / 提交 / 批准三层版本；正式版本可追溯到成员、任务与 Git commit"
+        hint="文档版本、成果物库与个人云盘——项目内容的家"
         actions={
-          <button className="button button-secondary" disabled={!selectedId || busy !== "" || current?.layer !== "draft"} data-testid="document-submit" onClick={() => void run("submit", async () => { await submitDocument(projectId, selectedId); return "文档已提交待审"; })}>
+          <button className="button button-secondary" disabled={hubTab !== hubTabs[0].href || !selectedId || busy !== "" || current?.layer !== "draft"} data-testid="document-submit" onClick={() => void run("submit", async () => { await submitDocument(projectId, selectedId); return "文档已提交待审"; })}>
             提交待审
           </button>
         }
       />
 
-      <section className="grid grid-main-side">
+      <HubTabs tabs={hubTabs} activeId={hubTab} onChange={setHubTab} ariaLabel="文档与成果视图" testIdPrefix="documents-hub-tab" />
+
+      {hubTab === hubTabs[0].href && (
+        <section className="grid grid-main-side">
         <Panel title="文档版本" subtitle={`共 ${documents.length} 个文档类成果物`} testId="document-panel" actions={<span className="gate-count">{documents.length}</span>}>
           <div className="list document-list-scroll" data-testid="document-list">
             {documents.map((artifact) => (
@@ -461,6 +480,11 @@ export default function DocumentsPage() {
           )}
         </div>
       </section>
+      )}
+
+      {/* 二级 Tab：整个旧页面模块按需嵌入（含它们的页面级操作），state 各自独立 */}
+      {hubTab === "/artifacts" && <ArtifactsEmbedded />}
+      {hubTab === "/drive" && <DriveEmbedded />}
 
       {conflict && (
         <Modal

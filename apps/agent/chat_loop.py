@@ -31,7 +31,12 @@ try:  # 包内导入（正常运行）
     from .result_uploader import AgentArtifactClient
     from .local_state import LocalAgentState
     from .machine_service import LocalProcessSupervisor, ProcessSpec
-    from .opencode_executor import parse_opencode_jsonl
+    from .opencode_executor import (
+        parse_opencode_jsonl,
+        platform_provider_config_path,
+        read_platform_provider_models,
+        write_platform_provider_config,
+    )
     from .opencode_server import OpenCodeServer, OpenCodeServerConfig, run_serve_turn
 except ImportError:  # 直接脚本执行 / 测试以顶层模块导入（与 agentd 同一套兼容写法）
     from chat_outputs import ChatOutputCollector  # type: ignore
@@ -40,12 +45,23 @@ except ImportError:  # 直接脚本执行 / 测试以顶层模块导入（与 ag
     from result_uploader import AgentArtifactClient  # type: ignore
     from local_state import LocalAgentState  # type: ignore
     from machine_service import LocalProcessSupervisor, ProcessSpec  # type: ignore
-    from opencode_executor import parse_opencode_jsonl  # type: ignore
+    from opencode_executor import (  # type: ignore
+        parse_opencode_jsonl,
+        platform_provider_config_path,
+        read_platform_provider_models,
+        write_platform_provider_config,
+    )
     from opencode_server import OpenCodeServer, OpenCodeServerConfig, run_serve_turn  # type: ignore
 
 # 平台没给模板时的兜底（与 deploy/cloud-agent 的部署模板一致）
 DEFAULT_CHAT_TEMPLATE = ("opencode", "run", "--format", "json", "--auto", "{prompt}")
 PROTOCOL_BY_NAME = {"opencode": "opencode", "codex": "codex"}
+
+# 平台渠道 provider（方案 A）：执行体模型串 `<provider>/<渠道模型>` 的前半段。
+# 必须与平台侧 agent_chat.PLATFORM_PROVIDER_ALIAS 同值——两边一起改才是真一致。
+PLATFORM_PROVIDER_ALIAS = "synapforge"
+# 平台渠道配置的刷新间隔：拿到 setup 后在这段时间内不重复请求（令牌轮换后自然过期重取）。
+PLATFORM_SETUP_TTL_SECONDS = 300.0
 
 # 明确要求用户拍板时的 UI 协议：前端只解析消息末尾的这个 fence；普通编号列表不作猜测。
 # 注入内核层而不是只写某个角色提示词，确保所有角色的选择都能从选项卡回传。
@@ -135,11 +151,16 @@ def build_chat_command(
     model: str | None = None,
     agent_role: str | None = None,
     variant: str | None = None,
+    platform_provider: str = "",
 ) -> list[str]:
     """把模板变成实际 argv：替换 `{prompt}`，并在它**前面**插入可选的 `--session` / `-m` / `--agent`。
 
     为什么插在 `{prompt}` 前面：提示词在模板里通常是"最后一个位置参数"，把开关插到它后面会被 CLI
     当成位置参数的一部分（`opencode run "..." --session x` 里 `--session` 会被吃进提示词）。
+
+    平台渠道模型（方案 A）：`model` 形如 `<渠道模型名>`（无 `/`）且 `platform_provider` 非空时，
+    实际传给 CLI 的是 `<provider>/<model>`——执行体靠这个前缀选中平台渠道 provider。
+    模型串**已带 `/`**（`provider/model` 完整形态）时按执行体自己报的模型名原样传，不改写。
     """
 
     items = [str(part) for part in (template or DEFAULT_CHAT_TEMPLATE)]
@@ -150,7 +171,10 @@ def build_chat_command(
     if session_key:
         extra += ["--session", str(session_key)]
     if model:
-        extra += ["-m", str(model)]
+        model_text = str(model)
+        if platform_provider and "/" not in model_text:
+            model_text = f"{platform_provider}/{model_text}"
+        extra += ["-m", model_text]
     if agent_role:
         # 角色（M-6）：opencode 的 `--agent <名>` 选中执行体上的那个角色定义（一个 md 文件）。
         # 名字来自执行体探测（心跳上报），平台只存"选了谁"；名字不存在时 opencode 自己会报错，这里不猜。
@@ -206,6 +230,9 @@ class ChatLoop:
     _server: OpenCodeServer | None = field(default=None, init=False)
     # 对话产出采集器（懒建：要用到项目令牌与执行体身份）
     _outputs: ChatOutputCollector | None = field(default=None, init=False)
+    # 平台渠道 provider 配置（方案 A）：成功写入的项目 id + 时间戳（TTL 内不重复请求平台）
+    _platform_setup_project: str = field(default="", init=False)
+    _platform_setup_at: float = field(default=0.0, init=False)
 
     def __post_init__(self) -> None:
         self._idle = float(self.config.idle_seconds)
@@ -252,6 +279,83 @@ class ChatLoop:
             return None
         return json.loads(raw) if raw.strip() else None
 
+    def _get(self, path: str, token: str, *, extra_headers: dict[str, str] | None = None) -> Any:
+        """GET 平台接口（Authorization: Bearer <令牌>）；失败返回 None（调用方如实降级/报错）。"""
+
+        headers = {"Authorization": f"Bearer {token}"}
+        headers.update(extra_headers or {})
+        request = urllib.request.Request(f"{self.config.url.rstrip('/')}{path}", headers=headers, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode("utf-8", "replace")[:200]
+            self.log(f"[chat] {path} -> http_{error.code}:{detail}")
+            return None
+        except (urllib.error.URLError, TimeoutError) as error:
+            self.log(f"[chat] {path} 失败：{type(error).__name__}")
+            return None
+        return json.loads(raw) if raw.strip() else None
+
+    # ---- 平台渠道 provider 配置（方案 A）---------------------------------------
+
+    def _ensure_platform_provider(self, identity: dict[str, Any], project_id: str, token: str) -> str | None:
+        """确保本项目的平台渠道 provider 配置就绪，返回**文件路径**；不可用返回 None（不编）。
+
+        - 每 `PLATFORM_SETUP_TTL_SECONDS` 向平台取一次 setup（令牌就是本次执行用的授权令牌，
+          原样经 Bearer 头带给平台、由平台原样回传进配置——浏览器全程拿不到）；
+        - 配置写到 `<状态目录>/opencode-providers/<project_id>.json`（0600，**项目隔离**），
+          不同的项目各指各的端点/令牌，避免跨项目泄漏与并发竞态；
+        - 平台没有可用渠道（models 空）或 setup 取不到时如实返回 None——调用方**不得**静默
+          回落到其它 provider，让失败可见。
+        """
+
+        now = time.monotonic()
+        if (
+            self._platform_setup_project == project_id
+            and now - self._platform_setup_at < PLATFORM_SETUP_TTL_SECONDS
+        ):
+            path = platform_provider_config_path(self.config.state_path.parent, project_id)
+            return str(path) if path.exists() else None
+        setup = self._get(
+            f"/api/agents/{identity.get('agent_id') or ''}/llm-setup/{project_id}",
+            token,
+        )
+        if not isinstance(setup, dict) or not setup.get("provider"):
+            return None
+        models = [str(item) for item in (setup.get("models") or [])]
+        if not models:
+            self.log("[chat] 平台渠道没有可用模型（未建渠道或未启用）——不写 provider 配置")
+            return None
+        try:
+            path = write_platform_provider_config(
+                self.config.state_path.parent,
+                project_id,
+                provider=str(setup["provider"]),
+                base_url=str(setup.get("base_url") or ""),
+                api_key=str(setup.get("provider_api_key") or ""),
+                models=models,
+            )
+        except (ValueError, OSError) as error:
+            self.log(f"[chat] 平台渠道配置写入失败：{type(error).__name__}: {error}")
+            return None
+        self._platform_setup_project = project_id
+        self._platform_setup_at = now
+        self.log(f"[chat] 平台渠道 provider 就绪：{setup['provider']}（{len(models)} 个模型，{path.name}）")
+        return str(path)
+
+    def _platform_models(self, project_id: str) -> list[str]:
+        """本项目 provider 配置里已登记的渠道模型（读不到就是空列表）。"""
+
+        return read_platform_provider_models(self.config.state_path.parent, project_id)
+
+    def _platform_environment(self, config_path: str) -> dict[str, str]:
+        """给执行体子进程追加 `OPENCODE_CONFIG`（项目隔离配置）；其余环境按白名单照旧。"""
+
+        env = dict(self.environment_provider() or {})
+        env["OPENCODE_CONFIG"] = config_path
+        return env
+
     # ---- 单轮 ---------------------------------------------------------------
 
     async def run_once(self) -> bool:
@@ -290,21 +394,47 @@ class ChatLoop:
         # 结构化选择协议：**每一轮**都在提示词末尾追加协议说明（不只限附件轮），
         # 这样任何角色在"需要用户拍板"时都能回一个能被页面渲染成选项卡的块。
         prompt = prompt + CHOICE_PROTOCOL_INSTRUCTION
+        # 平台渠道模型（方案 A）：轮次模型是**渠道模型名**（无 `/`，页面从 platform_models 选的）
+        # 时，确保本项目的平台 provider 配置就绪并把它经 `OPENCODE_CONFIG` 交给执行体，
+        # 模型串加上 provider 前缀。配置取不到 ⇒ 如实失败这一轮（不静默回落到本地模型）。
+        platform_config_path = ""
+        turn_model = str(turn.get("model") or "")
+        platform_model = ""
+        if turn_model and "/" not in turn_model and protocol == "opencode":
+            setup_path = self._ensure_platform_provider(identity, project_id, token)
+            if setup_path is None:
+                self._finish(
+                    token, agent_id, turn_id,
+                    success=False, content="", usage={}, session_key=None,
+                    error=(
+                        "platform_model_unavailable:平台渠道模型未配置（执行体取不到渠道配置，"
+                        "或平台侧没有启用渠道）——请重签含 llm.invoke 的授权或联系管理员检查渠道"
+                    ),
+                    stop_reason="failed",
+                )
+                return True
+            platform_config_path = setup_path
+            platform_model = turn_model
+            turn_model = f"{PLATFORM_PROVIDER_ALIAS}/{turn_model}"
         try:
             command = build_chat_command(
                 claim.get("command_template"),
                 prompt=prompt,
                 session_key=turn.get("session_key"),
-                model=turn.get("model"),
+                model=turn_model,
                 agent_role=turn.get("role"),
                 variant=turn.get("variant"),
             )
         except ValueError as error:
             self._finish(token, agent_id, turn_id, success=False, content="", usage={}, session_key=None, error=str(error), stop_reason="failed")
             return True
+        # 项目隔离配置经环境变量传给执行体进程；测试注入的 runner 也通过 environment_provider 感知它。
+        executor_environment = (
+            self._platform_environment(platform_config_path) if platform_config_path else None
+        )
 
         self.log(
-            f"[chat] 取到轮次 {turn_id[:8]}（{protocol}，模型 {turn.get('model') or '默认'}，"
+            f"[chat] 取到轮次 {turn_id[:8]}（{protocol}，模型 {turn_model or '默认'}，"
             f"角色 {turn.get('role') or '默认'}，强度 {turn.get('variant') or '默认'}）"
         )
         # M-5c S-1：常驻 server 通道（只在执行体是 opencode、且配了端口时启用）。
@@ -356,6 +486,7 @@ class ChatLoop:
                 turn_id=turn_id,
                 cancel_check=lambda: self._turn_cancelled(token, agent_id, turn_id),
                 cancel_poll_seconds=float(self.config.cancel_poll_seconds),
+                environment=executor_environment,
             )
         else:
             exit_code, stdout, stderr = await runner(
@@ -633,11 +764,15 @@ class ChatLoop:
         turn_id: str,
         cancel_check: Callable[[], bool] | None = None,
         cancel_poll_seconds: float = 3.0,
+        environment: dict[str, str] | None = None,
     ) -> tuple[int | None, str, str, bool]:
         """真正起进程。
 
         `stdin_enabled=False` 是有意的（内核会给 /dev/null）：opencode 在 stdin 不是 EOF 时会**挂住**
         ——这条是 CLOUD-1 实测踩出来的，别再改回去。
+
+        `environment` 非空时**整体替换**白名单环境（平台渠道轮次会带 `OPENCODE_CONFIG`）；
+        为空时沿用 `environment_provider()` 的白名单。
         """
 
         identity = self.identity_provider() or {}
@@ -658,7 +793,7 @@ class ChatLoop:
                 workspace_id="chat",
                 workspace_path=str(workspace),
                 cwd=str(workspace),
-                env=dict(self.environment_provider() or {}),
+                env=dict(environment if environment is not None else (self.environment_provider() or {})),
                 inherit_environment=False,
                 timeout_seconds=timeout_seconds,
                 stdin_enabled=False,
@@ -732,7 +867,14 @@ class ChatLoop:
             pass
 
 
-__all__ = ["ChatLoop", "ChatLoopConfig", "DEFAULT_CHAT_TEMPLATE", "build_chat_command"]
+__all__ = [
+    "ChatLoop",
+    "ChatLoopConfig",
+    "DEFAULT_CHAT_TEMPLATE",
+    "PLATFORM_PROVIDER_ALIAS",
+    "PLATFORM_SETUP_TTL_SECONDS",
+    "build_chat_command",
+]
 
 
 def _monotonic() -> float:  # pragma: no cover - 供将来观测用

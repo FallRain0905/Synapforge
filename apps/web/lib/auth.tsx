@@ -35,6 +35,16 @@ type AuthContextValue = {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+/**
+ * 演示自动登录（构建时开关）：
+ *   NEXT_PUBLIC_DEMO_AUTO_LOGIN=1 + NEXT_PUBLIC_DEMO_EMAIL / NEXT_PUBLIC_DEMO_PASSWORD
+ * 只影响"本浏览器还没有会话"的首屏；已有会话仍走正常恢复，失效会话仍会被清理。
+ * 不设开关时行为与原来一致。
+ */
+const DEMO_AUTO_LOGIN = process.env.NEXT_PUBLIC_DEMO_AUTO_LOGIN === "1";
+const DEMO_EMAIL = process.env.NEXT_PUBLIC_DEMO_EMAIL ?? "";
+const DEMO_PASSWORD = process.env.NEXT_PUBLIC_DEMO_PASSWORD ?? "";
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
   const [account, setAccount] = useState<AccountView | null>(null);
@@ -59,7 +69,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      await refresh();
+      const current = await refresh();
+      if (!current && DEMO_AUTO_LOGIN && DEMO_EMAIL && DEMO_PASSWORD) {
+        // 演示入口：没有本地会话时直接用演示账号登录。登录失败不阻断，照常落到登录页。
+        try {
+          const session = await loginAccount({ email: DEMO_EMAIL, password: DEMO_PASSWORD });
+          setSessionToken(session.token);
+          if (!cancelled) setAccount(session.account);
+        } catch {
+          // 演示账号不可用时保持未登录，避免把错误伪装成已登录
+        }
+      }
       if (!cancelled) setReady(true);
     })();
     return () => {

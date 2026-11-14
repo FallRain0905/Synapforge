@@ -153,13 +153,21 @@ p { margin: 0; }
 .nav-group-chevron { margin-left: 6px; opacity: 0.7; transition: transform 0.18s ease; }
 .nav-group-chevron.is-open { transform: rotate(90deg); }
 .nav-count-plain { margin-left: auto; background: #1e2b3c; color: #9a9a9a; }
+/* 六主导航：一行 = 可点的 Hub 链接 + 右侧独立的展开箭头（点箭头不触发跳转） */
+.nav-hub-row { display: flex; align-items: stretch; }
+.nav-hub-row .nav-item { flex: 1 1 auto; min-width: 0; }
+.nav-hub-toggle {
+  flex: 0 0 auto; display: grid; place-items: center; width: 26px; margin: 3px 2px 3px 0;
+  border: 0; border-radius: 8px; background: transparent; color: #8a8a8a; cursor: pointer;
+}
+.nav-hub-toggle:hover { background: var(--sidebar-soft); color: #f5f5f5; }
 .nav-children {
   display: grid; gap: 2px; margin-left: 19px; padding-left: 8px;
   border-left: 1px solid #262626;
   overflow: hidden; max-height: 0; visibility: hidden;
   transition: max-height 0.2s ease, visibility 0.2s;
 }
-.nav-children.is-open { max-height: 320px; visibility: visible; }
+.nav-children.is-open { max-height: 480px; visibility: visible; }
 .nav-item-child { padding: 7px 10px; font-size: 12.5px; }
 
 .nav-jump {
@@ -232,9 +240,30 @@ p { margin: 0; }
 .connection-state.is-connected .connection-dot { background: var(--green); }
 .profile-avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; display: grid; place-items: center; }
 
-.page-content { padding: var(--space-6); display: grid; gap: var(--space-5); max-width: 1440px; }
+.page-content { width: 100%; box-sizing: border-box; padding: var(--space-6); display: grid; gap: var(--space-5); }
 
-/* ---------- 标题与工具条 ---------- */
+/* 知识库与图谱：标题按内容取高，主体填满剩余空间，避免页面级 grid 把空白分给标题行。 */
+#kb { grid-template-rows: auto minmax(0, 1fr); align-content: start; }
+#graph { grid-template-rows: auto auto minmax(0, 1fr); align-content: start; }
+#graph > .tabs { grid-row: 2; align-self: start; align-items: center; height: max-content; min-height: 0; padding-bottom: 6px; }
+#graph > .tabs > .tab { align-self: center; height: max-content; padding: 5px 12px; line-height: 1.4; }
+#graph > .grid-main-side { grid-row: 3; }
+#kb > .grid-main-side, #graph > .grid-main-side { width: 100%; min-width: 0; align-items: stretch; }
+#kb > .grid-main-side > .panel, #graph > .grid-main-side > .panel { min-width: 0; }
+
+/* 我的智能体：主内容占满可用宽度，收起的执行细节抽屉不参与布局宽度。 */
+#my-agent { width: 100%; min-width: 0; }
+.my-agent-shell, .my-agent-layout { width: 100%; min-width: 0; }
+
+/* ---------- Hub 内嵌视图（六主导航） ----------
+   被嵌入的旧页面保持原样（自带 .page-content 外壳与 PageHeading），
+   在 Hub 里渲染时由外层 .hub-embedded 把双重标题/多余留白压平。 */
+.hub-embedded { display: grid; gap: var(--space-5); min-width: 0; }
+.hub-embedded > div { min-width: 0; }
+.hub-embedded .page-content { padding: 0; max-width: none; gap: var(--space-5); }
+.hub-embedded .page-heading { display: none; } /* Hub 页头只留一份（外层），内层页面标题隐藏 */
+
+
 .page-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; }
 .page-heading p { color: var(--text-soft); margin-top: 6px; max-width: 760px; }
 .eyebrow { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
@@ -254,6 +283,8 @@ p { margin: 0; }
 .grid { display: grid; gap: var(--space-4); }
 .grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+/* 首屏「三种使用方式」：按 200px 下限自动折行，1366 笔记本上不会把标题压成省略号 */
+.overview-entries { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
 .grid-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .grid-main-side { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); align-items: start; }
 .metrics-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-4); }

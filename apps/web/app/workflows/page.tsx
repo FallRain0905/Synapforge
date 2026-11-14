@@ -10,14 +10,18 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { ArrowUpRight, Boxes, CheckCircle2, GitBranch, Info, PlayCircle, Plus } from "lucide-react";
 import { PageHeading } from "../../components/shell";
+import { HubTabs } from "../../components/hub-tabs";
 import { EmptyState, LoadingSkeleton, Metric, Modal, Panel, StatusPill } from "../../components/ui";
 import { WorkflowEditor } from "../../components/workflow-editor";
 import { WorkflowFlowView } from "../../components/workflow-flow";
+import { WorkflowCopilot } from "../../components/workflow-copilot";
 import { useAuth } from "../../lib/auth";
 import { PAGE_GRID } from "../../lib/page-layout";
+import { hubTabsOf } from "../../lib/nav";
 import { REPOSITIONING_COPY } from "../../lib/status-dictionary";
 import { useWorkspace } from "../../lib/workspace";
 import {
@@ -38,6 +42,24 @@ import {
   WorkflowRunView,
 } from "../../lib/api";
 
+/** 二级 Tab（建模模板包 / 论文交付 / 知识库 / 图谱）按需加载：原页面模块原样复用，代码各自分片。 */
+const PackEmbedded = dynamic(() => import("../pack/content"), {
+  ssr: false,
+  loading: () => <LoadingSkeleton rows={5} label="正在加载建模模板包…" />,
+});
+const DeliveryEmbedded = dynamic(() => import("../delivery/content"), {
+  ssr: false,
+  loading: () => <LoadingSkeleton rows={5} label="正在加载论文交付…" />,
+});
+const KbEmbedded = dynamic(() => import("../kb/content"), {
+  ssr: false,
+  loading: () => <LoadingSkeleton rows={5} label="正在加载知识库…" />,
+});
+const GraphEmbedded = dynamic(() => import("../graph/content"), {
+  ssr: false,
+  loading: () => <LoadingSkeleton rows={5} label="正在加载图谱可视化…" />,
+});
+
 /** 节点任务状态 → 页面桶（API 形状文档 §6，词典对齐）；未知状态原样显示（不编）。 */
 const NODE_BUCKETS: Record<string, string> = {
   CLAIMED: "执行中",
@@ -57,6 +79,9 @@ function bucketOf(status: string): string {
 export default function WorkflowsPage() {
   const { ready, authenticated } = useAuth();
   const { notify } = useWorkspace();
+  // Hub 层 Tab（工作流 / 模板包 / 交付 / 知识库 / 图谱）：URL ?tab= 同步由 HubTabs 负责
+  const hubTabs = useMemo(() => hubTabsOf("/workflows"), []);
+  const [hubTab, setHubTab] = useState(hubTabs[0].href);
   const [packages, setPackages] = useState<WorkflowPackage[] | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectId, setProjectId] = useState("");
@@ -206,8 +231,9 @@ export default function WorkflowsPage() {
   return (
     <div className="page-content" style={PAGE_GRID} id="workflows" data-testid="workflows-page">
       <PageHeading
-        hint="工作流包定义阶段、角色、门禁与交付；应用后生成任务骨架，执行与审核仍在任务体系里"
+        hint="工作流包、建模模板、论文交付、知识库与图谱——自动化生产的家"
         actions={
+          hubTab === hubTabs[0].href ? (
           <>
             <button type="button" className="button button-secondary" onClick={() => void installBuiltin()} disabled={busy} data-testid="workflows-install-builtin">
               <Boxes size={15} /> 安装内置包
@@ -234,9 +260,16 @@ export default function WorkflowsPage() {
               <Plus size={15} /> 新建工作流包
             </button>
           </>
+          ) : null
         }
       />
+
+      <HubTabs tabs={hubTabs} activeId={hubTab} onChange={setHubTab} ariaLabel="工作流视图" testIdPrefix="workflows-hub-tab" />
+
+      {hubTab === hubTabs[0].href && (
+      <>
       {error ? <div className="pack-missing"><strong>操作未完成</strong><span>{error}</span></div> : null}
+      {projectId ? <WorkflowCopilot projectId={projectId} notify={notify} /> : null}
 
       <section className="metrics-grid">
         <Metric label="工作流包" value={packages?.length ?? 0} detail={`已发布版本 ${publishedCount} 个`} />
@@ -453,6 +486,14 @@ export default function WorkflowsPage() {
       ) : null}
 
       {projectId ? <WorkflowFlowView projectId={projectId} /> : null}
+      </>
+      )}
+
+      {/* 二级 Tab：既有页面模块按需嵌入（骨架 ≠ 结果 的红线文案随模板包页自带） */}
+      {hubTab === "/pack" && <PackEmbedded />}
+      {hubTab === "/delivery" && <DeliveryEmbedded />}
+      {hubTab === "/kb" && <KbEmbedded />}
+      {hubTab === "/graph" && <GraphEmbedded />}
     </div>
   );
 }

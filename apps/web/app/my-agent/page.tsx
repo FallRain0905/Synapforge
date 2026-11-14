@@ -6,6 +6,7 @@ import Link from "next/link";
 import { AgentResponse } from "../../components/agent-response";
 import { Markdown } from "../../components/markdown";
 import { PageHeading } from "../../components/shell";
+import { AgentExecutorSelector, platformUnavailableHint } from "../../components/agent-executor-selector";
 import { ConfirmDialog, EmptyState, Panel } from "../../components/ui";
 import {
   MyAgentConversation,
@@ -214,7 +215,10 @@ export default function MyAgentPage() {
       const list = await listMyAgents();
       setAgents(list);
       setAgentIndex((current) => (current < list.length ? current : 0));
-      if (!model && list.length) setModel(list[0].default_model || list[0].models[0] || "");
+      if (!model && list.length) {
+        const first = list[0];
+        setModel(first.default_model || first.models[0] || first.platform_models?.[0]?.model || "");
+      }
     } catch {
       notify("执行体列表读取失败");
     }
@@ -975,7 +979,7 @@ export default function MyAgentPage() {
                       const next = Number(event.target.value);
                       setAgentIndex(next);
                       const nextAgent = agents[next];
-                      setModel(nextAgent?.default_model || nextAgent?.models[0] || "");
+                      setModel(nextAgent?.default_model || nextAgent?.models[0] || nextAgent?.platform_models?.[0]?.model || "");
                     }}
                     data-testid="my-agent-device"
                   >
@@ -1420,21 +1424,17 @@ export default function MyAgentPage() {
                   <span className="composer-count" title="这一轮带的附件数">
                     {attachments.length ? `附件 ${attachments.length}` : "无附件"}
                   </span>
-                  <label className="composer-picker">
-                    <Bot size={14} />
-                    <select
-                      value={model}
-                      onChange={(event) => void handleModelChange(event.target.value)}
-                      disabled={!agent?.models.length}
-                      data-testid="my-agent-model"
-                    >
-                      {(agent?.models.length ? agent.models : [""]).map((item) => (
-                        <option key={item} value={item}>
-                          {item || "（执行体默认）"}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <AgentExecutorSelector
+                    endpoint={agent}
+                    value={model}
+                    onChange={(next) => void handleModelChange(next)}
+                    testId="my-agent-model"
+                  />
+                  {platformUnavailableHint(agent) ? (
+                    <span className="my-agent-role-note" data-testid="my-agent-platform-unavailable" title={platformUnavailableHint(agent)}>
+                      平台渠道未接上
+                    </span>
+                  ) : null}
                   {activeTurn ? (
                     <button
                       className="composer-send is-stop"

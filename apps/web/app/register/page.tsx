@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Loader2, Network } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { errorMessage } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 
@@ -69,7 +69,6 @@ export default function RegisterPage() {
     <div className="auth-page">
       <div className="auth-card">
         <div className="auth-brand">
-          <span className="brand-mark"><Network size={18} /></span>
           <div>
             <strong>synapforge</strong>
             <small>Agent 协作平台 · 注册即用</small>

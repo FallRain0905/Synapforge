@@ -7,8 +7,14 @@ import { PageHeading, formatTime } from "../../components/shell";
 import { ConfirmDialog, EmptyState, LoadingSkeleton, Modal, Panel, StatusPill } from "../../components/ui";
 import { StatusLegend } from "../../components/status-legend";
 import {
+  AgentExecutorSelector,
+  ExecutorSelectorEndpoint,
+  platformUnavailableHint,
+} from "../../components/agent-executor-selector";
+import {
   Agent,
   EvidenceRequirement,
+  MyAgentEndpoint,
   ProjectMemberView,
   Task,
   TaskDetail,
@@ -18,6 +24,7 @@ import {
   errorMessage,
   getProjectTaskFlags,
   getTaskDetail,
+  listMyAgents,
   listProjectMembers,
   updateTask,
 } from "../../lib/api";
@@ -159,7 +166,12 @@ export default function TasksPage() {
     command: "",
     cli: "workbuddy exec {prompt}",
     assignee: "Unassigned",
+    model: "",
   });
+  // 「我的执行体」（方案 A，2026-10-02）：opencode 模式的模型分组来自执行体真探测 +
+  // 平台渠道（member 维度）；Modal 打开时取一次。取不到如实显示，不放假选项。
+  const [myAgents, setMyAgents] = useState<MyAgentEndpoint[]>([]);
+  const [executorAgentId, setExecutorAgentId] = useState("");
   // 意图对象（AIP-1d）：任务详情里的预算与显式证据要求（服务端读时算执行态与缺口）
   const [detail, setDetail] = useState<TaskDetail | null>(null);
   // 列表角标（COST-1）：哪些任务有证据缺口 / 用量超预算——一次批量取回，避免逐条查
@@ -428,14 +440,28 @@ export default function TasksPage() {
     const policy = (task.resource_policy ?? {}) as Record<string, unknown>;
     const command = policy.worker_command;
     const isCli = String(policy.worker_executor ?? "") === "cli";
+    const declaredEvents = String(policy.worker_events ?? "");
     setExecutorForm({
-      mode: isCli ? "cli" : Array.isArray(command) || typeof command === "string" ? "command" : "codex",
+      // worker_events=opencode 的任务回显成 opencode 模式（方案 A：模型驱动 + 事件解析）
+      mode: declaredEvents === "opencode" || String(policy.worker_model || "") ? "opencode" : isCli ? "cli" : Array.isArray(command) || typeof command === "string" ? "command" : "codex",
       prompt: String(policy.worker_prompt ?? ""),
       command: Array.isArray(command) ? command.join(" ") : String(command ?? ""),
-      cli: isCli ? (Array.isArray(command) ? command.join(" ") : String(command ?? "")) : executorForm.cli,
+      cli: isCli && declaredEvents !== "opencode" ? (Array.isArray(command) ? command.join(" ") : String(command ?? "")) : executorForm.cli,
+      model: String(policy.worker_model || ""),
       assignee: task.assignee && task.assignee !== "Unassigned" ? task.assignee : (agents.find((agent) => String(agent.status) === "online")?.agent_id ?? "Unassigned"),
     });
     setExecutorTarget(task);
+    void (async () => {
+      try {
+        const list = await listMyAgents();
+        setMyAgents(list);
+        const currentAgent = String(policy.worker_agent_id || task.assignee || "");
+        const matched = list.find((item) => item.agent_id === currentAgent) ?? list[0];
+        setExecutorAgentId(matched?.agent_id ?? "");
+      } catch {
+        setMyAgents([]);
+      }
+    })();
   };
 
   const saveExecutor = async () => {
@@ -443,6 +469,17 @@ export default function TasksPage() {
     let policy: Record<string, unknown>;
     if (executorForm.mode === "codex") {
       policy = { worker_executor: "codex" };
+      if (executorForm.prompt.trim()) policy.worker_prompt = executorForm.prompt.trim();
+    } else if (executorForm.mode === "opencode") {
+      // opencode（方案 A）：模型驱动——执行体把 {model} 换成选中的模型串，命令模板自带事件协议。
+      const template = executorForm.model.trim()
+        ? ["opencode", "run", "--format", "json", "--auto", "-m", "{model}", "{prompt}"]
+        : ["opencode", "run", "--format", "json", "--auto", "{prompt}"];
+      if (!executorForm.model.trim()) {
+        notify("请选择一个模型（平台渠道或执行体本地）");
+        return;
+      }
+      policy = { worker_executor: "cli", worker_events: "opencode", worker_command: template, worker_model: executorForm.model.trim() };
       if (executorForm.prompt.trim()) policy.worker_prompt = executorForm.prompt.trim();
     } else if (executorForm.mode === "cli") {
       const template = executorForm.cli.trim().split(/\s+/).filter(Boolean);
@@ -468,11 +505,13 @@ export default function TasksPage() {
       await updateTask(executorTarget.id, { resource_policy: policy, assignee: executorForm.assignee });
       await refresh();
       notify(
-        executorForm.mode === "codex"
-          ? "已设为 Codex 执行：Agent 通常几秒内领取"
-          : executorForm.mode === "cli"
-            ? "已设为通用 CLI 执行（提示词会注入命令模板）：Agent 通常几秒内领取"
-            : "已设为声明式命令：Agent 通常几秒内领取",
+        executorForm.mode === "opencode"
+          ? `已设为 opencode 执行（模型 ${executorForm.model}）：Agent 通常几秒内领取`
+          : executorForm.mode === "codex"
+            ? "已设为 Codex 执行：Agent 通常几秒内领取"
+            : executorForm.mode === "cli"
+              ? "已设为通用 CLI 执行（提示词会注入命令模板）：Agent 通常几秒内领取"
+              : "已设为声明式命令：Agent 通常几秒内领取",
       );
       setExecutorTarget(null);
     } catch (error) {
@@ -741,11 +780,55 @@ export default function TasksPage() {
             <label className="field"><span>执行体</span>
               <select value={executorForm.mode} data-testid="task-executor-mode" onChange={(event) => setExecutorForm({ ...executorForm, mode: event.target.value })}>
                 <option value="codex">Codex CLI（推荐：装了 ChatGPT 桌面端即可）</option>
+                <option value="opencode">opencode（模型驱动：平台渠道 / 执行体本地模型，带过程事件）</option>
                 <option value="cli">通用 CLI（workbuddy / zcode 等，命令模板带 {'{prompt}'} 占位符）</option>
                 <option value="command">声明式命令（自己指定 argv）</option>
               </select>
             </label>
-            {executorForm.mode === "codex" ? (
+            {executorForm.mode === "opencode" ? (
+              <div className="field">
+                <span>模型（先选执行体，再选它的模型）</span>
+                {(() => {
+                  const selectedAgent = myAgents.find((item) => item.agent_id === executorAgentId) ?? myAgents[0] ?? null;
+                  const selectorAgent: ExecutorSelectorEndpoint | null = selectedAgent;
+                  return (
+                    <div style={{ display: "grid", gap: 6 }}>
+                      {myAgents.length > 1 ? (
+                        <select
+                          value={executorAgentId}
+                          data-testid="task-executor-agent"
+                          onChange={(event) => {
+                            setExecutorAgentId(event.target.value);
+                            const next = myAgents.find((item) => item.agent_id === event.target.value);
+                            setExecutorForm({ ...executorForm, model: next?.default_model || next?.models[0] || "" });
+                          }}
+                        >
+                          {myAgents.map((item) => (
+                            <option key={item.device_id} value={item.agent_id ?? ""}>
+                              {item.device_name || item.device_id} · {item.online ? "在线" : "离线"} · {item.project_name}
+                            </option>
+                          ))}
+                        </select>
+                      ) : null}
+                      <AgentExecutorSelector
+                        endpoint={selectorAgent}
+                        value={executorForm.model}
+                        onChange={(next) => setExecutorForm({ ...executorForm, model: next })}
+                        testId="task-executor-model"
+                        emptyLabel="（执行体默认模型）"
+                      />
+                      {platformUnavailableHint(selectorAgent) ? (
+                        <small className="hint" data-testid="task-executor-platform-unavailable">{platformUnavailableHint(selectorAgent)}</small>
+                      ) : null}
+                      <small className="hint">
+                        平台渠道模型消耗平台免费额度（执行体需含 llm.invoke 的授权，内核自动取配置）；
+                        执行体本地模型由执行体自己的 opencode 配置决定。
+                      </small>
+                    </div>
+                  );
+                })()}
+              </div>
+            ) : executorForm.mode === "codex" ? (
               <label className="field"><span>给 Codex 的指令</span>
                 <textarea
                   rows={3}

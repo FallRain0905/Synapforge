@@ -1,9 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import dynamic from "next/dynamic";
 import { CheckCircle2, Eye, EyeOff, Key, RefreshCcw, Save, Settings2, Zap } from "lucide-react";
 import { PageHeading } from "../../components/shell";
-import { EmptyState, Metric, Panel } from "../../components/ui";
+import { HubTabs } from "../../components/hub-tabs";
+import { EmptyState, LoadingSkeleton, Metric, Panel } from "../../components/ui";
+import { PAGE_GRID } from "../../lib/page-layout";
+import { hubTabsOf } from "../../lib/nav";
 import {
   AiProbeReport,
   errorMessage,
@@ -15,6 +19,20 @@ import {
   testAiConnections,
 } from "../../lib/api";
 import { useWorkspace } from "../../lib/workspace";
+
+/** 二级 Tab（团队 / 渠道 / 账号）按需加载：原页面模块原样复用。 */
+const TeamEmbedded = dynamic(() => import("../team/content"), {
+  ssr: false,
+  loading: () => <LoadingSkeleton rows={5} label="正在加载团队视图…" />,
+});
+const ChannelsEmbedded = dynamic(() => import("../channels/content"), {
+  ssr: false,
+  loading: () => <LoadingSkeleton rows={5} label="正在加载渠道视图…" />,
+});
+const AccountEmbedded = dynamic(() => import("../account/content"), {
+  ssr: false,
+  loading: () => <LoadingSkeleton rows={5} label="正在加载账号视图…" />,
+});
 
 type Metrics = { counts: Record<string, number>; storage_bytes: number; pending_outbox: number; quotas: Record<string, number> };
 type Quota = { limits: Record<string, number>; cost_rates: Record<string, number>; resources: string[] };
@@ -56,8 +74,13 @@ export default function SettingsPage() {
   const [testing, setTesting] = useState(false);
   const [testResults, setTestResults] = useState<AiProbeReport | null>(null);
   const [form, setForm] = useState<AiSettings>(EMPTY_SETTINGS);
+  // Hub 层 Tab（常规 / 团队 / 渠道 / 账号）：URL ?tab= 同步由 HubTabs 负责
+  const hubTabs = useMemo(() => hubTabsOf("/settings"), []);
+  const [hubTab, setHubTab] = useState(hubTabs[0].href);
 
   useEffect(() => {
+    // 只在「常规」Tab 拉设置数据；切到团队/渠道/账号时它们自己的页面模块会拉各自的数据
+    if (hubTab !== hubTabs[0].href) return;
     void (async () => {
       try {
         // 经 api.ts 统一发请求：登录后自动带会话令牌（原先这里裸 fetch，会缺 Authorization）
@@ -91,7 +114,7 @@ export default function SettingsPage() {
         // 离线展示已有信息
       }
     })();
-  }, [projectId]);
+  }, [projectId, hubTab, hubTabs]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -145,9 +168,13 @@ export default function SettingsPage() {
   };
 
   return (
-    <div className="page-content" id="settings">
-      <PageHeading hint="组织、项目、配额与 AI 凭据" actions={<span className="badge status-neutral">{dashboard.project.competition_pack || "—"}</span>} />
+    <div className="page-content" id="settings" style={PAGE_GRID}>
+      <PageHeading hint="空间凭据与配额、团队成员、LLM 渠道与账号——组织管理的家" actions={<span className="badge status-neutral">{dashboard.project.competition_pack || "—"}</span>} />
 
+      <HubTabs tabs={hubTabs} activeId={hubTab} onChange={setHubTab} ariaLabel="设置视图" testIdPrefix="settings-hub-tab" />
+
+      {hubTab === hubTabs[0].href && (
+        <>
       <section className="metrics-grid">
         <Metric label="组织" value={metrics?.counts.organizations ?? "—"} detail="多租户边界" />
         <Metric label="项目" value={metrics?.counts.projects ?? "—"} detail={`任务 ${metrics?.counts.tasks ?? "—"}`} />
@@ -271,6 +298,13 @@ export default function SettingsPage() {
           </Panel>
         </div>
       </section>
+      </>
+      )}
+
+      {/* 二级 Tab：整个旧页面模块按需嵌入（权限逻辑随页面自带：渠道页非管理员仍会如实提示 403） */}
+      {hubTab === "/team" && <TeamEmbedded />}
+      {hubTab === "/channels" && <ChannelsEmbedded />}
+      {hubTab === "/account" && <AccountEmbedded />}
     </div>
   );
 }

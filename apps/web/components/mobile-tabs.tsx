@@ -2,18 +2,18 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { ClipboardCheck, Layers3, Menu, ShieldCheck, Sparkles } from "lucide-react";
+import { Menu } from "lucide-react";
+import { HUBS, MOBILE_TAB_HREFS, type NavBadge } from "../lib/nav";
 
 /**
- * 手机底部标签栏：只放手机上真正会做的四件事，第五项「更多」打开抽屉走全量导航。
- * 桌面端由 CSS 隐藏（`.mobile-tabs { display: none }`），所以桌面体验完全不变。
+ * 手机底部标签栏（六主导航版）：从 nav 单一来源派生——
+ * 前 4 个常用 Hub（MOBILE_TAB_HREFS）+ 第 5 格「更多」打开抽屉走全量导航。
+ * 图标/文案/测试 id 全部取自 HUBS 定义，桌面端由 CSS 隐藏，桌面体验不变。
  */
-const TABS = [
-  { href: "/", label: "总览", icon: Layers3, testId: "mtab-overview" },
-  { href: "/tasks", label: "任务", icon: ClipboardCheck, testId: "mtab-tasks", badge: "tasks" as const },
-  { href: "/review", label: "审核", icon: ShieldCheck, testId: "mtab-review", badge: "review" as const },
-  { href: "/my-agent", label: "智能体", icon: Sparkles, testId: "mtab-my-agent" },
-];
+const MOBILE_BADGES: Partial<Record<string, NavBadge>> = {
+  "/workspace": "projects",
+  "/tasks": "tasks",
+};
 
 export function MobileTabs({
   badges,
@@ -23,22 +23,24 @@ export function MobileTabs({
   onMore: () => void;
 }) {
   const pathname = usePathname();
-  const inTabs = TABS.some((tab) => tab.href === pathname);
+  const tabs = MOBILE_TAB_HREFS.map((href) => HUBS.find((hub) => hub.href === href)!).filter(Boolean);
+  const inTabs = tabs.some((tab) => tab.href === pathname);
 
   return (
     <nav className="mobile-tabs" aria-label="移动端主导航" data-testid="mobile-tabs">
-      {TABS.map((tab) => {
-        const value = tab.badge ? badges[tab.badge] : 0;
+      {tabs.map((tab) => {
+        const badge = MOBILE_BADGES[tab.href];
+        const value = badge ? (badge === "review" ? badges.review : badges.tasks) : 0;
         return (
           <Link
             key={tab.href}
             href={tab.href}
             className={`mobile-tab ${pathname === tab.href ? "is-active" : ""}`.trim()}
-            data-testid={tab.testId}
+            data-testid={`mtab-${tab.testId.replace(/^nav-/, "")}`}
           >
             <tab.icon size={19} />
             <span>{tab.label}</span>
-            {value > 0 && <span className="mobile-tab-dot" />}
+            {value > 0 && badge !== "projects" && <span className="mobile-tab-dot" />}
           </Link>
         );
       })}

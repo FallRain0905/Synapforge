@@ -35,12 +35,15 @@ __all__ = [
 
 
 #: 目录整体版本。每次新增事件时 +1；消费方不得假设两个版本之间没有新事件。
-CATALOG_VERSION = 3
+CATALOG_VERSION = 5
 
 #: 事件族（事件名第二段）。新族属于演进：information_request / feasibility_concern
 #: 两个运行时协作族由多 Agent 协作计划 §6.5.3 评审加入（D0 协议冻结配套，v2）。
+#: `message`（v4）：人类与 Agent 在项目群聊里说的话——本地形态下群聊就是事件时间线。
+#: `contract`（v5）：接口契约的发布与绑定——"同意"必须有身份和版本，不能只是一条聊天消息。
 EVENT_FAMILIES = ("task", "run", "artifact", "handoff", "review", "gate", "agent",
-                  "information_request", "feasibility_concern", "stage_report")
+                  "information_request", "feasibility_concern", "stage_report",
+                  "message", "contract")
 
 _EVENT_NAME_RE = re.compile(r"^project\.(?P<family>[a-z_]+)\.(?P<action>[a-z_]+)$")  # v2：族名允许下划线（information_request / feasibility_concern）
 
@@ -66,6 +69,11 @@ def _e(name: str, description: str) -> EventSpec:
 EVENTS: dict[str, EventSpec] = {
     spec.name: spec
     for spec in (
+        # ---- message（v4：群聊）----
+        _e("project.message.posted", "项目群聊里的一条消息（人也说，Agent 也说）"),
+        # ---- contract（v5：契约版本）----
+        _e("project.contract.published", "契约发布新版本（含 hash 与被这次改动甩下的绑定方）"),
+        _e("project.contract.bound", "Agent 声明自己按某一版契约实现"),
         # ---- task ----
         _e("project.task.created", "任务已创建（含派发目标与依赖）"),
         _e("project.task.claimed", "执行体领取任务（含租约）"),

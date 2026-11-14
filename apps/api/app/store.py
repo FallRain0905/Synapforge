@@ -108,6 +108,9 @@ DEV_ORG_ID = os.getenv("PLATFORM_ORG_ID") or "00000000-0000-4000-8000-0000000000
 DEV_TEAM_ID = os.getenv("PLATFORM_TEAM_ID") or "00000000-0000-4000-8000-000000000002"
 DEFAULT_ORG_NAME = os.getenv("PLATFORM_ORG_NAME") or "开发组织"
 
+# 事件号分配的跨进程重试上限（见 `_insert_event`：MAX+1 与 INSERT 是两条语句）
+_EVENT_SEQUENCE_RETRIES = 8
+
 # 开发期种子账号：首个真实账号注册时，其名下数据会被一次性接管，该行改为 suspended 保留（外键与审计）
 LEGACY_MEMBER_ID = "member-001"
 
@@ -6708,28 +6711,41 @@ class Store:
         idempotency_key: str | None = None,
         schema_version: str = "1.0",
     ) -> Event:
-        next_sequence = self.db.execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events WHERE project_id = ?", (str(project_id),)).fetchone()[0]
-        event_id = str(uuid4())
-        timestamp = now()
-        if str(event_type).startswith("project.") and str(event_type).count(".") >= 2:
-            # 目录咽喉（W2.1）：保留命名空间是**目录形状** `project.<family>.<action>`（≥3 段）。
-            # 落在这里的事件必须在 event_catalog 注册且信封合法，未注册名直接拒绝
-            # （工作包 C 的契约：发出侧拦截，绝不发出去让消费方猜）。
-            # 老轨名字不受影响：`artifact.created`（无前缀）与 `project.seeded`（两段，种子事件）
-            # 都只是碰巧长得像，不进目录——只增不改。
-            spec = event_catalog.EVENTS.get(str(event_type))
-            problems = event_catalog.validate_envelope(
-                {
-                    "event": event_type,
-                    "seq": next_sequence,
-                    "schema_version": spec.version if spec else 1,
-                    "occurred_at": timestamp,
-                    "payload": payload if isinstance(payload, dict) else {},
-                }
-            )
-            if problems:
-                raise ValueError("project_event_catalog_rejected:" + "; ".join(problems))
-        self.db.execute("INSERT INTO events (id, project_id, sequence, event_type, actor, payload, created_at, actor_kind, object_type, object_id, idempotency_key, schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (event_id, str(project_id), next_sequence, event_type, actor, json.dumps(payload, ensure_ascii=False), timestamp, actor_kind, object_type, str(object_id) if object_id else None, idempotency_key, schema_version))
+        next_sequence = 0
+        # 事件号分配是 `SELECT MAX(sequence)+1` 再 `INSERT`，两条语句——**多进程下会撞号**。
+        # 平台历来单进程（uvicorn），`_SerializedConnection` 的进程内锁兜住了；但一个进程内
+        # 串行不等于跨进程串行：WAL 只保证写是串行的，两条语句之间另一个进程仍可能提交同一
+        # 号，`UNIQUE(project_id, sequence)` 就会拒绝。这里重算重试（窗口极小，8 次足够）。
+        for _attempt in range(_EVENT_SEQUENCE_RETRIES):
+            next_sequence = self.db.execute("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events WHERE project_id = ?", (str(project_id),)).fetchone()[0]
+            event_id = str(uuid4())
+            timestamp = now()
+            if str(event_type).startswith("project.") and str(event_type).count(".") >= 2:
+                # 目录咽喉（W2.1）：保留命名空间是**目录形状** `project.<family>.<action>`（≥3 段）。
+                # 落在这里的事件必须在 event_catalog 注册且信封合法，未注册名直接拒绝
+                # （工作包 C 的契约：发出侧拦截，绝不发出去让消费方猜）。
+                # 老轨名字不受影响：`artifact.created`（无前缀）与 `project.seeded`（两段，种子事件）
+                # 都只是碰巧长得像，不进目录——只增不改。
+                spec = event_catalog.EVENTS.get(str(event_type))
+                problems = event_catalog.validate_envelope(
+                    {
+                        "event": event_type,
+                        "seq": next_sequence,
+                        "schema_version": spec.version if spec else 1,
+                        "occurred_at": timestamp,
+                        "payload": payload if isinstance(payload, dict) else {},
+                    }
+                )
+                if problems:
+                    raise ValueError("project_event_catalog_rejected:" + "; ".join(problems))
+            try:
+                self.db.execute("INSERT INTO events (id, project_id, sequence, event_type, actor, payload, created_at, actor_kind, object_type, object_id, idempotency_key, schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (event_id, str(project_id), next_sequence, event_type, actor, json.dumps(payload, ensure_ascii=False), timestamp, actor_kind, object_type, str(object_id) if object_id else None, idempotency_key, schema_version))
+                break
+            except sqlite3.IntegrityError as error:
+                if "sequence" not in str(error) or _attempt == _EVENT_SEQUENCE_RETRIES - 1:
+                    raise
+        else:  # pragma: no cover — 循环要么 break 要么在最后一次抛出
+            raise sqlite3.IntegrityError("event_sequence_allocation_failed")
         self.db.execute("INSERT INTO event_outbox (id, event_id, project_id, status, attempts, available_at, locked_at, lock_expires_at, delivered_at, last_error, created_at, updated_at) VALUES (?, ?, ?, 'PENDING', 0, ?, NULL, NULL, NULL, NULL, ?, ?)", (str(uuid4()), event_id, str(project_id), timestamp, timestamp, timestamp))
         event = Event(id=UUID(event_id), project_id=project_id, sequence=next_sequence, event_type=event_type, actor=actor, payload=payload, created_at=parse_time(timestamp), actor_kind=actor_kind, object_type=object_type, object_id=object_id, idempotency_key=idempotency_key, schema_version=schema_version)
         # 工作区聊天桥：事件在这里统一转成聊天卡片（同一事务，由调用方提交）。

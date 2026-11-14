@@ -2700,6 +2700,115 @@ export async function getWorkflow(workflowId: string): Promise<WorkflowPackage> 
   return response.json();
 }
 
+export type WorkflowCopilotTurn = {
+  id: string;
+  session_id: string;
+  seq: number;
+  status: string;
+  prompt: string;
+  content: string;
+  model: string;
+  via: string;
+  errors: string[];
+  created_at: string;
+  completed_at: string | null;
+};
+
+export type WorkflowCopilotSession = {
+  id: string;
+  project_id: string | null;
+  title: string;
+  status: string;
+  draft_revision: number;
+  draft_valid: boolean;
+  published_workflow_id: string | null;
+  published_revision: number;
+  created_at: string;
+  updated_at: string;
+  draft?: WorkflowDefinition | null;
+  draft_hash?: string;
+  validation_errors?: string[];
+  turns?: WorkflowCopilotTurn[];
+};
+
+export type WorkflowCopilotTurnResult = {
+  turn: WorkflowCopilotTurn;
+  session: WorkflowCopilotSession;
+  draft: WorkflowDefinition | null;
+  draft_revision: number;
+  draft_valid: boolean;
+  validation_errors: string[];
+};
+
+export async function listWorkflowCopilotSessions(projectId?: string): Promise<WorkflowCopilotSession[]> {
+  const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
+  const response = await apiFetch(`${API_URL}/api/workflows/copilot/sessions${query}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "Copilot 会话读取失败");
+  return response.json();
+}
+
+export async function createWorkflowCopilotSession(input: { title?: string; project_id?: string | null }): Promise<WorkflowCopilotSession> {
+  const response = await apiFetch(`${API_URL}/api/workflows/copilot/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw await apiError(response, "Copilot 会话创建失败");
+  return response.json();
+}
+
+export async function getWorkflowCopilotSession(sessionId: string): Promise<WorkflowCopilotSession> {
+  const response = await apiFetch(`${API_URL}/api/workflows/copilot/sessions/${sessionId}`, { cache: "no-store" });
+  if (!response.ok) throw await apiError(response, "Copilot 会话读取失败");
+  return response.json();
+}
+
+export async function sendWorkflowCopilotTurn(sessionId: string, message: string, structured_answer?: Record<string, unknown>): Promise<WorkflowCopilotTurnResult> {
+  const response = await apiFetch(`${API_URL}/api/workflows/copilot/sessions/${sessionId}/turns`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message, structured_answer: structured_answer ?? null }),
+  });
+  if (!response.ok) throw await apiError(response, "Copilot 回复失败");
+  return response.json();
+}
+
+export async function answerWorkflowCopilotChoice(sessionId: string, choiceId: string, answers: Record<string, unknown>, message: string): Promise<WorkflowCopilotTurnResult> {
+  const response = await apiFetch(`${API_URL}/api/workflows/copilot/sessions/${sessionId}/choice`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ choice_id: choiceId, answers, message }),
+  });
+  if (!response.ok) throw await apiError(response, "Copilot 选择提交失败");
+  return response.json();
+}
+
+export async function previewWorkflowCopilotDraft(sessionId: string): Promise<{ definition: WorkflowDefinition; draft_revision: number; draft_hash: string; preview: Record<string, unknown> }> {
+  const response = await apiFetch(`${API_URL}/api/workflows/copilot/sessions/${sessionId}/preview`, { method: "POST" });
+  if (!response.ok) throw await apiError(response, "Copilot 草稿预览失败");
+  return response.json();
+}
+
+export async function publishWorkflowCopilotDraft(sessionId: string, draftRevision: number, confirmed: boolean): Promise<{ workflow: WorkflowPackage; session: WorkflowCopilotSession; idempotent: boolean }> {
+  const response = await apiFetch(`${API_URL}/api/workflows/copilot/sessions/${sessionId}/publish`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirmed, draft_revision: draftRevision }),
+  });
+  if (!response.ok) throw await apiError(response, "Copilot 发布失败");
+  return response.json();
+}
+
+export async function runWorkflowCopilotPublished(sessionId: string, input: { project_id: string; published_revision?: number; confirmed: boolean; inputs?: Record<string, unknown> }): Promise<WorkflowStartResult> {
+  const response = await apiFetch(`${API_URL}/api/workflows/copilot/sessions/${sessionId}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw await apiError(response, "Copilot 启动运行失败");
+  return response.json();
+}
+
 /** 工作流定义校验失败（422 workflow_definition_invalid）：服务端已按 schema §4 八条校验，
  * errors 逐条 "id: 原因"——编辑器只做展示，不重复实现规则。 */
 export class WorkflowValidationError extends Error {
@@ -2950,6 +3059,12 @@ export type MyAgentEndpoint = {
   executor: string;
   models: string[];
   default_model: string;
+  /** 平台渠道模型（方案 A）：成员组织里启用渠道的合集。能不能用看 platform_models_available。 */
+  platform_models: { model: string }[];
+  /** True = 执行体侧具备走平台渠道的配置基础（opencode 在装 + 授权含 llm.invoke）。 */
+  platform_models_available: boolean;
+  /** 平台渠道模型在执行体 opencode.json 里的 provider 别名前缀。 */
+  platform_provider: string;
   /** 可选角色；空数组 = 这台执行体没有角色可选（页面只显示「默认」，不显示空下拉）。 */
   roles: MyAgentRole[];
   conversation_count: number;
@@ -4065,3 +4180,16 @@ export async function setLlmQuota(memberId: string, tokenLimit: number): Promise
   if (!response.ok) throw await apiError(response, "成员额度保存失败", LLM_CHANNEL_MESSAGES);
   return response.json();
 }
+
+/* ================= 执行体侧平台渠道（方案 A，2026-10-02） =================
+ * 浏览器**不接触**任何令牌：执行体用自己的项目能力令牌（它已持有）经 Bearer 头
+ * 向平台换取 opencode provider 配置。这里没有对应的浏览器 API——下面的类型只用于
+ * 「我的智能体」页展示平台渠道模型列表与配置状态（来自 /api/my-agent/agents）。
+ * 唯一的敏感下发端点是 GET /api/agents/{agent_id}/llm-setup/{project_id}，
+ * 只能由执行体内核调用；浏览器调用会 401（没有授权令牌），契约上也不提供封装。
+ */
+
+/** 平台渠道在执行体选择器里的分组标识（与 components/agent-executor-selector 共用口径）。 */
+export type MyAgentPlatformModel = {
+  model: string;
+};

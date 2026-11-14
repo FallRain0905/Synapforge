@@ -73,6 +73,7 @@ class PlatformContractTests(unittest.TestCase):
                 "038_coordination_storage.sql",
                 "039_coordination_recovery.sql",
                 "040_feasibility_concerns.sql",
+                "041_workflow_copilot.sql",
             ],
         )
         initial = files[0].read_text(encoding="utf-8").lower()
