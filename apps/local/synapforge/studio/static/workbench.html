@@ -318,16 +318,18 @@ main { min-width:0; display:flex; flex-direction:column; min-height:0; backgroun
 .preview pre { margin:0; white-space:pre-wrap; overflow-wrap:anywhere;
   font:11.5px/1.55 var(--code); color:var(--fg-2); }
 
-/* wide views: runs / artifacts / models / usage / settings */
+/* wide views: runs / artifacts / models / usage / settings / clusters
+   宽视图铺满可用宽度。以前锁 1040px，在 1900px 屏上右边空一大片，
+   看起来像"没铺满"。阅读型内容（对话气泡）自己限宽，不靠这一层。 */
 .app.wide { grid-template-columns:var(--side-w) minmax(0,1fr); }
 .app.wide .inspector, .app.wide .composer { display:none; }
 .app.wide .session { padding-bottom:26px; }
-.app.wide .session-inner { max-width:1040px; }
+.app.wide .session-inner { max-width:100%; }
 .view-wrap { display:flex; flex-direction:column; gap:12px; }
 .view-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
 .view-head h2 { margin:0; font-size:14px; font-weight:500; letter-spacing:-.005em; }
 .view-head p { margin:4px 0 0; color:var(--muted); font-size:11.5px; }
-.metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+.metrics { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px; }
 .metric-card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:12px; }
 .metric-card b { display:block; font-size:20px; font-weight:500; letter-spacing:-.01em; }
 .metric-card span { display:block; color:var(--muted); font-size:10.5px; margin-top:2px; }
@@ -514,7 +516,6 @@ main { min-width:0; display:flex; flex-direction:column; min-height:0; backgroun
 .field { position:relative; }
 
 /* 用量图表 */
-.metrics { grid-template-columns:repeat(4,minmax(0,1fr)); }
 @media (max-width:1100px) { .metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 .ubar { display:block; height:5px; border-radius:99px; background:var(--line); overflow:hidden; }
 .ubar i { display:block; height:100%; width:0; border-radius:99px; background:var(--muted);
@@ -699,6 +700,20 @@ textarea.ctl { height:auto; padding:7px 8px; }
 .import-note { margin-top:10px; padding:10px 12px; border:1px solid var(--line-2); border-radius:8px;
   background:var(--card-2); color:var(--muted); font-size:11px; line-height:1.6; }
 .import-note code { font-family:var(--code); color:var(--fg-2); }
+
+/* 新建集群：两条路的二选一 */
+.choice-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:12px; }
+@media (max-width:720px) { .choice-grid { grid-template-columns:1fr; } }
+.choice-card { display:flex; flex-direction:column; align-items:flex-start; gap:6px;
+  padding:14px; border:1px solid var(--line); border-radius:11px; background:var(--card-2);
+  text-align:left; transition:border-color .12s, background .12s; }
+.choice-card:hover { border-color:var(--accent); background:var(--card); }
+.choice-ic { font-size:17px; line-height:1; }
+.choice-card b { font-size:13px; font-weight:600; color:var(--fg); }
+.choice-desc { font-size:11.5px; color:var(--muted); line-height:1.6; }
+.choice-tag { font-size:10.5px; color:var(--accent); margin-top:2px; }
+.choice-lead { display:flex; flex-direction:column; gap:5px; margin-top:14px;
+  color:var(--muted); font-size:11px; }
 </style>
 </head>
 <body>
@@ -1030,6 +1045,35 @@ textarea.ctl { height:auto; padding:7px 8px; }
     </div>
   </div>
 </div>
+<div class="modal hidden" id="newClusterModal">
+  <div class="modal-card" style="width:min(620px,100%)">
+    <h2>新建集群</h2>
+    <div class="lead">两种起法，最终都得到同一套集群 / 任务模型，只是任务卡由谁产出。</div>
+    <div class="choice-grid">
+      <button class="choice-card" id="ncByChat">
+        <span class="choice-ic">💬</span>
+        <b>和主 Agent 对话</b>
+        <span class="choice-desc">选一个 Agent 当主控，用自然语言说清目标。它会追问细节、
+          把工作拆成任务卡（每个任务写明执行体与模型），确认后并排执行。</span>
+        <span class="choice-tag">推荐：目标还比较模糊时</span>
+      </button>
+      <button class="choice-card" id="ncByForm">
+        <span class="choice-ic">✎</span>
+        <b>自己填集群</b>
+        <span class="choice-desc">直接指定集群名、目标、lead 与 worker、并行度与超时。
+          适合任务已经很明确、不想多聊一轮的情况。</span>
+        <span class="choice-tag">适合：已经想清楚要谁做什么</span>
+      </button>
+    </div>
+    <label class="choice-lead">对话模式的主 Agent
+      <select id="ncLead" class="search-input" style="width:100%;height:30px"></select>
+    </label>
+    <div class="modal-actions">
+      <button class="btn" id="ncCancel">取消</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal hidden" id="importModal">
   <div class="modal-card" style="width:min(760px,100%)">
     <h2>导入已有会话</h2>
@@ -3369,7 +3413,10 @@ async function createClusterFromWizard() {
     toast("集群已创建");
     await api(`/api/studio/clusters/${encodeURIComponent(data.cluster.id)}/start`,
       {method:"POST", body:"{}"});
-    await loadViewData("clusters");
+    // 直接建好的集群没有规划草稿，落在「集群任务」看板上（原来跳的「状态」页已并进新页面）
+    S.taskClusterId = data.cluster.id;
+    S.view = "clustertasks";
+    await loadViewData("clustertasks");
   } catch (e) { error.textContent = e.message; error.classList.remove("hidden"); }
 }
 
@@ -3423,9 +3470,9 @@ async function ensurePlan() {
   return null;
 }
 
-async function createNewPlan() {
+async function createNewPlan(leadId) {
   if (!S.agents.length) { toast("先新建一个 Agent"); return; }
-  const lead = S.agents[0];
+  const lead = (S.agents || []).find(a => a.id === leadId) || S.agents[0];
   try {
     const data = await api("/api/studio/plans", {
       method:"POST",
@@ -3434,9 +3481,24 @@ async function createNewPlan() {
     S.plan = data.plan;
     S.planPhase = "chat";
     S.planSteps = [];
+    S.view = "clusterchat";
     renderClusterChatView(document.getElementById("sessionInner"));
     toast(`已和 ${lead.name} 开始规划`);
   } catch (e) { toast(e.message); }
+}
+
+// 「新建集群」有两条路：和主 Agent 边聊边拆，或者自己填表。
+// 两者最终都落到同一个集群模型上，区别只是任务卡由谁产出。
+function openNewClusterChooser() {
+  if (!S.agents.length) { toast("先新建一个 Agent"); return; }
+  const modal = document.getElementById("newClusterModal");
+  if (!modal) { openClusterWizard(); return; }
+  const leadSelect = document.getElementById("ncLead");
+  if (leadSelect) {
+    leadSelect.innerHTML = (S.agents || []).map(agent =>
+      `<option value="${esc(agent.id)}">${esc(agentOptionLabel(agent))}</option>`).join("");
+  }
+  modal.classList.remove("hidden");
 }
 
 async function openPlan(planId) {
@@ -3836,7 +3898,7 @@ function renderClusterChatView(box) {
   const phase = S.planPhase || planPhaseOf(plan);
 
   const actions = [
-    `<button class="btn" id="ccNewPlan">＋ 新建规划</button>`,
+    `<button class="btn primary" id="ccNewPlan">＋ 新建集群</button>`,
     plan ? `<button class="btn" id="ccPickPlan">切换规划</button>` : "",
     phase === "chat" && plan ? `<button class="btn" id="ccParse">生成任务卡</button>` : "",
     phase === "plan" ? `<button class="btn" id="ccBackChat">返回对话</button>` : "",
@@ -3855,8 +3917,9 @@ function renderClusterChatView(box) {
       <div class="view-head"><div><h2>集群工作</h2>
         <p>先和主 Agent 聊清楚任务，再确认任务卡，最后多执行体并排执行。</p></div>
         <div class="view-actions">${actions}</div></div>
-      <div class="empty"><h2>还没有规划</h2>
-        <p>点「新建规划」：选一个主 Agent，描述你的目标，它会追问细节并帮你拆任务。</p></div>
+      <div class="empty"><h2>还没有集群</h2>
+        <p>点「新建集群」有两种起法：<b>和主 Agent 对话</b>让它追问细节、拆任务卡；
+        或者<b>自己填</b>集群名、目标和角色，直接开工。</p></div>
     </div>`;
     bindClusterChat(box, phase);
     return;
@@ -3919,7 +3982,7 @@ function renderClusterChatView(box) {
 
 function bindClusterChat(box, phase) {
   const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.onclick = fn; };
-  bind("ccNewPlan", createNewPlan);
+  bind("ccNewPlan", openNewClusterChooser);
   bind("ccPickPlan", showPlanPicker);
   bind("ccParse", parsePlanCard);
   bind("ccBackChat", () => { S.planPhase = "chat"; renderClusterChatView(box); });
@@ -4031,6 +4094,9 @@ function renderClusterTasksView(box) {
   const tasks = S.clusterTasks || [];
   const summary = S.clusterTaskSummary || {};
   const reveal = canReveal();
+  const picked = S.taskClusterId
+    ? (S.taskClusters || []).find(c => c.id === S.taskClusterId) : null;
+  const pickedStatus = String((picked || {}).status || "").toUpperCase();
 
   const clusterOptions = [`<option value="">全部集群（${(S.taskClusters || []).length}）</option>`]
     .concat((S.taskClusters || []).map(c =>
@@ -4041,10 +4107,21 @@ function renderClusterTasksView(box) {
       `<option value="${value}" ${value === S.taskStatus ? "selected" : ""}>${esc(label)}</option>`))
     .join("");
 
+  // 选中某个集群时才显示启停：全量视图下这些按钮指代谁不明确
+  const clusterOps = picked ? [
+    pickedStatus === "RUNNING"
+      ? `<button class="btn" id="ctPause">暂停</button><button class="btn danger" id="ctStop">停止</button>` : "",
+    pickedStatus === "PAUSED" ? `<button class="btn primary" id="ctResume">恢复</button>` : "",
+    ["READY", "DONE", "STOPPED"].includes(pickedStatus)
+      ? `<button class="btn primary" id="ctStart">启动</button>` : "",
+    `<button class="btn" id="ctOpenWork">去集群工作</button>`,
+  ].filter(Boolean).join("") : "";
+
   const controls = `<div class="view-actions">
     <input class="search-input" id="taskSearch" placeholder="搜索任务 / 角色 / 集群" value="${esc(S.taskQuery)}">
     <select class="search-input" id="taskClusterFilter">${clusterOptions}</select>
     <select class="search-input" id="taskStatusFilter">${statusOptions}</select>
+    ${clusterOps}
     <button class="btn" id="taskRefresh">刷新</button>
     <button class="btn primary" id="taskNewCluster">＋ 新建集群</button>
   </div>`;
@@ -4123,7 +4200,20 @@ function renderClusterTasksView(box) {
 
   const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.onclick = fn; };
   bind("taskRefresh", () => loadViewData("clustertasks"));
-  bind("taskNewCluster", () => switchView("clusterchat"));
+  bind("taskNewCluster", () => openNewClusterChooser());
+  const act = async (action) => {
+    try {
+      await api(`/api/studio/clusters/${encodeURIComponent(S.taskClusterId)}/${action}`,
+        {method: "POST", body: "{}"});
+      toast({start:"已启动", pause:"已暂停", resume:"已恢复", stop:"已停止"}[action] || "已执行");
+      await loadViewData("clustertasks");
+    } catch (e) { toast(e.message); }
+  };
+  bind("ctStart", () => act("start"));
+  bind("ctPause", () => act("pause"));
+  bind("ctResume", () => act("resume"));
+  bind("ctStop", () => act("stop"));
+  bind("ctOpenWork", () => switchView("clusterchat"));
   const search = document.getElementById("taskSearch");
   if (search) search.onchange = () => { S.taskQuery = search.value.trim(); loadViewData("clustertasks"); };
   const cf = document.getElementById("taskClusterFilter");
@@ -5402,6 +5492,18 @@ document.getElementById("extClose").onclick = closeExtensions;
 document.getElementById("extSave").onclick = saveExtensions;
 document.getElementById("importCancel").onclick = () => {
   document.getElementById("importModal").classList.add("hidden");
+};
+document.getElementById("ncCancel").onclick = () => {
+  document.getElementById("newClusterModal").classList.add("hidden");
+};
+document.getElementById("ncByChat").onclick = async () => {
+  const lead = document.getElementById("ncLead").value;
+  document.getElementById("newClusterModal").classList.add("hidden");
+  await createNewPlan(lead);
+};
+document.getElementById("ncByForm").onclick = () => {
+  document.getElementById("newClusterModal").classList.add("hidden");
+  openClusterWizard();
 };
 document.getElementById("importConfirm").onclick = submitSessionImport;
 document.getElementById("importProvider").onchange = () => {
