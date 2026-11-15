@@ -125,6 +125,9 @@ def write_artifact(store: Any, *, project_id: Any, workspace: str | Path, relati
             artifact_type=artifact_type or output.artifact_type,
             task_id=task_uuid,
             status=status,
+            # 记下文件在磁盘上的真实位置：「集群任务」页要能"在资源管理器里打开"。
+            # 不记的话，事后只能靠搜同名文件猜，多版本同名文件必然猜错。
+            source_path=str(Path(output.path).resolve()),
             receipt=receipt_model(receipt),
         ),
         created_by=created_by,
@@ -178,7 +181,9 @@ def artifact_brief(artifact: Any) -> dict[str, Any]:
     data = artifact.model_dump(mode="json") if hasattr(artifact, "model_dump") else dict(artifact)
     receipt = data.get("receipt") or {}
     keys = ("id", "name", "artifact_type", "status", "version", "size_bytes",
-            "content_hash", "task_id", "created_at")
+            "content_hash", "task_id", "created_at",
+            # source_path：成果的本地磁盘位置（「在资源管理器里打开」要用）
+            "source_path")
     brief = {key: data.get(key) for key in keys if key in data}
     brief["receipt_version"] = receipt.get("receipt_version", 0)
     brief["tool_name"] = receipt.get("tool_name")

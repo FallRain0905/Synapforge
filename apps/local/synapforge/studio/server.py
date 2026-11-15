@@ -27,13 +27,16 @@ from . import agents as studio_agents
 from . import backends
 from . import capabilities as studio_capabilities
 from . import commands as studio_commands
+from . import external as studio_external
 from . import providers as studio_providers
 from . import plugins as studio_plugins
 from . import profiles as studio_profiles
 from . import plans as studio_plans
+from . import reveal as studio_reveal
 from . import routing as studio_routing
 from . import sessions as studio_sessions
 from . import store as studio_store
+from . import tasks_view as studio_tasks_view
 from .agent_runtime import AgentRuntimeManager
 from .commands import StudioError
 from .supervisor import SupervisorManager
@@ -411,6 +414,11 @@ class _Handler(BaseHTTPRequestHandler):
                         "executors": [asdict(p) for p in backends.probe_agents()],
                         "state_dir": str(state_dir_path),
                         "claude_settings": str(Path.home() / ".claude" / "settings.json"),
+                        # 界面据此决定要不要显示"在资源管理器里打开"——
+                        # 服务器/反代部署下没有本地文件管理器，显示出来只会点了报错
+                        "reveal_available": studio_reveal.reveal_enabled(
+                            host=str(getattr(self.server, "bind_host", "") or ""),
+                            base_path=str(getattr(self.server, "base_path", "") or "")),
                         "default_model": catalog["default"]})
             return
         if tail == ["agents"]:
@@ -455,6 +463,55 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, **payload,
                             "text": (text[:12000] if isinstance(text, str) else None),
                             "truncated": bool(isinstance(text, str) and len(text) > 12000)})
+            finally:
+                store.close()
+            return
+        if tail == ["cluster-tasks"]:
+            store = self._store()
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                self._json({"ok": True, **studio_tasks_view.list_cluster_tasks(
+                    store,
+                    cluster_id=(query.get("cluster_id") or [""])[0],
+                    status=(query.get("status") or [""])[0],
+                    query=(query.get("q") or [""])[0])})
+            finally:
+                store.close()
+            return
+        if len(tail) == 3 and tail[0] == "artifacts" and tail[2] == "path":
+            store = self._store()
+            try:
+                self._json({"ok": True, **studio_tasks_view.artifact_local_path(store, tail[1])})
+            finally:
+                store.close()
+            return
+        if len(tail) == 3 and tail[0] == "clusters" and tail[2] == "agents":
+            store = self._store()
+            try:
+                self._json({"ok": True, **studio_tasks_view.cluster_task_agents(store, tail[1])})
+            finally:
+                store.close()
+            return
+        if tail == ["external-sessions"]:
+            query = parse_qs(urlparse(self.path).query)
+            source = (query.get("source") or ["zcode"])[0]
+            if source != "zcode":
+                self._json({"ok": True, "sessions": [], "source": source,
+                            "supported": ["zcode"]})
+                return
+            self._json({"ok": True, "source": "zcode",
+                        "available": studio_external.zcode_available(),
+                        "sessions": studio_external.list_zcode_sessions(
+                            query=(query.get("q") or [""])[0],
+                            limit=int((query.get("limit") or ["200"])[0])),
+                        "supported": ["zcode"]})
+            return
+        if tail == ["agents-overview"]:
+            store = self._store()
+            try:
+                self._json({"ok": True,
+                            "agents": studio_tasks_view.list_agents_with_runs(store),
+                            "providers": studio_providers.list_providers(store)})
             finally:
                 store.close()
             return
@@ -1158,6 +1215,46 @@ class _Handler(BaseHTTPRequestHandler):
                 store.close()
             return
 
+        if (method in ("PATCH", "PUT") and len(tail) == 2 and tail[0] == "tasks"):
+            store = self._store()
+            try:
+                result = studio_tasks_view.update_task_text(store, tail[1], **body)
+                self._json({"ok": True, **result})
+            finally:
+                store.close()
+            return
+
+        if method == "POST" and tail == ["import-session"]:
+            store = self._store()
+            try:
+                source = str(body.get("source") or "zcode")
+                if source != "zcode":
+                    raise StudioError("source_unsupported",
+                                      [f"目前只支持导入 ZCode 会话，不支持 {source}"])
+                result = studio_external.import_zcode_session(
+                    store, session_id=str(body.get("session_id") or ""),
+                    name=str(body.get("name") or ""),
+                    workspace=str(body.get("workspace") or ""),
+                    backend=str(body.get("backend") or "claude"),
+                    provider_id=str(body.get("provider_id") or ""),
+                    model=str(body.get("model") or ""))
+                self._json({"ok": True, **result}, status=201)
+            finally:
+                store.close()
+            return
+
+        if method == "POST" and tail == ["reveal"]:
+            store = self._store()
+            try:
+                result = studio_reveal.reveal(
+                    store, str(body.get("path") or ""),
+                    host=str(getattr(self.server, "bind_host", "") or ""),
+                    base_path=str(getattr(self.server, "base_path", "") or ""))
+                self._json({"ok": True, **result})
+            finally:
+                store.close()
+            return
+
         self._fail("not_found", status=404)
 
 
@@ -1198,6 +1295,7 @@ def build_server(*, port: int = 0, state_path: str | Path | None = None,
     httpd.manager = manager  # type: ignore[attr-defined]
     httpd.agent_manager = AgentRuntimeManager(state_path)  # type: ignore[attr-defined]
     httpd.server_port = actual  # type: ignore[attr-defined]
+    httpd.bind_host = host  # type: ignore[attr-defined]
     httpd.allowed_origins = tuple(o.strip().rstrip("/") for o in (allowed_origins or ()) if o.strip())  # type: ignore[attr-defined]
     httpd.base_path = _normalize_base_path(base_path)  # type: ignore[attr-defined]
     return httpd, manager, actual_token, actual

@@ -498,6 +498,12 @@ def mark_running(store: Any, *, task_id: Any, agent_id: str, lease_token: str,
     return _dump(task)
 
 
+def update_task_text(store: Any, *, task_id: Any, **fields: Any) -> Any:
+    """改任务卡文字层（标题/描述）。状态与指派人**不在这里**——那两条走状态机。"""
+
+    return store.update_task_text(_as_uuid(task_id), **fields)
+
+
 def finish_task(store: Any, *, task_id: Any, agent_id: str, lease_token: str,
                 success: bool, summary: str,
                 output_artifact_ids: list[str] | None = None) -> dict[str, Any]:

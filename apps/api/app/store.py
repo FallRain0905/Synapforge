@@ -4285,6 +4285,38 @@ class Store:
         self.add_event(UUID(row["project_id"]), "task.updated", actor, payload)
         return self._task(self.db.execute("SELECT * FROM tasks WHERE id = ?", (str(task_id),)).fetchone())
 
+    def update_task_text(self, task_id: UUID, *, title: str | None = None,
+                         description: str | None = None,
+                         actor: str = "member-001") -> Task:
+        """只改任务卡的文字（标题/描述）。
+
+        刻意**不碰**状态与指派人：那两条受 `TRANSITIONS` 状态机和派单策略约束，
+        从"编辑任务细节"这个入口改会绕过审批门禁。要改状态请走 `update_task`。
+        """
+
+        row = self.db.execute("SELECT * FROM tasks WHERE id = ?", (str(task_id),)).fetchone()
+        if not row:
+            raise KeyError("task_not_found")
+        updates: dict[str, Any] = {}
+        if title is not None:
+            clean = title.strip()
+            if not clean:
+                raise ValueError("task_title_required")
+            updates["title"] = clean
+        if description is not None:
+            updates["description"] = description
+        if not updates:
+            return self._task(row)
+        assignments = ", ".join(f"{key} = ?" for key in updates)
+        self.db.execute(
+            f"UPDATE tasks SET {assignments}, updated_at = ? WHERE id = ?",
+            (*updates.values(), now(), str(task_id)),
+        )
+        self.db.commit()
+        self.add_event(UUID(row["project_id"]), "task.text_edited", actor,
+                       {"task_id": str(task_id), "fields": sorted(updates)})
+        return self._task(self.db.execute("SELECT * FROM tasks WHERE id = ?", (str(task_id),)).fetchone())
+
     @staticmethod
     def _validated_resource_policy(policy: dict[str, Any] | None) -> dict[str, Any]:
         """校验任务执行方式。只允许平台真正支持的取值，避免"配了但跑不起来"。

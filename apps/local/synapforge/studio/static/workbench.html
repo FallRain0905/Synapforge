@@ -671,6 +671,34 @@ textarea.ctl { height:auto; padding:7px 8px; }
   transition:.16s; pointer-events:none; }
 .toast.show { opacity:1; transform:none; }
 
+/* 集群任务：可展开的任务行 */
+.task-row { cursor:pointer; }
+.task-row:hover td { background:var(--card-2); }
+.task-row.open td { border-bottom:none; }
+.task-detail-row td { padding:0 0 12px; background:var(--card-2); }
+.task-detail { display:flex; flex-direction:column; gap:10px; padding:12px 14px; }
+.task-desc { font-size:12px; color:var(--fg-2); white-space:pre-wrap; line-height:1.6; }
+.task-kv { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:6px 16px; margin:0; }
+.task-kv div { display:flex; gap:8px; font-size:11.5px; }
+.task-kv dt { color:var(--muted); min-width:64px; flex:none; }
+.task-kv dd { margin:0; color:var(--fg-2); word-break:break-all; }
+.task-detail-actions { display:flex; gap:8px; justify-content:flex-end; }
+.task-detail-actions .full { grid-column:1/-1; }
+.task-detail label { display:flex; flex-direction:column; gap:5px; color:var(--muted); font-size:11px; }
+.task-detail input,.task-detail textarea { width:100%; border:1px solid var(--line); border-radius:7px;
+  padding:7px 8px; background:var(--card); color:var(--fg); font-size:12px; }
+.task-detail textarea { resize:vertical; }
+
+/* 导入会话弹窗 */
+.import-list { max-height:min(360px,42vh); overflow:auto; }
+.import-form { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:12px; }
+.import-form label { display:flex; flex-direction:column; gap:5px; color:var(--muted); font-size:11px; }
+.import-form input,.import-form select { width:100%; border:1px solid var(--line); border-radius:7px;
+  padding:7px 8px; background:var(--card-2); color:var(--fg); font-size:12px; }
+.import-form > div { grid-column:1/-1; }
+.import-note { margin-top:10px; padding:10px 12px; border:1px solid var(--line-2); border-radius:8px;
+  background:var(--card-2); color:var(--muted); font-size:11px; line-height:1.6; }
+.import-note code { font-family:var(--code); color:var(--fg-2); }
 </style>
 </head>
 <body>
@@ -681,18 +709,23 @@ textarea.ctl { height:auto; padding:7px 8px; }
       <div class="brand-text"><b>synapforge</b><small>studio</small></div>
     </div>
     <div class="side-scroll">
-      <div class="nav-gl">工作</div>
+      <div class="nav-gl">集群</div>
       <button class="nav-row on" data-view="clusterchat">
         <svg viewBox="0 0 20 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="10" r="2.5"/><circle cx="14" cy="5" r="2.5"/><circle cx="14" cy="15" r="2.5"/><path d="M8.4 9l3.3-2.6M8.4 11l3.3 2.6"/></g></svg>
         <span>集群工作</span>
         <em class="nav-count" id="planCount"></em>
       </button>
-      <div class="agent-sub" id="clusterStatusSub">
-        <button class="nav-row sub" data-view="clusters">
-          <svg viewBox="0 0 20 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="10" cy="10" r="6"/><path d="M10 7v3.4l2.2 1.4"/></g></svg>
-          <span>状态</span>
-        </button>
-      </div>
+      <button class="nav-row" data-view="clustertasks">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5h4M4 10h4M4 14.5h4"/><path d="M10.5 4.2l1.2 1.2 2-2M10.5 8.7l1.2 1.2 2-2M10.5 13.2l1.2 1.2 2-2"/></g></svg>
+        <span>集群任务</span>
+        <em class="nav-count" id="taskCount"></em>
+      </button>
+      <button class="nav-row" data-view="clusteragents">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="7" r="2.6"/><path d="M3.4 16c0-2.5 2-4.2 4.6-4.2s4.6 1.7 4.6 4.2"/><path d="M14 5.2a2.2 2.2 0 0 1 0 4.2M15.6 15.8c0-1.7-.6-3-1.7-3.8"/></g></svg>
+        <span>集群 Agent</span>
+        <em class="nav-count" id="clusterAgentCount"></em>
+      </button>
+      <div class="nav-gl">工作</div>
       <button class="nav-row" data-view="workbench">
         <svg viewBox="0 0 20 20" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="6" height="6" rx="1.4"/><rect x="11" y="3" width="6" height="6" rx="1.4"/><rect x="3" y="11" width="6" height="6" rx="1.4"/><rect x="11" y="11" width="6" height="6" rx="1.4"/></g></svg>
         <span>Agent 工作台</span>
@@ -997,6 +1030,32 @@ textarea.ctl { height:auto; padding:7px 8px; }
     </div>
   </div>
 </div>
+<div class="modal hidden" id="importModal">
+  <div class="modal-card" style="width:min(760px,100%)">
+    <h2>导入已有会话</h2>
+    <div class="lead">把别处做过的工作接进来：ZCode 的会话记录会写进新 Agent 的工作区，
+      由平台上的执行体带着这段上下文继续推进。</div>
+    <div class="ext-pane" id="importBody"></div>
+    <div class="import-form">
+      <div class="hidden" id="importPickRow">
+        <div class="muted" style="font-size:10.5px">已选会话：<span class="mono" id="importSelected"></span></div>
+      </div>
+      <label>Agent 名称<input id="importName" placeholder="默认用会话标题"></label>
+      <label>工作区<input id="importWorkspace" placeholder="留空则新建一个"></label>
+      <label>渠道
+        <select id="importProvider"><option value="">本机默认</option></select>
+      </label>
+      <label>模型
+        <span id="importModelWrap"></span>
+      </label>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="importCancel">取消</button>
+      <button class="btn primary" id="importConfirm">导入</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -1008,6 +1067,10 @@ const S = { token:"", agents:[], models:{models:[],channels:[],default:""}, agen
             profiles:[], folds:{}, routesSummary:{}, openSessions:{}, agentSessions:{},
             activeSession:null, modelPickerOpen:false, modelFilter:"", library:null, libQuery:"",
             cluster:null, clusters:[], clusterTab:"roles", clusterOpen:{}, clusterLogs:{},
+            clusterTasks:[], clusterTaskSummary:{}, taskClusters:[], taskQuery:"",
+            taskStatus:"", taskClusterId:"", taskOpen:{}, taskEditing:"",
+            agentOverview:[], agentOverviewProviders:[], extSessions:null, extQuery:"",
+            extSource:"zcode",
             plan:null, planPhase:"chat", planRuns:[], planSteps:[], planStream:null,
             clusterStream:null, panelSteps:{}, expandedRole:"",
             checks:{}, sessions:[], sessionQuery:"", sessionAgent:"", sessionArchived:false,
@@ -1450,11 +1513,9 @@ function renderNav() {
   document.querySelectorAll(".nav-row[data-view]").forEach(el => {
     el.classList.toggle("on", el.dataset.view === S.view);
   });
-  // Agent 子栏只在「Agent 工作台」视图展开；集群状态子栏只在「集群工作」展开
+  // Agent 子栏只在「Agent 工作台」视图展开
   const sub = document.getElementById("agentSubList");
   if (sub) sub.classList.toggle("collapsed", S.view !== "workbench");
-  const clusterSub = document.getElementById("clusterStatusSub");
-  if (clusterSub) clusterSub.classList.toggle("collapsed", S.view !== "clusterchat");
 }
 
 function switchView(view) {
@@ -1535,6 +1596,37 @@ async function loadViewData(view) {
         await loadClusterRun(plan.cluster_id);
       }
       return;
+    } else if (view === "clustertasks") {
+      const q = new URLSearchParams();
+      if (S.taskClusterId) q.set("cluster_id", S.taskClusterId);
+      if (S.taskStatus) q.set("status", S.taskStatus);
+      if (S.taskQuery) q.set("q", S.taskQuery);
+      const [data, settings] = await Promise.all([
+        api(`/api/studio/cluster-tasks?${q.toString()}`),
+        api("/api/studio/settings"),
+      ]);
+      S.settings = settings;
+      S.clusterTasks = data.tasks || [];
+      S.clusterTaskSummary = data.summary || {};
+      S.taskClusters = data.clusters || [];
+      S.view = "clustertasks";
+      renderView();
+      return;
+    } else if (view === "clusteragents") {
+      const [overview, tasks, settings] = await Promise.all([
+        api("/api/studio/agents-overview"),
+        api("/api/studio/cluster-tasks"),
+        api("/api/studio/settings"),
+      ]);
+      S.settings = settings;
+      S.providers = settings.providers || S.providers || [];
+      S.agentOverview = overview.agents || [];
+      S.agentOverviewProviders = overview.providers || [];
+      S.clusterTasks = tasks.tasks || [];
+      S.taskClusters = tasks.clusters || [];
+      S.view = "clusteragents";
+      renderView();
+      return;
     } else if (view === "clusters") {
       const q = S.cluster && S.cluster.id
         ? `?cluster_id=${encodeURIComponent(S.cluster.id)}` : "";
@@ -1566,6 +1658,8 @@ function renderWideView() {
   if (S.view === "runs") return renderRunsView(box);
   if (S.view === "sessions") return renderSessionsView(box);
   if (S.view === "clusterchat") return renderClusterChatView(box);
+  if (S.view === "clustertasks") return renderClusterTasksView(box);
+  if (S.view === "clusteragents") return renderClusterAgentsView(box);
   if (S.view === "library") return renderLibraryView(box);
   if (S.view === "routes") return renderRoutesView(box);
   if (S.view === "clusters") return renderClustersView(box);
@@ -3909,6 +4003,377 @@ async function showPlanPicker() {
   } catch (e) { toast(e.message); }
 }
 
+// ===== 集群任务：跨集群任务看板 ===========================================
+// 和「集群工作」的分工：那边是发起（对话→任务卡→执行），这边是事后管理
+// （哪些任务在跑、谁在做、出了什么成果、成果在磁盘哪里）。
+
+const TASK_STATUS_LABELS = {
+  DRAFT: "草稿", READY: "待领", CLAIMED: "已领", RUNNING: "执行中",
+  WAITING: "等回复", WAITING_REVIEW: "待复核", APPROVED: "已批准",
+  BLOCKED: "阻塞", NEEDS_REVISION: "需返工", FAILED: "失败", CANCELLED: "已取消",
+};
+
+function canReveal() {
+  return Boolean((S.settings || {}).reveal_available);
+}
+
+async function revealPath(path) {
+  if (!path) { toast("这条记录没有本地路径"); return; }
+  try {
+    const data = await api("/api/studio/reveal", {
+      method: "POST", body: JSON.stringify({path})});
+    toast("已打开 " + (data.directory || path));
+  } catch (e) { toast(e.message); }
+}
+
+function renderClusterTasksView(box) {
+  if (!box) return;
+  const tasks = S.clusterTasks || [];
+  const summary = S.clusterTaskSummary || {};
+  const reveal = canReveal();
+
+  const clusterOptions = [`<option value="">全部集群（${(S.taskClusters || []).length}）</option>`]
+    .concat((S.taskClusters || []).map(c =>
+      `<option value="${esc(c.id)}" ${c.id === S.taskClusterId ? "selected" : ""}>${esc(c.name || c.id.slice(0, 8))}</option>`))
+    .join("");
+  const statusOptions = [`<option value="">全部状态</option>`]
+    .concat(Object.entries(TASK_STATUS_LABELS).map(([value, label]) =>
+      `<option value="${value}" ${value === S.taskStatus ? "selected" : ""}>${esc(label)}</option>`))
+    .join("");
+
+  const controls = `<div class="view-actions">
+    <input class="search-input" id="taskSearch" placeholder="搜索任务 / 角色 / 集群" value="${esc(S.taskQuery)}">
+    <select class="search-input" id="taskClusterFilter">${clusterOptions}</select>
+    <select class="search-input" id="taskStatusFilter">${statusOptions}</select>
+    <button class="btn" id="taskRefresh">刷新</button>
+    <button class="btn primary" id="taskNewCluster">＋ 新建集群</button>
+  </div>`;
+
+  const rows = tasks.map(task => {
+    const status = String(task.status || "").toUpperCase();
+    const open = Boolean((S.taskOpen || {})[task.id]);
+    const editing = S.taskEditing === task.id;
+    const arts = task.artifacts || [];
+    const review = status === "WAITING_REVIEW"
+      ? `<button class="btn small" data-task-approve="${esc(task.id)}">批准</button>
+         <button class="btn small danger" data-task-revise="${esc(task.id)}">退回</button>` : "";
+    const detail = !open ? "" : `<tr class="task-detail-row"><td colspan="6">
+      <div class="task-detail">
+        ${editing ? `
+          <label class="full">标题<input id="taskEditTitle" value="${esc(task.title || "")}"></label>
+          <label class="full">描述<textarea id="taskEditDesc" rows="4">${esc(task.description || "")}</textarea></label>
+          <div class="task-detail-actions">
+            <button class="btn" data-task-edit-cancel="${esc(task.id)}">取消</button>
+            <button class="btn primary" data-task-edit-save="${esc(task.id)}">保存</button>
+          </div>` : `
+          <div class="task-desc">${esc(task.description || "（没有描述）")}</div>
+          <dl class="task-kv">
+            <div><dt>集群</dt><dd>${esc(task.cluster_name || "")}</dd></div>
+            <div><dt>执行角色</dt><dd>${esc(task.role_name || "—")}${task.agent_id ? ` · ${esc(task.agent_id)}` : ""}</dd></div>
+            <div><dt>工作区</dt><dd class="mono">${esc(task.workspace || "—")}
+              ${reveal && task.workspace ? `<button class="link-btn" data-reveal="${esc(task.workspace)}">打开</button>` : ""}</dd></div>
+            <div><dt>更新时间</dt><dd>${esc(fmtDate(task.updated_at))}</dd></div>
+          </dl>
+          <div class="task-detail-actions">
+            <button class="btn small" data-task-edit="${esc(task.id)}">编辑任务细节</button>
+            ${review}
+          </div>`}
+        <div class="section-title">成果物（${arts.length}）</div>
+        ${arts.length ? `<div class="list-card">${arts.map(art => `<div class="list-row">
+          <div class="ic">${esc(String(art.name || "?").slice(0, 1))}</div>
+          <div class="grow">
+            <div class="name">${esc(art.name)}</div>
+            <div class="sub mono">${esc(art.local_path || "（未记录本地路径，老数据）")}</div>
+          </div>
+          <div class="tail">
+            <span class="tag">${esc(art.size_bytes || 0)} B</span>
+            ${reveal && art.local_path ? `<button class="btn small" data-reveal="${esc(art.local_path)}">打开</button>` : ""}
+          </div>
+        </div>`).join("")}</div>` : `<div class="empty-mini">这个任务还没有登记成果物</div>`}
+      </div>
+    </td></tr>`;
+    return `<tr class="task-row ${open ? "open" : ""}" data-task-toggle="${esc(task.id)}">
+      <td class="strong">${esc(task.title || "")}
+        <div class="muted" style="font-size:10.5px;margin-top:2px">${esc(String(task.description || "").slice(0, 90))}</div></td>
+      <td><span class="pill ${esc(status)}">${esc(TASK_STATUS_LABELS[status] || task.status || "")}</span></td>
+      <td>${esc(task.cluster_name || "")}</td>
+      <td>${esc(task.role_name || "—")}</td>
+      <td class="num">${(task.artifacts || []).length}</td>
+      <td class="muted">${esc(fmtDate(task.updated_at))}</td>
+    </tr>${detail}`;
+  }).join("");
+
+  box.innerHTML = `<div class="view-wrap">
+    <div class="view-head"><div>
+      <h2>集群任务</h2>
+      <p>所有集群的任务：进度、参与的执行体、成果物，以及成果在磁盘上的位置。</p>
+    </div>${controls}</div>
+    <div class="metrics">
+      <div class="metric-card"><b>${summary.tasks || 0}</b><span>任务</span></div>
+      <div class="metric-card"><b>${summary.running || 0}</b><span>执行中</span></div>
+      <div class="metric-card"><b>${summary.waiting_review || 0}</b><span>待复核</span></div>
+      <div class="metric-card"><b>${summary.artifacts || 0}</b><span>成果物</span></div>
+    </div>
+    ${tasks.length ? `<div class="table-card"><table class="table"><thead><tr>
+      <th>任务</th><th>状态</th><th>集群</th><th>执行体</th><th class="num">成果</th><th>更新</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>`
+      : `<div class="empty"><h2>还没有集群任务</h2>
+          <p>去「集群工作」和主 Agent 聊一次，确认任务卡后任务就会出现在这里。</p></div>`}
+  </div>`;
+
+  const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.onclick = fn; };
+  bind("taskRefresh", () => loadViewData("clustertasks"));
+  bind("taskNewCluster", () => switchView("clusterchat"));
+  const search = document.getElementById("taskSearch");
+  if (search) search.onchange = () => { S.taskQuery = search.value.trim(); loadViewData("clustertasks"); };
+  const cf = document.getElementById("taskClusterFilter");
+  if (cf) cf.onchange = () => { S.taskClusterId = cf.value; loadViewData("clustertasks"); };
+  const sf = document.getElementById("taskStatusFilter");
+  if (sf) sf.onchange = () => { S.taskStatus = sf.value; loadViewData("clustertasks"); };
+
+  box.querySelectorAll("[data-task-toggle]").forEach(el => el.onclick = (ev) => {
+    // 点行内的按钮/输入框不该触发折叠切换
+    if (ev.target.closest("button, input, textarea, a")) return;
+    const id = el.dataset.taskToggle;
+    S.taskOpen = {...(S.taskOpen || {}), [id]: !(S.taskOpen || {})[id]};
+    renderClusterTasksView(box);
+  });
+  box.querySelectorAll("[data-reveal]").forEach(el => el.onclick = () => revealPath(el.dataset.reveal));
+  box.querySelectorAll("[data-task-edit]").forEach(el => el.onclick = () => {
+    S.taskEditing = el.dataset.taskEdit;
+    S.taskOpen = {...(S.taskOpen || {}), [el.dataset.taskEdit]: true};
+    renderClusterTasksView(box);
+  });
+  box.querySelectorAll("[data-task-edit-cancel]").forEach(el => el.onclick = () => {
+    S.taskEditing = ""; renderClusterTasksView(box);
+  });
+  box.querySelectorAll("[data-task-edit-save]").forEach(el => el.onclick = async () => {
+    const id = el.dataset.taskEditSave;
+    const title = (document.getElementById("taskEditTitle") || {}).value || "";
+    const desc = (document.getElementById("taskEditDesc") || {}).value || "";
+    try {
+      await api(`/api/studio/tasks/${encodeURIComponent(id)}`,
+        {method: "PATCH", body: JSON.stringify({title, description: desc})});
+      toast("任务已更新");
+      S.taskEditing = "";
+      await loadViewData("clustertasks");
+    } catch (e) { toast(e.message); }
+  });
+  box.querySelectorAll("[data-task-approve]").forEach(el => el.onclick = async () => {
+    try {
+      await api(`/api/studio/tasks/${encodeURIComponent(el.dataset.taskApprove)}/review`,
+        {method: "POST", body: JSON.stringify({verdict: "APPROVED", summary: "本地控制台批准"})});
+      toast("已批准");
+      await loadViewData("clustertasks");
+    } catch (e) { toast(e.message); }
+  });
+  box.querySelectorAll("[data-task-revise]").forEach(el => el.onclick = async () => {
+    try {
+      await api(`/api/studio/tasks/${encodeURIComponent(el.dataset.taskRevise)}/review`,
+        {method: "POST", body: JSON.stringify({verdict: "NEEDS_REVISION", summary: "本地控制台退回"})});
+      toast("已退回");
+      await loadViewData("clustertasks");
+    } catch (e) { toast(e.message); }
+  });
+}
+
+// ===== 集群 Agent：平台 Agent 名单 + 会话导入 ==============================
+
+function renderClusterAgentsView(box) {
+  if (!box) return;
+  const agents = S.agentOverview || [];
+  const providers = S.agentOverviewProviders || S.providers || [];
+  const reveal = canReveal();
+  const zcode = S.extSessions || {};
+
+  const cards = agents.map(agent => {
+    const roleTags = (agent.clusters || []).map(c =>
+      `<span class="tag ${c.is_lead ? "accent" : ""}">${esc(c.cluster_name || "")} · ${esc(c.role_name || "")}${c.is_lead ? "（lead）" : ""}</span>`).join("");
+    const channelOptions = [`<option value="">本机默认</option>`]
+      .concat(providers.map(p => `<option value="${esc(p.id)}" ${p.id === agent.provider_id ? "selected" : ""}>${esc(p.name)} · ${esc(p.protocol || p.kind || "")}</option>`))
+      .join("");
+    return `<div class="agent-card" data-agent-row="${esc(agent.id)}">
+      <div class="ac-head">
+        <div class="ac-avatar">${esc((agent.name || "A").slice(0, 1).toUpperCase())}</div>
+        <div class="grow">
+          <div class="name">${esc(agent.name)}
+            <span class="tag ${agent.running ? "green" : ""}">${agent.running ? "执行中" : "空闲"}</span>
+            ${agent.imported ? `<span class="tag amber">会话导入</span>` : ""}
+          </div>
+          <div class="sub">${esc(agent.backend || "claude")} · ${esc(agent.provider_name || "本机默认")} · ${esc(agent.model || "默认模型")}</div>
+        </div>
+        <div class="ac-actions">
+          <button class="btn small" data-agent-open="${esc(agent.id)}">工作台</button>
+          <button class="btn small" data-agent-test="${esc(agent.id)}">检测</button>
+        </div>
+      </div>
+      <div class="ac-grid">
+        <label>渠道
+          <select data-ag-provider="${esc(agent.id)}">${channelOptions}</select>
+        </label>
+        <label>模型
+          ${modelSelectHTML(agent.provider_id || "", agent.model || "", `data-ag-model="${esc(agent.id)}"`)}
+        </label>
+        <div class="full muted" style="font-size:10.5px">
+          ${roleTags || "还没有参与任何集群"}
+        </div>
+        <div class="full mono ac-workspace" title="${esc(agent.workspace || "")}">${esc(agent.workspace || "")}
+          ${reveal && agent.workspace ? `<button class="link-btn" data-reveal="${esc(agent.workspace)}">打开文件夹</button>` : ""}
+        </div>
+        ${agent.running ? `<div class="full muted" style="font-size:10.5px">正在跑：${esc(agent.current_task || "")}</div>` : ""}
+      </div>
+      <div class="ac-foot">
+        ${renderCheck("agent", agent.id)}
+        <div><span class="muted" style="font-size:10px">全局配置（角色卡 / 扩展 / 删除）见「模型与智能体」</span></div>
+      </div>
+    </div>`;
+  }).join("");
+
+  box.innerHTML = `<div class="view-wrap">
+    <div class="view-head"><div>
+      <h2>集群 Agent</h2>
+      <p>平台上的执行体、它们在哪些集群里担任角色，以及把别处的会话接进来。</p>
+    </div><div class="view-actions">
+      <button class="btn" id="caImport">导入会话</button>
+      <button class="btn" id="caRefresh">刷新</button>
+      <button class="btn primary" id="caNewAgent">＋ 新建 Agent</button>
+    </div></div>
+    ${agents.length ? `<div class="list-card" style="border:none;background:transparent">${cards}</div>`
+      : `<div class="empty"><h2>还没有 Agent</h2><p>先新建一个，或从 ZCode 会话导入。</p></div>`}
+  </div>`;
+
+  const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.onclick = fn; };
+  bind("caRefresh", () => loadViewData("clusteragents"));
+  bind("caNewAgent", () => openModal());
+  bind("caImport", () => openSessionImport());
+  box.querySelectorAll("[data-agent-open]").forEach(el => el.onclick = () => {
+    switchView("workbench");
+    selectAgent(el.dataset.agentOpen);
+  });
+  box.querySelectorAll("[data-agent-test]").forEach(el => el.onclick = async () => {
+    try {
+      const data = await api(`/api/studio/agents/${encodeURIComponent(el.dataset.agentTest)}/test`,
+        {method: "POST", body: JSON.stringify({deep: true})});
+      S.checks["agent:" + el.dataset.agentTest] = data;
+      toast(data.ok ? "连接正常" : "连接失败");
+      renderClusterAgentsView(box);
+    } catch (e) { toast(e.message); }
+  });
+  box.querySelectorAll("[data-reveal]").forEach(el => el.onclick = () => revealPath(el.dataset.reveal));
+  box.querySelectorAll("[data-ag-provider]").forEach(select => select.onchange = async () => {
+    const id = select.dataset.agProvider;
+    const models = channelModels(select.value);
+    try {
+      await api(`/api/studio/agents/${encodeURIComponent(id)}`,
+        {method: "PATCH", body: JSON.stringify({provider_id: select.value,
+          model: models[0] || ""})});
+      toast("渠道已切换");
+      await loadViewData("clusteragents");
+    } catch (e) { toast(e.message); }
+  });
+  box.querySelectorAll("[data-ag-model]").forEach(select => select.onchange = async () => {
+    try {
+      await api(`/api/studio/agents/${encodeURIComponent(select.dataset.agModel)}`,
+        {method: "PATCH", body: JSON.stringify({model: select.value})});
+      toast("模型已切换");
+      await loadViewData("clusteragents");
+    } catch (e) { toast(e.message); }
+  });
+}
+
+async function openSessionImport() {
+  const modal = document.getElementById("importModal");
+  if (!modal) return;
+  modal.classList.remove("hidden");
+  // 渠道 / 模型下拉每次打开重建：用户可能刚在路由页加了渠道
+  const providerSelect = document.getElementById("importProvider");
+  if (providerSelect) {
+    providerSelect.innerHTML = [`<option value="">本机默认</option>`]
+      .concat((S.providers || []).map(p =>
+        `<option value="${esc(p.id)}">${esc(p.name)} · ${esc(p.protocol || p.kind || "")}</option>`))
+      .join("");
+  }
+  const modelWrap = document.getElementById("importModelWrap");
+  if (modelWrap) modelWrap.innerHTML = modelSelectHTML("", "", `id="importModel"`);
+  document.getElementById("importPickRow").classList.add("hidden");
+  document.getElementById("importSelected").textContent = "";
+  const body = document.getElementById("importBody");
+  body.innerHTML = `<div class="empty-mini">正在读取 ZCode 会话…</div>`;
+  try {
+    const data = await api("/api/studio/external-sessions?source=zcode&limit=300");
+    S.extSessions = data;
+    renderSessionImport();
+  } catch (e) {
+    body.innerHTML = `<div class="empty-mini">读取失败：${esc(e.message)}</div>`;
+  }
+}
+
+function renderSessionImport() {
+  const body = document.getElementById("importBody");
+  if (!body) return;
+  const data = S.extSessions || {};
+  if (!data.available) {
+    body.innerHTML = `<div class="empty-mini">这台机器上没有找到 ZCode 的会话库（~/.zcode/cli/db/db.sqlite）。</div>`;
+    return;
+  }
+  const needle = String(S.extQuery || "").trim().toLowerCase();
+  const items = (data.sessions || []).filter(item =>
+    !needle || `${item.title} ${item.directory}`.toLowerCase().includes(needle));
+  body.innerHTML = `
+    <div class="memory-toolbar">
+      <input class="search-input" id="importSearch" placeholder="搜索会话标题 / 目录" value="${esc(S.extQuery)}">
+      <span class="muted" style="font-size:10.5px">共 ${(data.sessions || []).length} 个会话 · 只读导入，不会修改 ZCode</span>
+    </div>
+    ${items.length ? `<div class="list-card import-list">${items.slice(0, 200).map(item => `<div class="list-row">
+      <div class="ic">${esc((item.title || "?").slice(0, 1))}</div>
+      <div class="grow">
+        <div class="name">${esc(item.title)}</div>
+        <div class="sub mono">${esc(item.directory || "—")} · ${item.messages} 条 · ${esc(fmtDate(item.updated_at))}</div>
+      </div>
+      <div class="tail"><button class="btn small primary" data-import-pick="${esc(item.session_id)}">导入</button></div>
+    </div>`).join("")}</div>`
+      : `<div class="empty-mini">没有匹配的会话</div>`}
+    <div class="import-note">
+      ZCode 是桌面应用，没有命令行入口，所以导入的是**会话上下文**：
+      对话记录会写进新 Agent 工作区的 <code>IMPORTED-SESSION.md</code>，
+      由平台上可用的执行体带着这段上下文接着做，而不是 ZCode 进程本身。
+    </div>`;
+  const search = document.getElementById("importSearch");
+  if (search) search.oninput = () => { S.extQuery = search.value; renderSessionImport(); };
+  body.querySelectorAll("[data-import-pick]").forEach(el => el.onclick = () => {
+    const item = (S.extSessions.sessions || []).find(s => s.session_id === el.dataset.importPick);
+    if (!item) return;
+    const nameInput = document.getElementById("importName");
+    const dirInput = document.getElementById("importWorkspace");
+    if (nameInput) nameInput.value = item.title;
+    if (dirInput && !dirInput.value) dirInput.value = "";
+    document.getElementById("importSelected").textContent = item.session_id;
+    document.getElementById("importPickRow").classList.remove("hidden");
+  });
+}
+
+async function submitSessionImport() {
+  const sessionId = (document.getElementById("importSelected") || {}).textContent || "";
+  if (!sessionId) { toast("先在上面选一个会话"); return; }
+  const name = (document.getElementById("importName") || {}).value || "";
+  const workspace = (document.getElementById("importWorkspace") || {}).value || "";
+  const providerId = (document.getElementById("importProvider") || {}).value || "";
+  const model = (document.getElementById("importModel") || {}).value || "";
+  try {
+    const data = await api("/api/studio/import-session", {
+      method: "POST",
+      body: JSON.stringify({source: "zcode", session_id: sessionId, name,
+        workspace, provider_id: providerId, model}),
+    });
+    let msg = `已导入 ${data.turns} 轮对话 → Agent「${data.agent.name}」`;
+    if (data.secret_hits) msg += `；注意：会话里有 ${data.secret_hits} 处疑似口令/密钥，已原样写进工作区`;
+    toast(msg);
+    document.getElementById("importModal").classList.add("hidden");
+    await loadAgents();
+    await loadViewData("clusteragents");
+  } catch (e) { toast(e.message); }
+}
+
 function renderClustersView(box) {
   if (!box) return;
   const cluster = S.cluster;
@@ -4370,6 +4835,8 @@ function renderHeader() {
       routes: ["路由", "本机可用的模型网关：Claude 设置、magpie、Ollama、LM Studio，可一键加为渠道"],
       clusters: ["集群控制台", "lead + worker 多角色长周期任务"],
       clusterchat: ["集群工作", "和主 Agent 聊清任务 → 确认任务卡 → 多执行体并排执行"],
+      clustertasks: ["集群任务", "所有集群的任务、执行体与成果物，可编辑任务细节、打开成果所在文件夹"],
+      clusteragents: ["集群 Agent", "执行体名单、参与的角色、模型路由，以及从 ZCode 导入会话"],
       artifacts: ["交付", "所有 Agent 的成果物，同名文件按版本聚合"],
       models: ["模型与智能体", "执行体、渠道、模型、角色卡与本机路由"],
       usage: ["用量", "按 Agent 汇总的 tokens 与花费"],
@@ -4933,6 +5400,15 @@ document.getElementById("saveProvider").onclick = () => saveProvider(false);
 document.getElementById("saveAndTestProvider").onclick = () => saveProvider(true);
 document.getElementById("extClose").onclick = closeExtensions;
 document.getElementById("extSave").onclick = saveExtensions;
+document.getElementById("importCancel").onclick = () => {
+  document.getElementById("importModal").classList.add("hidden");
+};
+document.getElementById("importConfirm").onclick = submitSessionImport;
+document.getElementById("importProvider").onchange = () => {
+  const wrap = document.getElementById("importModelWrap");
+  if (wrap) wrap.innerHTML = modelSelectHTML(
+    document.getElementById("importProvider").value, "", `id="importModel"`);
+};
 document.getElementById("clusterCancel").onclick = () => document.getElementById("clusterModal").classList.add("hidden");
 document.getElementById("clusterCreate").onclick = createClusterFromWizard;
 document.getElementById("addRoleCancel").onclick = () => document.getElementById("addRoleModal").classList.add("hidden");
