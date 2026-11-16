@@ -35,6 +35,10 @@ check("半透明表面令牌", HTML.includes("--surface-glass"));
 check("窗口阴影令牌", HTML.includes("--window-shadow"));
 check("命令面板挂载点", HTML.includes('id="commandPalette"') && HTML.includes('id="cmdkInput"'));
 check("命令面板入口", HTML.includes("window.sfCommandPalette"));
+check("输入框 / 技能提示", HTML.includes('id="slashPop"') || HTML.includes("slashState"));
+check("技能提示挂到两个输入框",
+  (HTML.match(/handleSlashKey\(/g) || []).length >= 3
+  && (HTML.match(/handleSlashInput\(/g) || []).length >= 3);
 check("WCO 标题栏挂载点", HTML.includes('id="sfTitlebar"'));
 check("任务栏状态同步", HTML.includes("function syncTaskbar") && HTML.includes("taskbarState(payload)"));
 const panel = fs.readFileSync(

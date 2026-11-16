@@ -600,6 +600,20 @@ main { min-width:0; display:flex; flex-direction:column; min-height:0; backgroun
 .model-pop-empty { padding:12px 8px; font-size:11px; color:var(--muted); text-align:center; }
 .field { position:relative; }
 
+/* 输入框 / 技能提示（复用浮层锚定与层级表） */
+.slash-pop { position:fixed; z-index:var(--z-pop); width:min(420px,86vw);
+  background:var(--card); border:1px solid var(--line); border-radius:10px;
+  box-shadow:var(--shadow); overflow:hidden; max-height:300px; overflow-y:auto;
+  animation:popIn .14s cubic-bezier(.2,.8,.3,1); transform-origin:top center; padding:4px; }
+.slash-item { display:flex; align-items:center; gap:8px; padding:6px 9px;
+  border-radius:7px; cursor:pointer; }
+.slash-item.on { background:var(--accent-soft); }
+.slash-item:hover { background:var(--pill); }
+.slash-name { flex:none; font-family:var(--code); font-size:11.5px; color:var(--fg); }
+.slash-desc { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; font-size:10.5px; color:var(--muted); text-align:right; }
+.slash-empty { padding:14px 10px; font-size:11.5px; color:var(--muted); text-align:center; }
+
 /* 用量图表 */
 @media (max-width:1100px) { .metrics { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 .ubar { display:block; height:5px; border-radius:99px; background:var(--line); overflow:hidden; }
@@ -994,9 +1008,9 @@ body.drop-active::after { content:"松开：把文件路径加入当前对话";
     </div>
     <div class="composer">
       <div class="composer-inner">
-        <textarea id="composer" placeholder="安排一个任务…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <textarea id="composer" placeholder="安排一个任务…（Enter 发送，Shift+Enter 换行，/ 看技能）"></textarea>
         <div class="row">
-          <span class="hint" id="composerHint">任务会写入工作区，完成后在右侧交付</span>
+          <span class="hint" id="composerHint">输入 <b>/</b> 查看可用技能 · 任务会写入工作区，完成后在右侧交付</span>
           <button class="send" id="send">发送 <span>↑</span></button>
         </div>
       </div>
@@ -3019,6 +3033,186 @@ function libraryRows(items, kind, agents) {
   }).join("");
 }
 
+/* ===== 输入框里的 / 技能提示 =====
+   用户不知道装了什么技能，靠记忆敲名字不现实。在输入框里打 `/` 就列出
+   当前 Agent 已挂载的技能（没挂载的也能看到并提示去挂），↑↓ 选、Enter 插入。 */
+const SLASH_COMMANDS = [
+  {id: "slash:clear", name: "清空", insert: "", hint: "清空输入框", builtin: true},
+];
+
+function agentSkills() {
+  const ids = new Set((S.agent && S.agent.skills) || []);
+  const lib = (S.library && S.library.skills) || [];
+  return lib.map(item => ({
+    id: item.id,
+    name: item.name,
+    description: item.description || "",
+    mounted: ids.has(item.id),
+  }));
+}
+
+let slashState = { open: false, items: [], index: 0, target: null, start: 0 };
+
+function slashPopHTML() {
+  if (!slashState.items.length) {
+    return `<div class="slash-empty">还没有安装技能。去「扩展库 → 导入技能」加一个。</div>`;
+  }
+  return slashState.items.map((item, i) => `<div class="slash-item ${i === slashState.index ? "on" : ""}"
+      data-slash="${i}" role="option" aria-selected="${i === slashState.index}">
+      <span class="slash-name">${esc(item.name)}</span>
+      ${item.mounted ? `<span class="tag green">已挂载</span>` : `<span class="tag">未挂载</span>`}
+      <span class="slash-desc">${esc((item.description || "").slice(0, 60))}</span>
+    </div>`).join("");
+}
+
+function ensureSlashPop() {
+  let pop = document.getElementById("slashPop");
+  if (pop) return pop;
+  pop = document.createElement("div");
+  pop.id = "slashPop";
+  pop.className = "slash-pop hidden";
+  pop.setAttribute("role", "listbox");
+  document.body.appendChild(pop);
+  return pop;
+}
+
+function renderSlashPop() {
+  const pop = ensureSlashPop();
+  pop.innerHTML = slashPopHTML();
+  pop.querySelectorAll("[data-slash]").forEach(el => {
+    el.onmousedown = (event) => {
+      event.preventDefault(); // 别让 textarea 失焦
+      pickSlash(Number(el.dataset.slash));
+    };
+  });
+  if (slashState.target && !pop.classList.contains("hidden") && S.slashAnchor) {
+    S.slashAnchor.place();
+  }
+}
+
+function openSlash(target, start) {
+  slashState.target = target;
+  slashState.start = start;
+  slashState.index = 0;
+  slashState.items = slashFilter("");
+  slashState.open = true;
+  const pop = ensureSlashPop();
+  pop.classList.remove("hidden");
+  renderSlashPop();
+  if (S.slashAnchor) { S.slashAnchor.destroy(); S.slashAnchor = null; }
+  S.slashAnchor = sfAnchor(target, pop, { offset: 6, align: "start", maxHeight: 300, minWidth: 320 });
+  S.slashAnchor.place();
+  // 扩展库没读过就先拉一次，否则列表是空的
+  if (!S.library) {
+    api("/api/studio/library").then(data => {
+      S.library = data;
+      if (slashState.open) {
+        slashState.items = slashFilter("");
+        renderSlashPop();
+      }
+    }).catch(() => { /* 拉不到就显示「还没有安装技能」 */ });
+  }
+}
+
+function closeSlash() {
+  slashState.open = false;
+  const pop = document.getElementById("slashPop");
+  if (pop) pop.classList.add("hidden");
+  if (S.slashAnchor) { S.slashAnchor.destroy(); S.slashAnchor = null; }
+}
+
+function slashFilter(query) {
+  const needle = String(query || "").toLowerCase();
+  const skills = agentSkills()
+    .filter(item => !needle || item.name.toLowerCase().includes(needle)
+      || (item.description || "").toLowerCase().includes(needle))
+    .map(item => ({...item, hint: item.mounted ? "插入技能名" : "未挂载（可先插入）"}));
+  const builtin = SLASH_COMMANDS
+    .filter(item => !needle || item.name.toLowerCase().includes(needle))
+    .map(item => ({id: item.id, name: item.name, description: item.hint, mounted: true, builtin: true}));
+  return [...skills.slice(0, 12), ...builtin];
+}
+
+function pickSlash(index) {
+  const item = slashState.items[index];
+  const target = slashState.target;
+  if (!item || !target) { closeSlash(); return; }
+  const before = target.value.slice(0, slashState.start);
+  const after = target.value.slice(target.selectionStart ?? target.value.length);
+  const inserted = item.builtin ? "" : `使用技能 ${item.name}：`;
+  target.value = before + inserted + after;
+  const caret = (before + inserted).length;
+  target.setSelectionRange(caret, caret);
+  target.dispatchEvent(new Event("input", { bubbles: true }));
+  closeSlash();
+  target.focus();
+  if (!item.builtin && !item.mounted) {
+    toast(`「${item.name}」还没挂到这个 Agent，插入的是文字提示`);
+  }
+}
+
+/** 输入框 keydown：/ 触发列表，列表开着时接管 ↑↓ / Enter / Esc。 */
+function handleSlashKey(event, target) {
+  if (event.key === "/" && !slashState.open) {
+    const caret = target.selectionStart ?? target.value.length;
+    const atLineStart = caret === 0 || target.value[caret - 1] === "\n"
+      || /\s$/.test(target.value.slice(Math.max(0, caret - 1), caret));
+    if (!atLineStart) return false;
+    // 延迟到字符写入之后，用 setTimeout 拿到插入 `/` 的位置
+    setTimeout(() => {
+      const pos = (target.selectionStart ?? target.value.length);
+      if (target.value[pos - 1] !== "/") return;
+      openSlash(target, pos - 1);
+    }, 0);
+    return false;
+  }
+  if (!slashState.open || slashState.target !== target) return false;
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    slashState.index = Math.min(slashState.index + 1, slashState.items.length - 1);
+    renderSlashPop();
+    return true;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    slashState.index = Math.max(0, slashState.index - 1);
+    renderSlashPop();
+    return true;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    pickSlash(slashState.index);
+    return true;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeSlash();
+    return true;
+  }
+  return false;
+}
+
+/** 输入内容变化：更新过滤词，`/` 被删掉就收起。 */
+function handleSlashInput(target) {
+  if (!slashState.open || slashState.target !== target) return;
+  const caret = target.selectionStart ?? target.value.length;
+  if (caret <= slashState.start || target.value[slashState.start] !== "/") {
+    closeSlash();
+    return;
+  }
+  slashState.index = 0;
+  slashState.items = slashFilter(target.value.slice(slashState.start + 1, caret));
+  renderSlashPop();
+}
+
+document.addEventListener("click", event => {
+  if (!slashState.open) return;
+  const pop = document.getElementById("slashPop");
+  if (pop && pop.contains(event.target)) return;
+  if (slashState.target && slashState.target.contains(event.target)) return;
+  closeSlash();
+});
+
 /* 桌面壳：原生右键菜单。只传 id/label，动作由页面自己执行。 */
 function canContextMenu() {
   return Boolean(window.synapforgeStudio
@@ -4789,7 +4983,7 @@ function renderClusterChatView(box) {
     body = `<div class="plan-chat">
       <div class="plan-chat-body" id="planChatBody"></div>
       <div class="plan-composer">
-        <textarea id="planInput" placeholder="描述你的目标，或回答主 Agent 的追问…（Enter 发送）"></textarea>
+        <textarea id="planInput" placeholder="描述你的目标，或回答主 Agent 的追问…（Enter 发送，/ 看技能）"></textarea>
         <div class="row">
           <span class="hint">${esc((plan.lead_name || "主 Agent"))} · 多轮对话，聊清楚后点「生成任务卡」</span>
           <button class="send" id="planSend">发送 ↑</button>
@@ -4860,9 +5054,13 @@ function bindClusterChat(box, phase) {
   const send = document.getElementById("planSend");
   if (send) send.onclick = sendPlanMessage;
   const input = document.getElementById("planInput");
-  if (input) input.addEventListener("keydown", e => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendPlanMessage(); }
-  });
+  if (input) {
+    input.addEventListener("keydown", e => {
+      if (handleSlashKey(e, e.target)) return;
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendPlanMessage(); }
+    });
+    input.addEventListener("input", e => handleSlashInput(e.target));
+  }
   const add = document.getElementById("planAddItem");
   if (add) add.onclick = () => {
     const items = readPlanItems();
@@ -6485,8 +6683,10 @@ document.getElementById("pKey").addEventListener("keydown", event => {
 });
 document.getElementById("send").onclick = sendTask;
 document.getElementById("composer").addEventListener("keydown", e => {
+  if (handleSlashKey(e, e.target)) return;
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendTask(); }
 });
+document.getElementById("composer").addEventListener("input", e => handleSlashInput(e.target));
 document.getElementById("previewClose").onclick = () => {
   document.getElementById("previewBox").classList.add("hidden");
   S.selectedArtifact = null; renderArtifacts();
@@ -6580,6 +6780,11 @@ async function ensurePaletteData() {
       S.clusters = data.clusters || [];
     }
   } catch (e) { /* ignore */ }
+  try {
+    if (!S.library) {
+      S.library = await api("/api/studio/library");
+    }
+  } catch (e) { /* ignore */ }
 }
 
 function paletteCommands() {
@@ -6612,6 +6817,34 @@ function paletteCommands() {
     id: "action:library", label: "导入技能 / 安装插件", hint: "动作 · 扩展库",
     run: () => switchView("library"),
   });
+  // 命令面板里也能直接看到技能，敲名字就能挂到当前 Agent
+  for (const skill of (S.library && S.library.skills) || []) {
+    const mounted = ((S.agent && S.agent.skills) || []).includes(skill.id);
+    out.push({
+      id: `skill:${skill.id}`,
+      label: skill.name,
+      hint: mounted ? "技能 · 已挂载" : "技能 · 未挂载（点开扩展库挂载）",
+      run: () => {
+        if (mounted) {
+          const el = document.getElementById("composer");
+          if (el) {
+            el.value = `使用技能 ${skill.name}：`;
+            el.focus();
+            el.setSelectionRange(el.value.length, el.value.length);
+          }
+          return;
+        }
+        switchView("library");
+        setTimeout(() => {
+          const input = document.getElementById("libSearch");
+          if (input) {
+            input.value = skill.name;
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+        }, 260);
+      },
+    });
+  }
   if (window.synapforgeStudio && window.synapforgeStudio.openDiagnostics) {
     out.push({
       id: "action:diagnostics", label: "诊断信息", hint: "动作 · 桌面壳",
