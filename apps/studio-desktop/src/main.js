@@ -5,7 +5,7 @@
 
 const {
   app, BrowserWindow, Menu, Notification, Tray, clipboard, dialog, globalShortcut,
-  ipcMain, nativeImage, shell,
+  ipcMain, nativeImage, screen, shell,
 } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -32,6 +32,20 @@ const REPO_ROOT = app.isPackaged
   : path.resolve(__dirname, "..", "..", "..");
 const WINDOW_STATE = path.join(app.getPath("userData"), "window-state.json");
 const SHELL_CONFIG = loadShellConfig(app.getPath("userData"));
+// WCO：网页画标题栏，最小化/最大化/关闭仍由系统绘制（Snap Layouts 保留）。
+const WCO_ENABLED = SHELL_CONFIG.titleBar === "wco" && process.platform === "win32";
+
+function titlebarColors(theme) {
+  return String(theme) === "light"
+    ? { color: "#f4f4f6", symbolColor: "#1c1c21" }
+    : { color: "#16181d", symbolColor: "#ededf1" };
+}
+
+function shellUrl(info) {
+  const url = new URL(info.local_url);
+  if (WCO_ENABLED) url.searchParams.set("shell", "wco");
+  return url;
+}
 const ASSETS = path.join(__dirname, "..", "assets");
 const ERROR_PAGE = path.join(__dirname, "..", "renderer", "error.html");
 const DIAG_PAGE = path.join(__dirname, "..", "renderer", "diagnostics.html");
@@ -40,6 +54,7 @@ let core = null;
 let win = null;
 let tray = null;
 let diagWin = null;
+let appMenu = null;
 let quitting = false;
 let lastStatus = "idle";
 let loadedOrigin = null;
@@ -339,8 +354,22 @@ function wireWindow(window) {
   window.on("move", scheduleSaveWindowState);
 }
 
+/** 记住的尺寸可能来自另一块屏/另一个缩放比例：夹到当前屏幕工作区内。 */
+function clampWindowState(state) {
+  const display = screen.getDisplayNearestPoint({
+    x: Number.isFinite(state.x) ? state.x : 0,
+    y: Number.isFinite(state.y) ? state.y : 0,
+  }) || screen.getPrimaryDisplay();
+  const area = display.workArea;
+  const width = Math.min(Math.max(state.width || 1280, 960), area.width);
+  const height = Math.min(Math.max(state.height || 860, 640), area.height);
+  const x = Math.min(Math.max(state.x ?? area.x + 40, area.x), area.x + area.width - width);
+  const y = Math.min(Math.max(state.y ?? area.y + 40, area.y), area.y + area.height - height);
+  return { ...state, width, height, x, y };
+}
+
 function createWindow() {
-  const state = readWindowState();
+  const state = clampWindowState(readWindowState());
   win = new BrowserWindow({
     width: state.width,
     height: state.height,
@@ -351,6 +380,8 @@ function createWindow() {
     show: false,
     backgroundColor: "#0b0f14",
     title: "synapforge studio",
+    titleBarStyle: WCO_ENABLED ? "hidden" : "default",
+    ...(WCO_ENABLED ? { titleBarOverlay: { ...titlebarColors("dark"), height: 40 } } : {}),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -370,7 +401,7 @@ function createWindow() {
 async function loadWorkbench(info) {
   if (!win || win.isDestroyed()) createWindow();
   loadedOrigin = new URL(info.local_url).origin;
-  await win.loadURL(info.local_url);
+  await win.loadURL(shellUrl(info).toString());
 }
 
 async function showError(message) {
@@ -384,7 +415,7 @@ async function showError(message) {
 
 async function loadUrlWithTarget(target) {
   if (!core || !core.info || !win || win.isDestroyed()) return;
-  const url = new URL(core.info.local_url);
+  const url = shellUrl(core.info);
   if (target.view) url.searchParams.set("view", target.view);
   if (target.cluster) url.searchParams.set("cluster", target.cluster);
   if (target.run) url.searchParams.set("run", target.run);
@@ -608,6 +639,31 @@ function registerIpc() {
     return true;
   });
 
+  // WCO 下菜单栏不显示：标题栏里的「⋯」重新打开应用菜单。
+  ipcMain.handle("menu:appPopup", () => {
+    if (!appMenu || !win || win.isDestroyed()) return false;
+    appMenu.popup({ window: win });
+    return true;
+  });
+
+  ipcMain.handle("shell:windowInfo", () => {
+    if (!win || win.isDestroyed()) return null;
+    return {
+      wco: WCO_ENABLED,
+      visible: win.isVisible(),
+      focused: win.isFocused(),
+      bounds: win.getBounds(),
+      content: win.getContentBounds(),
+      menuVisible: win.isMenuBarVisible(),
+    };
+  });
+
+  ipcMain.handle("shell:titlebarTheme", (_event, theme) => {
+    if (!WCO_ENABLED || !win || win.isDestroyed()) return false;
+    win.setTitleBarOverlay({ ...titlebarColors(String(theme)), height: 40 });
+    return true;
+  });
+
   ipcMain.handle("app:openDataDir", () => openDataDir());
   ipcMain.handle("app:diagnostics", () => openDiagnostics());
   ipcMain.handle("app:quit", () => app.quit());
@@ -651,7 +707,8 @@ if (!app.requestSingleInstanceLock()) {
     });
 
     registerIpc();
-    Menu.setApplicationMenu(buildAppMenu());
+    appMenu = buildAppMenu();
+    Menu.setApplicationMenu(appMenu);
     createTray();
     registerGlobalShortcut();
     createWindow();

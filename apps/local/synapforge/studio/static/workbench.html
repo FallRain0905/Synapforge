@@ -6,7 +6,11 @@
 <title>synapforge studio · Agent 工作台</title>
 <script>try{const t=localStorage.getItem("sf.studio.theme"); if(t==="light"||t==="dark") document.documentElement.dataset.theme=t;}catch(e){}
 /* 桌面壳专属样式都挂在 .desktop-shell 下；浏览器里没有桥，一行都不生效。 */
-if (window.synapforgeStudio) document.documentElement.classList.add("desktop-shell");</script>
+if (window.synapforgeStudio) document.documentElement.classList.add("desktop-shell");
+/* WCO 模式（系统标题栏隐藏、网页画标题栏）由壳通过 ?shell=wco 告知 */
+if (new URLSearchParams(location.search).get("shell") === "wco") {
+  document.documentElement.classList.add("wco");
+}</script>
 <style>
 /* synapforge studio — 对齐 magpie 的克制深色工作台 */
 :root {
@@ -69,6 +73,31 @@ a { color:inherit; text-decoration:none; }
 /* 只在桌面壳里出现的控件（浏览器里没有桥，强制隐藏） */
 [data-shell-only] { display:none; }
 html.desktop-shell [data-shell-only] { display:inline-flex; }
+
+/* ===== 桌面壳：WCO 标题栏（网页画内容，三键仍是系统原生） ===== */
+#sfTitlebar { display:none; }
+html.desktop-shell.wco #sfTitlebar { display:flex; align-items:center; gap:12px;
+  height:var(--titlebar-h); padding:0 16px 0 14px; background:var(--card);
+  border-bottom:.5px solid var(--line); -webkit-app-region:drag; user-select:none; }
+html.desktop-shell.wco #sfTitlebar .sft-brand { display:flex; align-items:center; gap:8px; }
+html.desktop-shell.wco #sfTitlebar .sft-logo { width:20px; height:20px; border-radius:6px;
+  display:grid; place-items:center; background:var(--accent-soft); color:var(--accent);
+  font-size:11px; font-weight:700; }
+html.desktop-shell.wco #sfTitlebar .sft-name { font-size:12px; color:var(--fg-2); letter-spacing:.2px; }
+html.desktop-shell.wco #sfTitlebar .sft-crumb { flex:1; min-width:0; font-size:12px;
+  color:var(--fg-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+html.desktop-shell.wco #sfTitlebar .sft-menu { flex:none; width:26px; height:24px; border:0;
+  border-radius:6px; background:transparent; color:var(--muted); cursor:pointer;
+  font-size:14px; line-height:1; -webkit-app-region:no-drag; }
+html.desktop-shell.wco #sfTitlebar .sft-menu:hover { background:var(--pill); color:var(--fg); }
+html.desktop-shell.wco #sfTitlebar .sft-status { flex:none; padding-right:148px;
+  font-size:11px; color:var(--muted); }
+html.desktop-shell.wco #sfTitlebar .sft-status[data-status="running"],
+html.desktop-shell.wco #sfTitlebar .sft-status[data-status="queued"] { color:var(--green); }
+html.desktop-shell.wco #sfTitlebar .sft-status[data-status="failed"] { color:var(--red); }
+html.desktop-shell.wco .app { height:calc(100vh - var(--titlebar-h)); }
+html.desktop-shell.wco .side-top { display:none; }
+html.desktop-shell.wco .sidebar { padding-top:6px; }
 
 .app { display:grid; grid-template-columns:var(--side-w) minmax(0,1fr) var(--inspector-w); height:100vh; }
 @media (max-width:1220px) { .app { grid-template-columns:var(--side-w) minmax(0,1fr); } .inspector { display:none; } }
@@ -836,6 +865,12 @@ body.drop-active::after { content:"松开：把文件路径加入当前对话";
 </style>
 </head>
 <body>
+<div id="sfTitlebar" aria-hidden="true">
+  <div class="sft-brand"><span class="sft-logo">S</span><span class="sft-name">synapforge</span></div>
+  <div class="sft-crumb" id="sfTitleCrumb">synapforge studio</div>
+  <button type="button" class="sft-menu" id="sfAppMenu" title="应用菜单">⋯</button>
+  <div class="sft-status" id="sfTitleStatus"></div>
+</div>
 <div class="app">
   <aside class="sidebar">
     <div class="side-top">
@@ -6266,6 +6301,14 @@ async function createAgent() {
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
   try { localStorage.setItem("sf.studio.theme", theme); } catch (e) {}
+  // 标题栏是系统画的：跟着网页主题换底色和按钮颜色
+  if (window.synapforgeStudio && window.synapforgeStudio.setTitlebarTheme) {
+    void window.synapforgeStudio.setTitlebarTheme(theme);
+  }
+}
+
+if (window.synapforgeStudio && window.synapforgeStudio.setTitlebarTheme) {
+  void window.synapforgeStudio.setTitlebarTheme(document.documentElement.dataset.theme || "dark");
 }
 
 document.getElementById("newAgent").onclick = openModal;
@@ -6395,6 +6438,40 @@ document.addEventListener("keydown", event => {
   closeArtifactDrawer();
   event.stopPropagation();
 }, true);
+
+// ===== 桌面壳：WCO 标题栏内容 =====
+function updateShellTitlebar() {
+  if (!document.documentElement.classList.contains("wco")) return;
+  const crumb = document.getElementById("sfTitleCrumb");
+  const status = document.getElementById("sfTitleStatus");
+  if (crumb) {
+    const parts = [];
+    const root = document.getElementById("crumbRoot");
+    const name = document.getElementById("agentName");
+    if (root && root.textContent.trim()) parts.push(root.textContent.trim());
+    if (name && name.textContent.trim()) parts.push(name.textContent.trim());
+    crumb.textContent = parts.join(" / ") || "synapforge studio";
+  }
+  if (status) {
+    const stage = String((S.run && S.run.status) || "").toUpperCase();
+    status.textContent = stage ? `${S.agent ? S.agent.name + " · " : ""}${stage}` : "";
+    status.dataset.status = stage.toLowerCase();
+  }
+}
+
+if (document.documentElement.classList.contains("wco")) {
+  const appMenuButton = document.getElementById("sfAppMenu");
+  if (appMenuButton && window.synapforgeStudio && window.synapforgeStudio.appMenu) {
+    appMenuButton.onclick = () => { void window.synapforgeStudio.appMenu(); };
+  }
+  // 面包屑/状态由 renderHeader 反复重写，监听它们比改每个渲染入口更稳。
+  const shellTitleObserver = new MutationObserver(updateShellTitlebar);
+  ["crumbRoot", "agentName", "topChips"].forEach(id => {
+    const node = document.getElementById(id);
+    if (node) shellTitleObserver.observe(node, { childList: true, subtree: true, characterData: true });
+  });
+  updateShellTitlebar();
+}
 
 // 粘性跟随挂到主滚动容器上：一次挂载，之后所有渲染都走 sfStick.follow()
 sfStick.attach(document.getElementById("session"));
