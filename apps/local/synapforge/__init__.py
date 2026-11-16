@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 # 桌面壳拿它做「关于」与 /health；与平台版本解耦，单独递增。
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _API_ROOT = _REPO_ROOT / "apps" / "api"
