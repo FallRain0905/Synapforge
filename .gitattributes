@@ -1,3 +1,6 @@
 # studio 的单页 HTML 在 Windows 上一直是 CRLF；`git diff --check` 默认把行尾 CR
 # 当成尾随空白，会让每次改这个文件都报一堆假警告。
 apps/local/synapforge/studio/static/*.html whitespace=cr-at-eol
+# 桌面端壳的 JSON / Python 也是 CRLF（npm 与 Python312 都会保留），同理。
+apps/studio-desktop/*.json whitespace=cr-at-eol
+apps/local/synapforge/*.py whitespace=cr-at-eol
