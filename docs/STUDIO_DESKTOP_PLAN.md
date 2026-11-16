@@ -1,6 +1,8 @@
 # studio 原生桌面端计划（STUDIO-DESKTOP）
 
 > 2026-11-16 · 状态：**P0–P3 已验收，P4 部分交付（Mica/独立快速面板未做）**
+> 后续「桌面感」美化（WCO 标题栏 / Mica / 右键菜单 / 任务栏 / 命令面板 / 快速面板）见
+> [`STUDIO_DESKTOP_POLISH_PLAN.md`](STUDIO_DESKTOP_POLISH_PLAN.md)。
 > 范围：把 `apps/local` 的 studio（本地 Agent 工具）做成双击即用的桌面应用。
 > 不是云端工作台客户端（那是 `apps/desktop` 0.2.1，另一条产品线）。
 
