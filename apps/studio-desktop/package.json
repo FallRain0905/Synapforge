@@ -1,6 +1,6 @@
 {
   "name": "synapforge-studio-desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "synapforge studio 桌面壳（Electron + 本地 Python 内核）",
   "author": "FallRain0905",
