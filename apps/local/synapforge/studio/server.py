@@ -30,6 +30,7 @@ from . import backends
 from . import capabilities as studio_capabilities
 from . import commands as studio_commands
 from . import external as studio_external
+from . import notifications as studio_notifications
 from . import providers as studio_providers
 from . import plugins as studio_plugins
 from . import profiles as studio_profiles
@@ -315,6 +316,19 @@ class _Handler(BaseHTTPRequestHandler):
                         "pid": os.getpid(),
                         "port": getattr(self.server, "server_port", 0),
                         "uptime_s": round(max(0.0, time.time() - started), 1)})
+            return
+        if tail == ["notifications"]:
+            try:
+                limit = int((query.get("limit") or ["20"])[0] or 20)
+            except ValueError:
+                limit = 20
+            store = self._store()
+            try:
+                since = (query.get("since") or [""])[0]
+                self._json(studio_notifications.recent_events(
+                    store, since=since, limit=limit))
+            finally:
+                store.close()
             return
         if tail == ["state"]:
             cluster_id = (query.get("cluster_id") or [None])[0]

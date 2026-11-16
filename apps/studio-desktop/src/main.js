@@ -3,7 +3,9 @@
 // synapforge studio 桌面壳：单实例、托盘常驻、内核生命周期、窗口与菜单。
 // 业务一切都在本地内核里；壳只负责"让一个本地网页活得像桌面应用"。
 
-const { app, BrowserWindow, Menu, Tray, dialog, ipcMain, nativeImage, shell } = require("electron");
+const {
+  app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, shell,
+} = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -29,6 +31,10 @@ let quitting = false;
 let lastStatus = "idle";
 let loadedOrigin = null;
 let saveTimer = null;
+let notifyTimer = null;
+let notifyCursor = "";
+const notifySeen = new Set();
+const STATUS_LABEL = { DONE: "完成", FAILED: "失败", STOPPED: "已停止" };
 
 function readWindowState() {
   try {
@@ -288,6 +294,68 @@ async function showError(message) {
   if (!win.isVisible()) win.show();
 }
 
+async function loadUrlWithTarget(target) {
+  if (!core || !core.info || !win || win.isDestroyed()) return;
+  const url = new URL(core.info.local_url);
+  if (target.cluster) url.searchParams.set("cluster", target.cluster);
+  if (target.run) url.searchParams.set("run", target.run);
+  loadedOrigin = url.origin;
+  await win.loadURL(url.toString());
+}
+
+async function openNotificationTarget(item) {
+  showWindow();
+  if (!win || win.isDestroyed()) return;
+  const target = item.kind === "cluster" ? { cluster: item.id } : { run: item.id };
+  try {
+    // 页面已经在跑：直接调前端入口，不重新加载（保留当前未提交的输入）。
+    const handled = await win.webContents.executeJavaScript(
+      `window.sfOpen ? window.sfOpen(${JSON.stringify(target)}) : false`, true);
+    if (handled) return;
+  } catch {
+    /* 页面还没加载好，退回 URL */
+  }
+  await loadUrlWithTarget(target);
+}
+
+function showNativeNotification(item) {
+  if (!Notification.isSupported()) return;
+  const label = STATUS_LABEL[item.status] || item.status;
+  const isCluster = item.kind === "cluster";
+  const title = isCluster
+    ? `集群「${item.title}」${label}`
+    : `${item.agent_name || "Agent"} · 任务${label}`;
+  const body = isCluster ? "点开查看任务与成果" : item.title;
+  if (!app.isPackaged) console.log("[notify]", title, body);
+  const note = new Notification({ title, body });
+  note.on("click", () => {
+    void openNotificationTarget(item);
+  });
+  note.show();
+}
+
+async function pollNotifications() {
+  if (!core || core.status !== "ready") return;
+  const payload = await core.notifications(notifyCursor);
+  if (!payload) return;
+  notifyCursor = payload.cursor || notifyCursor;
+  for (const item of payload.items || []) {
+    const key = `${item.kind}:${item.id}:${item.status}`;
+    if (notifySeen.has(key)) continue;
+    notifySeen.add(key);
+    // 用户正盯着窗口时不再弹系统通知：页面自己的流式状态已经说明了结果。
+    if (win && !win.isDestroyed() && win.isVisible() && win.isFocused()) continue;
+    showNativeNotification(item);
+  }
+}
+
+function startNotificationPolling() {
+  if (notifyTimer) return;
+  notifyTimer = setInterval(() => {
+    void pollNotifications();
+  }, 5000);
+}
+
 async function boot() {
   setStatus("starting");
   try {
@@ -357,6 +425,7 @@ if (!app.requestSingleInstanceLock()) {
     Menu.setApplicationMenu(buildAppMenu());
     createTray();
     createWindow();
+    startNotificationPolling();
     await boot();
 
     app.on("activate", () => showWindow());
@@ -366,6 +435,10 @@ if (!app.requestSingleInstanceLock()) {
     if (quitting) return;
     event.preventDefault();
     quitting = true;
+    if (notifyTimer) {
+      clearInterval(notifyTimer);
+      notifyTimer = null;
+    }
     saveWindowState();
     const done = () => app.exit(0);
     if (!core) {

@@ -6010,7 +6010,39 @@ document.addEventListener("keydown", event => {
 
 // 粘性跟随挂到主滚动容器上：一次挂载，之后所有渲染都走 sfStick.follow()
 sfStick.attach(document.getElementById("session"));
-loadAgents().then(() => { if (S.view === "clusterchat") loadViewData("clusterchat"); });
+
+// 桌面壳的跳转入口：通知点击和深链都走这里，不重新加载页面。
+// 返回 true 表示认出了目标，壳据此决定要不要退回 URL 加载。
+window.sfOpen = async function (target) {
+  if (!target || typeof target !== "object") return false;
+  if (target.run) {
+    S.runDetail = { id: String(target.run) };
+    switchView("run");
+    return true;
+  }
+  if (target.cluster) {
+    S.taskClusterId = String(target.cluster);
+    switchView("clustertasks");
+    return true;
+  }
+  if (target.view) {
+    switchView(String(target.view));
+    return true;
+  }
+  return false;
+};
+
+loadAgents().then(() => {
+  const params = new URLSearchParams(location.search);
+  const target = {
+    view: params.get("view") || "",
+    cluster: params.get("cluster") || "",
+    run: params.get("run") || "",
+  };
+  if (target.view || target.cluster || target.run) return window.sfOpen(target);
+  if (S.view === "clusterchat") loadViewData("clusterchat");
+  return null;
+});
 setInterval(() => { if (S.agent && (!S.stream || S.stream.readyState === 2)) { /* idle refresh */ } }, 5000);
 </script>
 </body>

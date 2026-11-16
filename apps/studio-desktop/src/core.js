@@ -111,6 +111,22 @@ class StudioCore {
     }
   }
 
+  async notifications(since = "") {
+    const info = this.info;
+    if (!info || !info.port || !info.token || this.status !== "ready") return null;
+    const query = since ? `?since=${encodeURIComponent(since)}` : "";
+    try {
+      const response = await fetch(`http://127.0.0.1:${info.port}/api/studio/notifications${query}`, {
+        headers: { "X-Studio-Token": info.token },
+        signal: AbortSignal.timeout(4000),
+      });
+      if (!response.ok) return null;
+      return await response.json();
+    } catch {
+      return null;
+    }
+  }
+
   async request(info, method, apiPath) {
     const response = await fetch(`http://127.0.0.1:${info.port}${apiPath}`, {
       method,
