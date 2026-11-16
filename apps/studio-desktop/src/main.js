@@ -4,7 +4,8 @@
 // 业务一切都在本地内核里；壳只负责"让一个本地网页活得像桌面应用"。
 
 const {
-  app, BrowserWindow, Menu, Notification, Tray, dialog, ipcMain, nativeImage, shell,
+  app, BrowserWindow, Menu, Notification, Tray, dialog, globalShortcut, ipcMain,
+  nativeImage, shell,
 } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -25,10 +26,12 @@ const REPO_ROOT = app.isPackaged
 const WINDOW_STATE = path.join(app.getPath("userData"), "window-state.json");
 const ASSETS = path.join(__dirname, "..", "assets");
 const ERROR_PAGE = path.join(__dirname, "..", "renderer", "error.html");
+const DIAG_PAGE = path.join(__dirname, "..", "renderer", "diagnostics.html");
 
 let core = null;
 let win = null;
 let tray = null;
+let diagWin = null;
 let quitting = false;
 let lastStatus = "idle";
 let loadedOrigin = null;
@@ -118,6 +121,7 @@ function buildTrayMenu() {
       click: (item) => setLoginAtStartup(item.checked),
     },
     { type: "separator" },
+    { label: "诊断信息…", click: () => openDiagnostics() },
     { label: "检查更新…", click: () => void promptUpdate(win) },
     { label: "退出", click: () => app.quit() },
   ]);
@@ -199,6 +203,7 @@ function buildAppMenu() {
           },
         },
         { label: "查看内核日志", click: () => openLog() },
+        { label: "诊断信息…", click: () => openDiagnostics() },
         { type: "separator" },
         { label: "检查更新…", click: () => void promptUpdate(win) },
       ],
@@ -211,7 +216,9 @@ function toggleWindow() {
     createWindow();
     return;
   }
-  if (win.isVisible() && !win.isMinimized()) {
+  // 全局快捷键要能"按一下收、再按一下回来"：只在已聚焦时收起，
+  // 否则（被别的窗口盖住）先把它叫到前面。
+  if (win.isVisible() && win.isFocused() && !win.isMinimized()) {
     win.hide();
   } else {
     showWindow();
@@ -241,6 +248,50 @@ function openLog() {
     shell.showItemInFolder(core.logPath);
   } else {
     void shell.openPath(core.stateDir);
+  }
+}
+
+function openDiagnostics() {
+  if (diagWin && !diagWin.isDestroyed()) {
+    diagWin.show();
+    diagWin.focus();
+    return;
+  }
+  diagWin = new BrowserWindow({
+    width: 780,
+    height: 640,
+    minWidth: 560,
+    minHeight: 420,
+    parent: win && !win.isDestroyed() ? win : undefined,
+    show: false,
+    backgroundColor: "#0b0f14",
+    title: "synapforge studio · 诊断",
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+    },
+  });
+  diagWin.webContents.setWindowOpenHandler(({ url }) => {
+    if (isHttp(url)) void shell.openExternal(url);
+    return { action: "deny" };
+  });
+  diagWin.once("ready-to-show", () => diagWin.show());
+  diagWin.on("closed", () => {
+    diagWin = null;
+  });
+  void diagWin.loadFile(DIAG_PAGE);
+}
+
+function registerGlobalShortcut() {
+  try {
+    const ok = globalShortcut.register("CommandOrControl+Shift+Space", () => toggleWindow());
+    if (!ok) console.log("[shortcut] Ctrl+Shift+Space 注册失败（可能被其他应用占用）");
+  } catch (error) {
+    console.log("[shortcut] 注册失败", String(error));
   }
 }
 
@@ -480,7 +531,16 @@ function registerIpc() {
     external: core.external,
     error: core.lastError,
     port: core.info ? core.info.port : null,
+    pid: core.info ? core.info.pid : null,
+    version: core.version,
     stateDir: core.stateDir,
+    logPath: core.logPath,
+  }));
+  ipcMain.handle("app:info", () => ({
+    version: app.getVersion(),
+    electron: process.versions.electron,
+    chrome: process.versions.chrome,
+    platform: process.platform,
   }));
   ipcMain.handle("app:autostart", () => loginAtStartup());
   ipcMain.handle("app:setAutostart", (_event, enabled) => {
@@ -488,6 +548,7 @@ function registerIpc() {
     return loginAtStartup();
   });
   ipcMain.handle("app:openDataDir", () => openDataDir());
+  ipcMain.handle("app:diagnostics", () => openDiagnostics());
   ipcMain.handle("app:quit", () => app.quit());
   ipcMain.handle("log:tail", () => core.tailLog());
 }
@@ -530,6 +591,7 @@ if (!app.requestSingleInstanceLock()) {
     registerIpc();
     Menu.setApplicationMenu(buildAppMenu());
     createTray();
+    registerGlobalShortcut();
     createWindow();
     startNotificationPolling();
     await boot();
@@ -545,6 +607,7 @@ if (!app.requestSingleInstanceLock()) {
       clearInterval(notifyTimer);
       notifyTimer = null;
     }
+    globalShortcut.unregisterAll();
     saveWindowState();
     const done = () => app.exit(0);
     if (!core) {

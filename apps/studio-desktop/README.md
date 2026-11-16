@@ -79,3 +79,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ..\..\scripts\build-studio-d
   - 第二次启动会把 URL 转发给已有实例（单实例 argv 转发）
 - **拖拽**：文件拖进窗口 → 绝对路径插入当前对话（含空格的路径自动加引号），
   走 Electron 32+ 的 `webUtils.getPathForFile`（`File.path` 已被移除）
+
+### P4 部分（已验收）
+
+- **全局快捷键**：`Ctrl+Shift+Space` 唤起/收起主窗（已聚焦再按时收起）
+- **诊断页**：托盘或「帮助 → 诊断信息…」；展示壳/内核版本、端口、PID、数据目录、日志尾部，
+  可重启内核；每 2s 自动刷新
+- 未做：Win11 Mica/自绘标题栏（需要整页透明化，风险大于收益）、独立快速面板（当前快捷键
+  直接唤起主窗）

@@ -8,9 +8,11 @@ contextBridge.exposeInMainWorld("synapforgeStudio", {
   platform: process.platform,
   restartCore: () => ipcRenderer.invoke("core:restart"),
   status: () => ipcRenderer.invoke("core:status"),
+  info: () => ipcRenderer.invoke("app:info"),
   autostart: () => ipcRenderer.invoke("app:autostart"),
   setAutostart: (enabled) => ipcRenderer.invoke("app:setAutostart", Boolean(enabled)),
   openDataDir: () => ipcRenderer.invoke("app:openDataDir"),
+  openDiagnostics: () => ipcRenderer.invoke("app:diagnostics"),
   quit: () => ipcRenderer.invoke("app:quit"),
   tailLog: () => ipcRenderer.invoke("log:tail"),
   // 拖进窗口的文件：Electron 32+ 删掉了 File.path，只能走 webUtils。

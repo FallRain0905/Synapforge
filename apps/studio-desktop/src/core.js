@@ -70,6 +70,7 @@ class StudioCore {
     this.wantStop = false;
     this.restarts = 0;
     this.lastError = "";
+    this.version = "";
     this.lines = [];
   }
 
@@ -97,17 +98,17 @@ class StudioCore {
   }
 
   async health(info, timeout = 2500) {
-    if (!info || !info.port || !info.token) return false;
+    if (!info || !info.port || !info.token) return null;
     try {
       const response = await fetch(`http://127.0.0.1:${info.port}/api/studio/health`, {
         headers: { "X-Studio-Token": info.token },
         signal: AbortSignal.timeout(timeout),
       });
-      if (!response.ok) return false;
+      if (!response.ok) return null;
       const payload = await response.json();
-      return Boolean(payload && payload.ok && payload.contract === CONTRACT);
+      return payload && payload.ok && payload.contract === CONTRACT ? payload : null;
     } catch {
-      return false;
+      return null;
     }
   }
 
@@ -142,7 +143,9 @@ class StudioCore {
   async attachIfRunning() {
     const info = this.readHandshake();
     if (!info || !pidAlive(info.pid)) return null;
-    if (!(await this.health(info))) return null;
+    const health = await this.health(info);
+    if (!health) return null;
+    this.version = String(health.version || "");
     this.info = info;
     this.external = true;
     this.emit("ready");
@@ -226,7 +229,11 @@ class StudioCore {
 
   async _waitForHealth(info) {
     for (let i = 0; i < 40; i += 1) {
-      if (await this.health(info)) return;
+      const payload = await this.health(info);
+      if (payload) {
+        this.version = String(payload.version || "");
+        return;
+      }
       await sleep(150);
     }
     throw new Error("内核已写握手，但 /health 不通");

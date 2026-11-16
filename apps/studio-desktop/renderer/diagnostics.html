@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>synapforge studio · 诊断</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 22px 24px 28px;
+    background: #0b0f14; color: #e6edf3;
+    font: 13px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  h1 { margin: 0 0 2px; font-size: 16px; font-weight: 600; }
+  .hint { margin: 0 0 18px; color: #8b98a5; font-size: 12.5px; }
+  .grid { display: grid; grid-template-columns: 110px 1fr; gap: 6px 12px; margin-bottom: 16px; }
+  .k { color: #8b98a5; }
+  .v { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12.5px; word-break: break-all; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px;
+           border: 1px solid #2a3a4a; background: #141e28; }
+  .badge.ready { color: #6ee7a8; border-color: #1f6f4a; }
+  .badge.failed, .badge.crashed { color: #ff9b9b; border-color: #7a2b2b; }
+  .badge.starting { color: #ffd479; border-color: #7a632b; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; margin: 14px 0; }
+  button {
+    border: 1px solid #2a3a4a; background: #16202b; color: #e6edf3;
+    border-radius: 8px; padding: 7px 13px; font: inherit; cursor: pointer;
+  }
+  button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  button:hover:not(:disabled) { filter: brightness(1.12); }
+  details { background: #0e151d; border: 1px solid #1f2a36; border-radius: 10px; padding: 10px 14px; }
+  summary { cursor: pointer; color: #9aa7b4; }
+  pre { margin: 10px 0 0; max-height: 38vh; overflow: auto; white-space: pre-wrap;
+        word-break: break-word; font: 12px/1.5 Consolas, "Cascadia Mono", monospace; color: #c9d4df; }
+  .err { color: #ff9b9b; }
+</style>
+</head>
+<body>
+  <h1>诊断信息</h1>
+  <p class="hint">壳只读展示；重启内核不会丢任务（内核自己收尾）。状态每 2 秒自动刷新。</p>
+
+  <div class="grid">
+    <div class="k">壳版本</div><div class="v" id="shell-version">—</div>
+    <div class="k">Electron</div><div class="v" id="electron">—</div>
+    <div class="k">内核状态</div><div class="v"><span class="badge" id="core-status">—</span></div>
+    <div class="k">内核版本</div><div class="v" id="core-version">—</div>
+    <div class="k">内核地址</div><div class="v" id="core-address">—</div>
+    <div class="k">最近错误</div><div class="v err" id="core-error">—</div>
+    <div class="k">数据目录</div><div class="v" id="state-dir">—</div>
+    <div class="k">内核日志</div><div class="v" id="log-path">—</div>
+  </div>
+
+  <div class="row">
+    <button class="primary" id="restart">重启内核</button>
+    <button id="open-data">打开数据目录</button>
+    <button id="reload-log">刷新日志</button>
+    <button id="close">关闭</button>
+  </div>
+
+  <details open>
+    <summary>内核日志（尾部）</summary>
+    <pre id="log">（点「刷新日志」读取）</pre>
+  </details>
+
+<script>
+  const bridge = window.synapforgeStudio;
+  const $ = (id) => document.getElementById(id);
+  const LABELS = { ready: "运行中", starting: "启动中", crashed: "异常重启中",
+                   failed: "启动失败", stopped: "已停止", idle: "未启动" };
+
+  async function refresh() {
+    if (!bridge) return;
+    try {
+      const [status, info] = await Promise.all([bridge.status(), bridge.info()]);
+      $("shell-version").textContent = info.version || "—";
+      $("electron").textContent = info.electron ? `${info.electron}（Chromium ${info.chrome}）` : "—";
+      const badge = $("core-status");
+      badge.textContent = LABELS[status.status] || status.status;
+      badge.className = `badge ${status.status || ""}`;
+      $("core-version").textContent = status.version || "—";
+      $("core-address").textContent = status.port
+        ? `127.0.0.1:${status.port}${status.external ? "（外部实例）" : ""}`
+        : "未连接";
+      $("core-error").textContent = status.error || "—";
+      $("state-dir").textContent = status.stateDir || "—";
+      $("log-path").textContent = status.logPath || "—";
+    } catch (error) {
+      $("core-error").textContent = String(error);
+    }
+  }
+
+  async function loadLog() {
+    if (!bridge) return;
+    try {
+      $("log").textContent = (await bridge.tailLog()) || "（日志为空）";
+    } catch (error) {
+      $("log").textContent = String(error);
+    }
+  }
+
+  $("restart").onclick = async () => {
+    const button = $("restart");
+    button.disabled = true;
+    button.textContent = "正在重启…";
+    try {
+      await bridge.restartCore();
+    } finally {
+      button.disabled = false;
+      button.textContent = "重启内核";
+      await refresh();
+      await loadLog();
+    }
+  };
+  $("open-data").onclick = () => bridge && bridge.openDataDir();
+  $("reload-log").onclick = loadLog;
+  $("close").onclick = () => window.close();
+
+  void refresh();
+  void loadLog();
+  setInterval(refresh, 2000);
+</script>
+</body>
+</html>
