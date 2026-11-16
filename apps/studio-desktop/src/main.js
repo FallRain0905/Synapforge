@@ -22,9 +22,10 @@ if (!app.isPackaged || process.env.SF_DEBUG_PORT) {
   app.commandLine.appendSwitch("remote-debugging-port", process.env.SF_DEBUG_PORT || "9333");
 }
 
-// 开发期隔离 userData：用户自己的桌面端可能正开着，单实例锁和缓存会打架。
+// 隔离 userData：用户自己的桌面端可能正开着，单实例锁和缓存会打架。
 //   SF_USER_DATA=%TEMP%\sf-shell-dev SF_CORE_SOURCE=1 npm start
-if (!app.isPackaged && process.env.SF_USER_DATA) {
+// 打包版也认这个变量（现场排查 / 并排测试两个版本时用）。
+if (process.env.SF_USER_DATA) {
   app.setPath("userData", path.resolve(process.env.SF_USER_DATA));
 }
 
