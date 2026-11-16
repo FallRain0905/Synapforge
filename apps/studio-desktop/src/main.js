@@ -423,13 +423,31 @@ function openDiagnostics() {
   void diagWin.loadFile(DIAG_PAGE);
 }
 
+const GLOBAL_SHORTCUT = process.env.SF_GLOBAL_SHORTCUT || "CommandOrControl+Shift+Space";
+
 function registerGlobalShortcut() {
-  try {
-    const ok = globalShortcut.register("CommandOrControl+Shift+Space", () => toggleWindow());
-    if (!ok) console.log("[shortcut] Ctrl+Shift+Space 注册失败（可能被其他应用占用）");
-  } catch (error) {
-    console.log("[shortcut] 注册失败", String(error));
+  const openPalette = () => {
+    showWindow();
+    if (!win || win.isDestroyed()) return;
+    void win.webContents.executeJavaScript(
+      "window.sfCommandPalette && window.sfCommandPalette()", true).catch(() => {
+      /* 页面还没加载好时忽略 */
+    });
+  };
+  // 主快捷键可能被别的应用（包括另一个 synapforge）占着：退到一个不常用的组合。
+  for (const accelerator of [GLOBAL_SHORTCUT, "Control+Alt+Space"]) {
+    try {
+      if (globalShortcut.register(accelerator, openPalette)) {
+        if (accelerator !== GLOBAL_SHORTCUT) {
+          console.log(`[shortcut] ${GLOBAL_SHORTCUT} 被占用，改用 ${accelerator}`);
+        }
+        return;
+      }
+    } catch (error) {
+      console.log(`[shortcut] ${accelerator} 注册失败`, String(error));
+    }
   }
+  console.log("[shortcut] 全局快捷键都注册失败（托盘/标题栏仍可用）");
 }
 
 function isHttp(url) {
@@ -800,6 +818,7 @@ function registerIpc() {
 
   ipcMain.handle("app:openDataDir", () => openDataDir());
   ipcMain.handle("app:diagnostics", () => openDiagnostics());
+  ipcMain.handle("app:checkUpdate", () => promptUpdate(win));
   ipcMain.handle("app:quit", () => app.quit());
   ipcMain.handle("log:tail", () => core.tailLog());
 }

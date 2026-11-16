@@ -33,6 +33,9 @@ check("标题栏高度令牌", HTML.includes("--titlebar-h:40px"));
 check("焦点环令牌", HTML.includes("--focus-ring"));
 check("半透明表面令牌", HTML.includes("--surface-glass"));
 check("窗口阴影令牌", HTML.includes("--window-shadow"));
+check("命令面板挂载点", HTML.includes('id="commandPalette"') && HTML.includes('id="cmdkInput"'));
+check("命令面板入口", HTML.includes("window.sfCommandPalette"));
+check("WCO 标题栏挂载点", HTML.includes('id="sfTitlebar"'));
 
 // ---- shell.json 开关 ----
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sf-shell-"));

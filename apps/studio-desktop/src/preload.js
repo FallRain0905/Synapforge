@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld("synapforgeStudio", {
   setRecentClusters: (clusters) => ipcRenderer.invoke("taskbar:recentClusters", clusters),
   openDataDir: () => ipcRenderer.invoke("app:openDataDir"),
   openDiagnostics: () => ipcRenderer.invoke("app:diagnostics"),
+  checkUpdate: () => ipcRenderer.invoke("app:checkUpdate"),
   quit: () => ipcRenderer.invoke("app:quit"),
   tailLog: () => ipcRenderer.invoke("log:tail"),
   // 拖进窗口的文件：Electron 32+ 删掉了 File.path，只能走 webUtils。
