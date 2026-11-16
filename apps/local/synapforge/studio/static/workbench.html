@@ -781,11 +781,19 @@ body.drop-active::after { content:"松开：把文件路径加入当前对话";
   font-family:var(--code); }
 .drawer-actions { flex:none; display:flex; align-items:center; gap:6px; }
 .drawer-body { flex:1; min-height:0; overflow:auto; padding:16px 18px 28px; }
+
+/* 成果物弹窗（交付页 / 集群任务页）：类似 1Panel 文件管理器的文档预览，
+   与对话里的抽屉共用正文排版，只是画布更大。 */
+.artifact-modal-card { width:min(1080px,96vw); max-height:92vh; padding:0;
+  display:flex; flex-direction:column; overflow:hidden; }
+.artifact-modal-head { flex:none; padding:14px 18px; border-bottom:1px solid var(--line); }
+.artifact-modal-body { flex:1; min-height:0; overflow:auto; padding:18px 22px 26px; }
+
 /* 正文复用 .msg-body.md 的排版，但不缩进 */
-.drawer-body .msg-body.md { padding-left:0; font-size:12.5px; }
-.drawer-body pre.md-raw { margin:0; white-space:pre-wrap; overflow-wrap:anywhere;
-  font:11.5px/1.65 var(--code); color:var(--fg-2); }
-.drawer-body .drawer-empty { color:var(--muted); font-size:12px; }
+.drawer-body .msg-body.md, .artifact-modal-body .msg-body.md { padding-left:0; font-size:12.5px; }
+.drawer-body pre.md-raw, .artifact-modal-body pre.md-raw { margin:0; white-space:pre-wrap;
+  overflow-wrap:anywhere; font:11.5px/1.65 var(--code); color:var(--fg-2); }
+.drawer-body .drawer-empty, .artifact-modal-body .drawer-empty { color:var(--muted); font-size:12px; }
 
 /* 对话里的成果物卡片：文件名 + 预览按钮 */
 .artifact-card { display:flex; align-items:center; gap:9px; margin:8px 0 8px 28px;
@@ -1159,6 +1167,23 @@ body.drop-active::after { content:"松开：把文件路径加入当前对话";
   <div class="drawer-body" id="drawerBody"></div>
 </aside>
 
+<div class="modal hidden" id="artifactModal" role="dialog" aria-modal="true" aria-label="成果物预览">
+  <div class="modal-card artifact-modal-card">
+    <div class="drawer-head artifact-modal-head">
+      <div class="drawer-title">
+        <b id="artifactModalName">预览</b>
+        <span class="drawer-meta" id="artifactModalMeta"></span>
+      </div>
+      <div class="drawer-actions">
+        <button class="btn small hidden" id="artifactModalReveal">打开文件夹</button>
+        <button class="btn small hidden" id="artifactModalApprove">批准交付</button>
+        <button class="icon-btn" id="artifactModalClose" title="关闭（Esc）">✕</button>
+      </div>
+    </div>
+    <div class="artifact-modal-body" id="artifactModalBody"></div>
+  </div>
+</div>
+
 <div class="modal hidden" id="newClusterModal">
   <div class="modal-card" style="width:min(620px,100%)">
     <h2>新建集群</h2>
@@ -1363,6 +1388,28 @@ function closeArtifactDrawer() {
   S_DRAWER.artifactId = "";
 }
 
+/** 成果物正文：抽屉与弹窗共用（Markdown 走渲染器，其余按纯文本）。 */
+function renderArtifactContent(container, data) {
+  const mime = String(data.mime_type || "");
+  const looksMarkdown = /markdown/.test(mime)
+    || /\.(md|markdown|mdx)$/i.test(String(data.name || ""));
+  if (typeof data.text !== "string" || data.text === "") {
+    container.innerHTML = `<div class="drawer-empty">这是二进制文件，无法在这里预览。</div>`;
+  } else if (looksMarkdown) {
+    container.innerHTML = `<div class="msg-body md">${renderMarkdown(data.text)}</div>`;
+  } else {
+    const pre = document.createElement("pre");
+    pre.className = "md-raw";
+    pre.textContent = data.text;
+    container.textContent = "";
+    container.appendChild(pre);
+  }
+  if (data.truncated) {
+    container.insertAdjacentHTML("beforeend",
+      `<div class="drawer-empty" style="margin-top:10px">内容较长，这里只显示前 12000 字。</div>`);
+  }
+}
+
 async function openArtifactDrawer(artifactId, fallbackName) {
   if (!artifactId) { toast("这条记录没有成果物 id"); return; }
   S_DRAWER.artifactId = artifactId;
@@ -1386,8 +1433,6 @@ async function openArtifactDrawer(artifactId, fallbackName) {
     document.getElementById("drawerMeta").textContent = bits.join(" · ");
 
     const body = document.getElementById("drawerBody");
-    const mime = String(data.mime_type || "");
-    const text = data.text;
     // 同名多版本时可以在这里切换，不用回交付栏再点一次
     const group = (S.artifactGroups || []).find(g => g.versions.some(v => v.id === artifactId));
     if (group && group.versions.length > 1) {
@@ -1405,23 +1450,7 @@ async function openArtifactDrawer(artifactId, fallbackName) {
       select.onchange = () => openArtifactDrawer(select.value, data.name);
       wrap.appendChild(select);
     }
-    const looksMarkdown = /markdown/.test(mime) || /\.(md|markdown|mdx)$/i.test(String(data.name || ""));
-    if (typeof text !== "string" || text === "") {
-      body.innerHTML = `<div class="drawer-empty">这是二进制文件，无法在这里预览。</div>`;
-    } else if (looksMarkdown) {
-      // 复用对话正文的 Markdown 样式，只去掉左缩进
-      body.innerHTML = `<div class="msg-body md">${renderMarkdown(text)}</div>`;
-    } else {
-      const pre = document.createElement("pre");
-      pre.className = "md-raw";
-      pre.textContent = text;
-      body.textContent = "";
-      body.appendChild(pre);
-    }
-    if (data.truncated) {
-      body.insertAdjacentHTML("beforeend",
-        `<div class="drawer-empty" style="margin-top:10px">内容较长，这里只显示前 12000 字。</div>`);
-    }
+    renderArtifactContent(body, data);
 
     if (String(data.status || "").toUpperCase() === "PENDING_REVIEW") {
       const approve = document.getElementById("drawerApprove");
@@ -1440,6 +1469,76 @@ async function openArtifactDrawer(artifactId, fallbackName) {
     document.getElementById("drawerBody").innerHTML =
       `<div class="drawer-empty">读取失败：${esc(e.message)}</div>`;
   }
+}
+
+/** 交付页 / 集群任务页用弹窗预览（1Panel 式大画布）；对话里仍用右侧抽屉。 */
+async function openArtifactModal(artifactId, fallbackName, agentId) {
+  if (!artifactId) { toast("这条记录没有成果物 id"); return; }
+  const modal = document.getElementById("artifactModal");
+  const body = document.getElementById("artifactModalBody");
+  modal.classList.remove("hidden");
+  document.getElementById("artifactModalName").textContent = fallbackName || "加载中…";
+  document.getElementById("artifactModalMeta").textContent = "";
+  body.innerHTML = `<div class="drawer-empty">正在读取…</div>`;
+  document.getElementById("artifactModalApprove").classList.add("hidden");
+  document.getElementById("artifactModalReveal").classList.add("hidden");
+  try {
+    const data = await api(`/api/studio/artifacts/${encodeURIComponent(artifactId)}`);
+    document.getElementById("artifactModalName").textContent = data.name || fallbackName || "成果物";
+    const bits = [`${data.size_bytes || 0} B`];
+    if (data.version) bits.push(`v${data.version}`);
+    if (data.status) bits.push(String(data.status));
+    if (data.content_hash) bits.push(String(data.content_hash).slice(0, 12));
+    document.getElementById("artifactModalMeta").textContent = bits.join(" · ");
+
+    // 交付页的同一 Agent + 同名文件可以直接切版本，不用关掉重开
+    const versions = (S.allArtifacts || [])
+      .filter(item => item.name === data.name
+        && (!agentId || item.agent_id === agentId))
+      .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")));
+    if (versions.length > 1) {
+      const select = document.createElement("select");
+      select.className = "version-select";
+      select.style.marginLeft = "8px";
+      versions.forEach((version, index) => {
+        const option = document.createElement("option");
+        option.value = version.id;
+        option.textContent = `v${index + 1} · ${version.size_bytes || 0} B`;
+        if (version.id === artifactId) option.selected = true;
+        select.appendChild(option);
+      });
+      select.onchange = () => openArtifactModal(select.value, data.name, agentId);
+      document.getElementById("artifactModalMeta").appendChild(select);
+    }
+
+    renderArtifactContent(body, data);
+
+    if (String(data.status || "").toUpperCase() === "PENDING_REVIEW") {
+      const approve = document.getElementById("artifactModalApprove");
+      approve.classList.remove("hidden");
+      approve.onclick = async () => {
+        try {
+          await api(`/api/studio/artifacts/${encodeURIComponent(artifactId)}/review`,
+            {method:"POST", body:JSON.stringify({verdict:"APPROVED", summary:"预览弹窗批准交付"})});
+          toast("已批准交付");
+          if (S.view === "artifacts") await loadViewData("artifacts");
+          else if (S.view === "clustertasks") await loadViewData("clustertasks");
+          await openArtifactModal(artifactId, data.name, agentId);
+        } catch (e) { toast(e.message); }
+      };
+    }
+    if (canReveal() && data.source_path) {
+      const revealBtn = document.getElementById("artifactModalReveal");
+      revealBtn.classList.remove("hidden");
+      revealBtn.onclick = () => revealPath(data.source_path);
+    }
+  } catch (e) {
+    body.innerHTML = `<div class="drawer-empty">读取失败：${esc(e.message)}</div>`;
+  }
+}
+
+function closeArtifactModal() {
+  document.getElementById("artifactModal").classList.add("hidden");
 }
 
 function toast(msg) {
@@ -1795,15 +1894,33 @@ async function openSessionFromSidebar(agentId, sessionId) {
   } catch (e) { toast(e.message); }
 }
 
+/** 新会话的本地状态：清空当前 run/步骤，并让 selectAgent 不要回落显示上一段会话。 */
+function markFreshSession(agentId) {
+  S.activeSession = {agentId, sessionId: ""};
+  S.session = null;
+  S.sessionRuns = [];
+  S.run = null;
+  S.steps = [];
+  S.artifacts = [];
+  S.selectedArtifact = null;
+  S.runDetail = null;
+  S.runDetailSteps = [];
+  closeArtifactDrawer();
+  closeArtifactModal();
+  if (S.agent && S.agent.id === agentId) {
+    S.agent = {...S.agent, session_id: "", run: null};
+  }
+}
+
 async function newSessionFor(agentId) {
   try {
     await api(`/api/studio/agents/${encodeURIComponent(agentId)}/new-session`,
       {method:"POST", body:"{}"});
+    markFreshSession(agentId);
     if (S.agentSessions) delete S.agentSessions[agentId];
     S.openSessions[agentId] = false;
     toast("已切换新会话");
-    if (S.agent && S.agent.id === agentId) await selectAgent(agentId);
-    else renderSidebar();
+    await selectAgent(agentId);
   } catch (e) { toast(e.message); }
 }
 
@@ -1916,6 +2033,13 @@ async function selectAgent(agentId) {
           S.run = S.sessionRuns[S.sessionRuns.length - 1] || S.run;
         }
       } catch (e) { toast(e.message); }
+    } else if (S.activeSession && S.activeSession.agentId === agentId) {
+      // 刚点「新会话」：sessionId 为空，不能回落到 agent.run（那是上一个会话）
+      S.session = null;
+      S.sessionRuns = [];
+      S.run = null;
+      S.steps = [];
+      S.artifacts = [];
     }
     renderAll();
     const session = document.getElementById("session");
@@ -2464,16 +2588,9 @@ function renderAllArtifactsView(box) {
       <td class="actions"><button class="btn small" data-view-artifact="${esc(latest.id)}" data-agent-id="${esc(latest.agent_id || "")}">查看</button></td>
     </tr>`).join("")}
     </tbody></table></div></div>`;
-  box.querySelectorAll("[data-view-artifact]").forEach(el => el.onclick = async () => {
-    const agentId = el.dataset.agentId;
-    if (!agentId) return;
-    await selectAgent(agentId);
-    S.view = "workbench";
-    renderAll();
-    if (S.agent) {
-      S.selectedArtifact = el.dataset.viewArtifact;
-      await previewArtifact(el.dataset.viewArtifact);
-    }
+  // 交付页不跳对话：直接在弹窗里看完整正文（对话里才用右侧抽屉）
+  box.querySelectorAll("[data-view-artifact]").forEach(el => el.onclick = () => {
+    void openArtifactModal(el.dataset.viewArtifact, "", el.dataset.agentId || "");
   });
 }
 
@@ -2738,6 +2855,21 @@ function renderLibraryView(box) {
         <input class="search-input" id="libSearch" placeholder="搜索名称 / 路径" value="${esc(S.libQuery || "")}">
         <button class="btn" id="libRefresh">刷新</button>
       </div></div>
+    <div class="list-card" style="padding:12px 14px;margin-bottom:12px">
+      <div class="section-title" style="margin:0 0 8px">导入本地扩展</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input class="search-input" id="libSkillPath" style="flex:1;min-width:240px"
+               placeholder="技能目录，例如 D:\\skills\\my-skill">
+        <button class="btn" id="libSkillImport">导入技能</button>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px">
+        <input class="search-input" id="libPluginPath" style="flex:1;min-width:240px"
+               placeholder="插件目录（含 .claude-plugin/plugin.json）">
+        <button class="btn" id="libPluginImport">安装插件</button>
+      </div>
+      <div class="cap-desc" style="margin-top:8px">技能复制到 <span class="mono" style="font-family:var(--code)">~/.agents/skills</span>；
+        插件解析 skills / MCP / 子代理。只读本地目录，不联网。</div>
+    </div>
     <div class="metrics">
       <div class="metric-card"><b>${lib.counts.skills}</b><span>技能</span></div>
       <div class="metric-card"><b>${lib.counts.mcp}</b><span>MCP 服务器</span></div>
@@ -2763,6 +2895,37 @@ function renderLibraryView(box) {
   search.oninput = () => { S.libQuery = search.value; renderLibraryView(box);
     const el = document.getElementById("libSearch"); if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); } };
   document.getElementById("libRefresh").onclick = () => loadViewData("library");
+
+  const skillButton = document.getElementById("libSkillImport");
+  skillButton.onclick = async () => {
+    const path = document.getElementById("libSkillPath").value.trim();
+    if (!path) { toast("先填本地技能目录"); return; }
+    skillButton.disabled = true;
+    try {
+      const data = await api("/api/studio/skills/import",
+        {method:"POST", body:JSON.stringify({path})});
+      const names = (data.imported || []).map(item => item.name).join(", ");
+      toast(`已导入：${names || "无"}`);
+      document.getElementById("libSkillPath").value = "";
+      await loadViewData("library");
+    } catch (e) { toast(e.message); }
+    finally { skillButton.disabled = false; }
+  };
+
+  const pluginButton = document.getElementById("libPluginImport");
+  pluginButton.onclick = async () => {
+    const path = document.getElementById("libPluginPath").value.trim();
+    if (!path) { toast("先填插件目录"); return; }
+    pluginButton.disabled = true;
+    try {
+      const data = await api("/api/studio/plugins",
+        {method:"POST", body:JSON.stringify({path})});
+      toast(`插件「${data.plugin.name}」已安装`);
+      document.getElementById("libPluginPath").value = "";
+      await loadViewData("library");
+    } catch (e) { toast(e.message); }
+    finally { pluginButton.disabled = false; }
+  };
 }
 
 function filterLib(items, query) {
@@ -5271,8 +5434,8 @@ async function reviewClusterTask(taskId, verdict) {
 }
 
 async function previewClusterArtifact(artifactId) {
-  // 统一走抽屉：以前是 confirmDialog 里塞 1200 字，长文档根本看不完
-  await openArtifactDrawer(artifactId);
+  // 集群任务页不在对话里，用大弹窗；对话里的成果物卡片仍走抽屉
+  await openArtifactModal(artifactId);
 }
 
 function renderSettingsView(box) {
@@ -5449,10 +5612,15 @@ function renderTimeline(scroll) {
   const box = document.getElementById("sessionInner");
   if (!S.agent) { renderEmpty(); return; }
   if (!S.steps.length) {
-    box.innerHTML = (S.run && S.run.status === "RUNNING")
-      ? `<div class="empty"><h2>Agent 正在启动…</h2><p>第一步会实时出现在这里。</p></div>`
-      : `<div class="empty"><h2>还没有任务</h2>
-         <p>${esc(S.agent.name)} 已就绪。在下方安排一个任务，执行过程会实时出现在这里。</p></div>`;
+    const fresh = S.activeSession && S.activeSession.agentId === S.agent.id
+      && S.activeSession.sessionId === "";
+    box.innerHTML = fresh
+      ? `<div class="empty"><h2>新会话</h2>
+         <p>${esc(S.agent.name)} 的新会话已就绪。发第一条任务后会从这里开始。</p></div>`
+      : (S.run && S.run.status === "RUNNING")
+        ? `<div class="empty"><h2>Agent 正在启动…</h2><p>第一步会实时出现在这里。</p></div>`
+        : `<div class="empty"><h2>还没有任务</h2>
+           <p>${esc(S.agent.name)} 已就绪。在下方安排一个任务，执行过程会实时出现在这里。</p></div>`;
     return;
   }
   box.innerHTML = renderConversation(S.steps, S.run);
@@ -5764,6 +5932,9 @@ async function sendTask() {
       return;
     }
     S.run = data.run; S.steps = []; S.artifacts = []; S.selectedArtifact = null;
+    // 新会话的第一条任务：退出「空会话」状态，之后 selectAgent 正常显示最新 run
+    S.activeSession = null;
+    S.agent = S.agent ? {...S.agent, run: data.run, session_id: data.run.session_id || S.agent.session_id} : S.agent;
     document.getElementById("previewBox").classList.add("hidden");
     renderHeader(); renderTimeline(false); renderArtifacts();
     if (S.run && S.run.id) openStream(S.run.id);
@@ -5821,7 +5992,9 @@ async function newSession() {
     const data = await api(`/api/studio/agents/${encodeURIComponent(S.agent.id)}/new-session`,
       {method:"POST", body:"{}"});
     S.agent = {...S.agent, ...data.agent};
-    toast("已切换新会话"); renderInspector();
+    markFreshSession(S.agent.id);
+    toast("已切换新会话");
+    await selectAgent(S.agent.id);
   } catch (e) { toast(e.message); }
 }
 
@@ -6007,8 +6180,18 @@ document.getElementById("previewClose").onclick = () => {
 // 不把下面的弹窗一起关掉）
 document.getElementById("drawerClose").onclick = closeArtifactDrawer;
 document.getElementById("artifactIdMask").onclick = closeArtifactDrawer;
+document.getElementById("artifactModalClose").onclick = closeArtifactModal;
+document.getElementById("artifactModal").onclick = event => {
+  if (event.target.id === "artifactModal") closeArtifactModal();
+};
 document.addEventListener("keydown", event => {
   if (event.key !== "Escape") return;
+  const modal = document.getElementById("artifactModal");
+  if (modal && !modal.classList.contains("hidden")) {
+    closeArtifactModal();
+    event.stopPropagation();
+    return;
+  }
   const drawer = document.getElementById("artifactDrawer");
   if (!drawer || drawer.classList.contains("hidden")) return;
   closeArtifactDrawer();

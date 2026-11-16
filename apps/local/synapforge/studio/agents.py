@@ -10,6 +10,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from .. import commands as base
 from ..paths import state_dir
@@ -308,8 +309,15 @@ def agent_state(store: Any, agent_id: str, *, after_seq: int = 0) -> dict[str, A
     agent = get_agent_or_error(store, agent_id)
     run = studio_store.latest_agent_run(store, agent_id)
     steps = studio_store.list_agent_steps(store, run["id"], after_seq=after_seq) if run else []
-    tasks = store.list_tasks(agent["project_id"])
-    artifacts = base.list_artifacts(store, project_id=agent["project_id"])
+    # 导入的 Agent 可能没有合法 project_id；不要让它连详情页都打不开。
+    project_id = str(agent.get("project_id") or "").strip()
+    try:
+        UUID(project_id)
+    except (ValueError, TypeError, AttributeError):
+        tasks, artifacts = [], []
+    else:
+        tasks = store.list_tasks(project_id)
+        artifacts = base.list_artifacts(store, project_id=project_id)
     runs = studio_store.list_agent_runs(store, agent_id, limit=30)
     provider = studio_store.get_provider(store, agent["provider_id"]) if agent["provider_id"] else None
     return {
@@ -342,8 +350,20 @@ def all_runs(store: Any, limit: int = 200) -> list[dict[str, Any]]:
 
 def all_artifacts(store: Any) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for agent in studio_store.list_agents(store):
-        for item in base.list_artifacts(store, project_id=agent["project_id"]):
+        project_id = str(agent.get("project_id") or "").strip()
+        try:
+            UUID(project_id)
+        except (ValueError, TypeError, AttributeError):
+            # 导入的 Agent 可能没有合法 project_id；不能让一个坏行把整个交付页打成 500。
+            continue
+        for item in base.list_artifacts(store, project_id=project_id):
+            artifact_id = str(item.get("id") or "")
+            if artifact_id and artifact_id in seen:
+                continue  # 多个 Agent 共用一个项目时，成果物只出一次
+            if artifact_id:
+                seen.add(artifact_id)
             out.append({**item, "agent_id": agent["id"], "agent_name": agent["name"]})
     out.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
     return out
