@@ -37,10 +37,14 @@ function locateCore(repoRoot, packaged) {
     const exe = path.join(process.resourcesPath, "core", "synapforge-core.exe");
     return fs.existsSync(exe) ? { command: exe, args: [], kind: "packaged" } : null;
   }
+  const script = path.join(repoRoot, "scripts", "synapforge_studio.py");
+  // 改 UI 时用 SF_CORE_SOURCE=1 跑源码（静态文件即时生效），不用每次重打内核。
+  if (process.env.SF_CORE_SOURCE === "1" && fs.existsSync(script)) {
+    return { command: pickPython(), args: [script], kind: "source" };
+  }
   // 开发期优先用打包产物（和生产同一条路径），没有再退回源码。
   const exe = path.join(repoRoot, "dist-studio-core", "synapforge-core", "synapforge-core.exe");
   if (fs.existsSync(exe)) return { command: exe, args: [], kind: "built" };
-  const script = path.join(repoRoot, "scripts", "synapforge_studio.py");
   if (fs.existsSync(script)) {
     return { command: pickPython(), args: [script], kind: "source" };
   }

@@ -4,7 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>synapforge studio · Agent 工作台</title>
-<script>try{const t=localStorage.getItem("sf.studio.theme"); if(t==="light"||t==="dark") document.documentElement.dataset.theme=t;}catch(e){}</script>
+<script>try{const t=localStorage.getItem("sf.studio.theme"); if(t==="light"||t==="dark") document.documentElement.dataset.theme=t;}catch(e){}
+/* 桌面壳专属样式都挂在 .desktop-shell 下；浏览器里没有桥，一行都不生效。 */
+if (window.synapforgeStudio) document.documentElement.classList.add("desktop-shell");</script>
 <style>
 /* synapforge studio — 对齐 magpie 的克制深色工作台 */
 :root {
@@ -22,6 +24,11 @@
   --font:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
   --code:"Cascadia Mono",Consolas,"Microsoft YaHei UI","Microsoft YaHei",monospace;
   --side-w:212px; --inspector-w:340px; --radius:10px;
+  /* 桌面壳专用：标题栏高度、半透明表面、焦点环、窗口阴影 */
+  --titlebar-h:40px;
+  --surface-glass:rgba(26,26,30,.80);
+  --focus-ring:0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent);
+  --window-shadow:0 24px 64px rgba(0,0,0,.5);
   /* 层级表：统一在这里定义，不要在各处硬写数字，否则弹窗套浮层会互相压 */
   --z-menu:900; --z-modal:1000; --z-pop:1050; --z-toast:2000;
   color-scheme:dark;
@@ -38,6 +45,8 @@
   --amber:#b45309; --amber-soft:#fbf0df;
   --blue:#0e7490; --blue-soft:#e0f2f7;
   --shadow:0 16px 44px rgba(20,22,30,.16),0 2px 8px rgba(20,22,30,.06),0 0 0 .5px rgba(20,22,30,.1);
+  --surface-glass:rgba(244,244,246,.82);
+  --window-shadow:0 24px 64px rgba(20,22,30,.18);
   color-scheme:light;
 }
 * { box-sizing:border-box; margin:0; padding:0; }

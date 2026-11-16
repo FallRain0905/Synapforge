@@ -11,6 +11,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const { StudioCore } = require("./core");
+const { loadShellConfig } = require("./shell-config");
 const { promptUpdate } = require("./updater");
 
 // 开发期开一个本地调试端口：用 CDP 查页面地址、抓截图、看控制台错误。
@@ -20,10 +21,17 @@ if (!app.isPackaged || process.env.SF_DEBUG_PORT) {
   app.commandLine.appendSwitch("remote-debugging-port", process.env.SF_DEBUG_PORT || "9333");
 }
 
+// 开发期隔离 userData：用户自己的桌面端可能正开着，单实例锁和缓存会打架。
+//   SF_USER_DATA=%TEMP%\sf-shell-dev SF_CORE_SOURCE=1 npm start
+if (!app.isPackaged && process.env.SF_USER_DATA) {
+  app.setPath("userData", path.resolve(process.env.SF_USER_DATA));
+}
+
 const REPO_ROOT = app.isPackaged
   ? process.resourcesPath
   : path.resolve(__dirname, "..", "..", "..");
 const WINDOW_STATE = path.join(app.getPath("userData"), "window-state.json");
+const SHELL_CONFIG = loadShellConfig(app.getPath("userData"));
 const ASSETS = path.join(__dirname, "..", "assets");
 const ERROR_PAGE = path.join(__dirname, "..", "renderer", "error.html");
 const DIAG_PAGE = path.join(__dirname, "..", "renderer", "diagnostics.html");
@@ -541,6 +549,8 @@ function registerIpc() {
     electron: process.versions.electron,
     chrome: process.versions.chrome,
     platform: process.platform,
+    shell: SHELL_CONFIG,
+    safeMode: process.env.SF_SHELL_SAFE === "1",
   }));
   ipcMain.handle("app:autostart", () => loginAtStartup());
   ipcMain.handle("app:setAutostart", (_event, enabled) => {
@@ -571,6 +581,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     app.setAppUserModelId("top.synapforge.studio");
+    if (!app.isPackaged) console.log("[shell] config", JSON.stringify(SHELL_CONFIG));
     registerProtocol();
     pendingTarget = deepLinkFromArgv(process.argv) || pendingTarget;
     core = new StudioCore({
