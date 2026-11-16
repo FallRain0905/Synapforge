@@ -52,3 +52,13 @@ npm start
 - `kill` 内核 → 自动重启并让窗口跟到新端口/新 token
 - `kill` 壳 → 内核跟随退出（Windows 下 Electron 的 job 对象会直接带走子进程）
 - 内核 45.3MB；`synapforge-mcp.exe` 17 个 MCP 工具、UTF-8 stdio 正常
+
+### P2 桌面能力（已验收）
+
+- **通知**：内核 5s 轮询终态 run/集群；窗口失焦时弹系统通知，点击直接跳到运行详情/集群任务
+- **开机自启**：托盘勾选（`app.setLoginItemSettings`），开关状态回读一致
+- **深链**：`synapforge://cluster/<uuid>`、`synapforge://run/<uuid>`、`synapforge://view/<name>`
+  - 打包后自动注册；开发期用 `SF_REGISTER_PROTOCOL=1 npm start` 注册到本机 electron
+  - 第二次启动会把 URL 转发给已有实例（单实例 argv 转发）
+- **拖拽**：文件拖进窗口 → 绝对路径插入当前对话（含空格的路径自动加引号），
+  走 Electron 32+ 的 `webUtils.getPathForFile`（`File.path` 已被移除）

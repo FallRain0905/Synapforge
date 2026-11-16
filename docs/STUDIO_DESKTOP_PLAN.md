@@ -1,6 +1,6 @@
 # studio 原生桌面端计划（STUDIO-DESKTOP）
 
-> 2026-11-16 · 状态：**P0 已验收，P1 已验收（P2 起未开始）**
+> 2026-11-16 · 状态：**P0–P2 已验收（P3 起未开始）**
 > 范围：把 `apps/local` 的 studio（本地 Agent 工具）做成双击即用的桌面应用。
 > 不是云端工作台客户端（那是 `apps/desktop` 0.2.1，另一条产品线）。
 
@@ -137,13 +137,17 @@ synapforge studio.exe          Electron 壳（新 app：apps/studio-desktop）
 
 ## 4 P2 · 桌面能力（2–3 天）
 
-- **通知**：复用内核已有 SSE（前端已收到 run/cluster done），窗口隐藏时由 preload 调 `new Notification()`；点击 `show()+focus()` 并跳到对应任务
-- **自启**：`app.setLoginItemSettings`，托盘勾选 + 首次向导
-- **深链**：`synapforge://cluster/<id>`、`run/<id>`、`artifact/<id>`；单实例 `second-instance` 转发 argv；前端补 `?view=&task=` 启动解析（现在状态只在内存里）
-- **文件**：拖文件进窗口 → 交给现有导入/附件链路；「打开文件夹」沿用服务端 `reveal`（本机可用），壳侧补 `shell.showItemInFolder` 兜底
-- **外链**：一律 `shell.openExternal`
+- [x] **通知**：内核 `GET /api/studio/notifications?since=` 游标轮询；壳 5s 一次，
+  窗口失焦时弹系统通知，点击调用页面 `sfOpen` 直达（不重载、不丢未提交输入）
+- [x] **自启**：托盘勾选 + `app.setLoginItemSettings`，另有 IPC 供设置页复用
+- [x] **深链**：`synapforge://cluster/<id>`、`run/<id>`、`view/<name>`；
+  `second-instance` 转发 argv、macOS `open-url`；前端 `?view=&cluster=&run=` 启动解析
+- [x] **文件**：拖文件进窗口 → 绝对路径插入当前对话（空格自动加引号）；
+  `webUtils.getPathForFile`（Electron 32+ 已移除 `File.path`）
+- [x] **外链**：一律 `shell.openExternal`
 
-验收：窗口隐藏时集群跑完能弹通知，点击直达；深链从浏览器/资源管理器唤起可落到详情；拖 5 个文件不卡。
+验收已完成：窗口隐藏时完成 run 能弹通知并点开运行详情；`synapforge://view/clustertasks`、
+`run/<uuid>` 从资源管理器唤起可落到对应页；带空格的文件拖进 `#planInput` 后得到带引号的绝对路径。
 
 ## 5 P3 · 打包与更新（2–3 天）
 
@@ -212,9 +216,17 @@ synapforge studio.exe          Electron 壳（新 app：apps/studio-desktop）
 实测（真机）：窗口 1280×860 出图、菜单/托盘正常；`CloseMainWindow` 后窗口隐藏且进程存活；
 `Ctrl+Q` 后 electron/core 全部退出且 `studio.json` 被清理；`kill` core 6s 内换新端口并重新加载。
 
+**P2 已交付（2026-11-16，提交 `48b8a92` + 后续一笔）**
+
+- `GET /api/studio/notifications`：游标取最后一条时间（不取 now），终态过滤、limit 分页
+- 壳 5s 轮询；失焦时系统通知，点击 `sfOpen` 跳运行详情/集群任务
+- 开机自启（托盘勾选 + IPC 回读）；`synapforge://cluster|run|view` 深链（含 argv 转发）
+- 拖拽文件 → 绝对路径插入 `#planInput` / `#composer`，带空格自动加引号
+- 实测：插入 `"…/drop me.txt"`；深链 `view/clustertasks`、`run/<uuid>` 均落到对应页；
+  `setAutostart(true)` 写入 Run 注册表、关掉后删除
+
 **未做（按计划留给后续）**
 
-- P2：通知、自启、深链 + 前端 URL 路由、拖拽、外链/文件集成
 - P3：electron-builder NSIS、更新、一键构建脚本、CI
 - P4：Mica/自绘标题栏、全局快捷键与快速面板、诊断页
 - 已知：`workbench.html` 没有 CSP（Electron 开发期会告警，打包后不显示）；窗口首次启动

@@ -724,6 +724,13 @@ textarea.ctl { height:auto; padding:7px 8px; }
   transition:.16s; pointer-events:none; max-width:min(calc(100vw - 28px),480px); }
 .toast.show { opacity:1; transform:translate(-50%,0); }
 
+/* 桌面壳：文件拖进窗口时的投放区提示（浏览器里不会出现） */
+body.drop-active::after { content:"松开：把文件路径加入当前对话";
+  position:fixed; inset:10px; z-index:var(--z-toast); border:2px dashed var(--accent);
+  border-radius:14px; background:color-mix(in srgb, var(--bg) 74%, transparent);
+  display:flex; align-items:center; justify-content:center;
+  font-size:14px; color:var(--fg); pointer-events:none; }
+
 /* 集群任务：可展开的任务行 */
 .task-row { cursor:pointer; }
 .task-row:hover td { background:var(--card-2); }
@@ -6010,6 +6017,49 @@ document.addEventListener("keydown", event => {
 
 // 粘性跟随挂到主滚动容器上：一次挂载，之后所有渲染都走 sfStick.follow()
 sfStick.attach(document.getElementById("session"));
+
+// 桌面壳：文件拖进窗口 → 把绝对路径插到当前对话输入框。
+// 浏览器里没有桥，整个块不接管，拖拽行为保持原样。
+if (window.synapforgeStudio && typeof window.synapforgeStudio.pathForFile === "function") {
+  const dropVisible = (el) => Boolean(el && el.offsetParent !== null);
+  const composerForDrop = () => {
+    const active = document.activeElement;
+    if (active && active.tagName === "TEXTAREA" && dropVisible(active)) return active;
+    const plan = document.getElementById("planInput");
+    if (dropVisible(plan)) return plan;
+    const agent = document.getElementById("composer");
+    return dropVisible(agent) ? agent : null;
+  };
+  document.addEventListener("dragover", (event) => {
+    if (!event.dataTransfer || !event.dataTransfer.types.includes("Files")) return;
+    event.preventDefault();
+    document.body.classList.add("drop-active");
+  });
+  document.addEventListener("dragleave", (event) => {
+    if (event.relatedTarget) return;
+    document.body.classList.remove("drop-active");
+  });
+  document.addEventListener("drop", (event) => {
+    if (!event.dataTransfer || !event.dataTransfer.files.length) return;
+    event.preventDefault();
+    document.body.classList.remove("drop-active");
+    const target = composerForDrop();
+    const paths = [...event.dataTransfer.files]
+      .map((file) => window.synapforgeStudio.pathForFile(file))
+      .filter(Boolean);
+    if (!target) { toast("先打开一个对话再拖文件"); return; }
+    if (!paths.length) { toast("读不到文件路径"); return; }
+    const text = paths.map((item) => (item.includes(" ") ? `"${item}"` : item)).join("\n");
+    const start = target.selectionStart ?? target.value.length;
+    const end = target.selectionEnd ?? target.value.length;
+    const prefix = target.value && !target.value.endsWith("\n") ? "\n" : "";
+    target.value = target.value.slice(0, start) + prefix + text + target.value.slice(end);
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+    target.focus();
+    target.setSelectionRange(target.value.length, target.value.length);
+    toast(`已加入 ${paths.length} 个文件路径`);
+  });
+}
 
 // 桌面壳的跳转入口：通知点击和深链都走这里，不重新加载页面。
 // 返回 true 表示认出了目标，壳据此决定要不要退回 URL 加载。

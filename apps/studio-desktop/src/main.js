@@ -33,6 +33,7 @@ let loadedOrigin = null;
 let saveTimer = null;
 let notifyTimer = null;
 let notifyCursor = "";
+let pendingTarget = null;
 const notifySeen = new Set();
 const STATUS_LABEL = { DONE: "完成", FAILED: "失败", STOPPED: "已停止" };
 
@@ -108,8 +109,31 @@ function buildTrayMenu() {
     { label: "打开数据目录", click: () => openDataDir() },
     { label: "查看内核日志", click: () => openLog() },
     { type: "separator" },
+    {
+      label: "开机自启",
+      type: "checkbox",
+      checked: loginAtStartup(),
+      click: (item) => setLoginAtStartup(item.checked),
+    },
+    { type: "separator" },
     { label: "退出", click: () => app.quit() },
   ]);
+}
+
+function loginAtStartup() {
+  try {
+    return Boolean(app.getLoginItemSettings().openAtLogin);
+  } catch {
+    return false;
+  }
+}
+
+function setLoginAtStartup(enabled) {
+  try {
+    app.setLoginItemSettings({ openAtLogin: Boolean(enabled), openAsHidden: true });
+  } catch (error) {
+    void dialog.showMessageBox({ type: "warning", message: "设置开机自启失败", detail: String(error) });
+  }
 }
 
 function buildAppMenu() {
@@ -297,16 +321,42 @@ async function showError(message) {
 async function loadUrlWithTarget(target) {
   if (!core || !core.info || !win || win.isDestroyed()) return;
   const url = new URL(core.info.local_url);
+  if (target.view) url.searchParams.set("view", target.view);
   if (target.cluster) url.searchParams.set("cluster", target.cluster);
   if (target.run) url.searchParams.set("run", target.run);
   loadedOrigin = url.origin;
   await win.loadURL(url.toString());
 }
 
-async function openNotificationTarget(item) {
+/** synapforge://cluster/<id> | run/<id> | view/<name> */
+function parseDeepLink(value) {
+  if (typeof value !== "string" || !value.toLowerCase().startsWith("synapforge://")) return null;
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return null;
+  }
+  const kind = parsed.hostname.toLowerCase();
+  const id = decodeURIComponent(parsed.pathname.replace(/^\/+/, "")).trim();
+  if (kind === "cluster" && id) return { cluster: id };
+  if (kind === "run" && id) return { run: id };
+  if (kind === "view" && id) return { view: id };
+  return null;
+}
+
+function deepLinkFromArgv(argv) {
+  for (const arg of argv || []) {
+    const target = parseDeepLink(arg);
+    if (target) return target;
+  }
+  return null;
+}
+
+async function openTarget(target) {
+  if (!target) return;
   showWindow();
   if (!win || win.isDestroyed()) return;
-  const target = item.kind === "cluster" ? { cluster: item.id } : { run: item.id };
   try {
     // 页面已经在跑：直接调前端入口，不重新加载（保留当前未提交的输入）。
     const handled = await win.webContents.executeJavaScript(
@@ -316,6 +366,34 @@ async function openNotificationTarget(item) {
     /* 页面还没加载好，退回 URL */
   }
   await loadUrlWithTarget(target);
+}
+
+/** 启动未完成时先存着，等内核和页面就绪再跳。 */
+function queueTarget(target) {
+  if (!target) return;
+  const url = win && !win.isDestroyed() ? win.webContents.getURL() : "";
+  if (core && core.status === "ready" && url.startsWith("http://127.0.0.1")) {
+    void openTarget(target);
+  } else {
+    pendingTarget = target;
+  }
+}
+
+function registerProtocol() {
+  try {
+    if (app.isPackaged) {
+      app.setAsDefaultProtocolClient("synapforge");
+    } else if (process.env.SF_REGISTER_PROTOCOL === "1") {
+      app.setAsDefaultProtocolClient("synapforge", process.execPath,
+        [path.resolve(process.argv[1] || ".")]);
+    }
+  } catch (error) {
+    if (!app.isPackaged) console.log("[protocol] register failed", String(error));
+  }
+}
+
+async function openNotificationTarget(item) {
+  await openTarget(item.kind === "cluster" ? { cluster: item.id } : { run: item.id });
 }
 
 function showNativeNotification(item) {
@@ -362,6 +440,11 @@ async function boot() {
     const info = await core.start();
     setStatus("ready");
     await loadWorkbench(info);
+    if (pendingTarget) {
+      const target = pendingTarget;
+      pendingTarget = null;
+      await openTarget(target);
+    }
     return true;
   } catch (error) {
     setStatus("failed");
@@ -394,6 +477,11 @@ function registerIpc() {
     port: core.info ? core.info.port : null,
     stateDir: core.stateDir,
   }));
+  ipcMain.handle("app:autostart", () => loginAtStartup());
+  ipcMain.handle("app:setAutostart", (_event, enabled) => {
+    setLoginAtStartup(enabled);
+    return loginAtStartup();
+  });
   ipcMain.handle("app:openDataDir", () => openDataDir());
   ipcMain.handle("app:quit", () => app.quit());
   ipcMain.handle("log:tail", () => core.tailLog());
@@ -402,10 +490,23 @@ function registerIpc() {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on("second-instance", () => showWindow());
+  app.on("second-instance", (_event, argv) => {
+    const target = deepLinkFromArgv(argv);
+    if (target) void queueTarget(target);
+    else showWindow();
+  });
+
+  // macOS 的深链不走 argv，走 open-url（可能早于 ready）。
+  app.on("open-url", (event, url) => {
+    event.preventDefault();
+    const target = parseDeepLink(url);
+    if (target) queueTarget(target);
+  });
 
   app.whenReady().then(async () => {
     app.setAppUserModelId("top.synapforge.studio");
+    registerProtocol();
+    pendingTarget = deepLinkFromArgv(process.argv) || pendingTarget;
     core = new StudioCore({
       repoRoot: REPO_ROOT,
       packaged: app.isPackaged,

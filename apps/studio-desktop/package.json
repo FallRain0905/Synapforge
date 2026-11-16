@@ -12,5 +12,17 @@
   },
   "devDependencies": {
     "electron": "^44.4.0"
+  },
+  "build": {
+    "appId": "top.synapforge.studio",
+    "productName": "synapforge studio",
+    "protocols": [
+      {
+        "name": "synapforge studio",
+        "schemes": [
+          "synapforge"
+        ]
+      }
+    ]
   }
 }
