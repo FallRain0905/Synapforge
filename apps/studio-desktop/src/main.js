@@ -557,6 +557,19 @@ function registerIpc() {
     setLoginAtStartup(enabled);
     return loginAtStartup();
   });
+  ipcMain.handle("dialog:pickDirectory", async (_event, options = {}) => {
+    const settings = {
+      title: String(options.title || "选择文件夹"),
+      defaultPath: String(options.defaultPath || ""),
+      properties: ["openDirectory", "createDirectory"],
+    };
+    const parent = win && !win.isDestroyed() ? win : null;
+    const result = parent
+      ? await dialog.showOpenDialog(parent, settings)
+      : await dialog.showOpenDialog(settings);
+    if (result.canceled || !result.filePaths.length) return "";
+    return result.filePaths[0];
+  });
   ipcMain.handle("app:openDataDir", () => openDataDir());
   ipcMain.handle("app:diagnostics", () => openDiagnostics());
   ipcMain.handle("app:quit", () => app.quit());

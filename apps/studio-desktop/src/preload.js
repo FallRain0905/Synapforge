@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld("synapforgeStudio", {
   info: () => ipcRenderer.invoke("app:info"),
   autostart: () => ipcRenderer.invoke("app:autostart"),
   setAutostart: (enabled) => ipcRenderer.invoke("app:setAutostart", Boolean(enabled)),
+  pickDirectory: (options) => ipcRenderer.invoke("dialog:pickDirectory", options),
   openDataDir: () => ipcRenderer.invoke("app:openDataDir"),
   openDiagnostics: () => ipcRenderer.invoke("app:diagnostics"),
   quit: () => ipcRenderer.invoke("app:quit"),
