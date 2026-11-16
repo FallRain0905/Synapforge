@@ -5,9 +5,10 @@
 
 const {
   app, BrowserWindow, Menu, Notification, Tray, clipboard, dialog, globalShortcut,
-  ipcMain, nativeImage, screen, shell,
+  ipcMain, nativeTheme, nativeImage, screen, shell,
 } = require("electron");
 const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const { StudioCore } = require("./core");
@@ -34,6 +35,12 @@ const WINDOW_STATE = path.join(app.getPath("userData"), "window-state.json");
 const SHELL_CONFIG = loadShellConfig(app.getPath("userData"));
 // WCO：网页画标题栏，最小化/最大化/关闭仍由系统绘制（Snap Layouts 保留）。
 const WCO_ENABLED = SHELL_CONFIG.titleBar === "wco" && process.platform === "win32";
+const WINDOWS_BUILD = process.platform === "win32"
+  ? Number((os.release().split(".")[2] || "0"))
+  : 0;
+// Mica 需要 Win11 22H2+；Win10 自动回落成纯色。
+const MICA_ENABLED = WCO_ENABLED && SHELL_CONFIG.mica !== "off"
+  && (SHELL_CONFIG.mica === "on" || WINDOWS_BUILD >= 22000);
 
 function titlebarColors(theme) {
   return String(theme) === "light"
@@ -44,6 +51,7 @@ function titlebarColors(theme) {
 function shellUrl(info) {
   const url = new URL(info.local_url);
   if (WCO_ENABLED) url.searchParams.set("shell", "wco");
+  if (MICA_ENABLED) url.searchParams.set("mica", "1");
   return url;
 }
 const ASSETS = path.join(__dirname, "..", "assets");
@@ -510,7 +518,9 @@ function createWindow() {
     minWidth: 960,
     minHeight: 640,
     show: false,
-    backgroundColor: "#0b0f14",
+    // Mica 需要透明底色；关掉时用原来的纯色，避免透明残影。
+    backgroundColor: MICA_ENABLED ? "#00000000" : "#0b0f14",
+    ...(MICA_ENABLED ? { backgroundMaterial: "mica" } : {}),
     title: "synapforge studio",
     titleBarStyle: WCO_ENABLED ? "hidden" : "default",
     ...(WCO_ENABLED ? { titleBarOverlay: { ...titlebarColors("dark"), height: 40 } } : {}),
@@ -714,6 +724,9 @@ function registerIpc() {
     platform: process.platform,
     shell: SHELL_CONFIG,
     safeMode: process.env.SF_SHELL_SAFE === "1",
+    wco: WCO_ENABLED,
+    mica: MICA_ENABLED,
+    windowsBuild: WINDOWS_BUILD,
   }));
   ipcMain.handle("app:autostart", () => loginAtStartup());
   ipcMain.handle("app:setAutostart", (_event, enabled) => {
@@ -811,8 +824,11 @@ function registerIpc() {
   });
 
   ipcMain.handle("shell:titlebarTheme", (_event, theme) => {
+    const next = String(theme) === "light" ? "light" : "dark";
+    // Mica 的明暗跟系统主题走；这里让系统主题跟随网页主题，避免浅色壁纸配深色侧栏。
+    if (MICA_ENABLED) nativeTheme.themeSource = next;
     if (!WCO_ENABLED || !win || win.isDestroyed()) return false;
-    win.setTitleBarOverlay({ ...titlebarColors(String(theme)), height: 40 });
+    win.setTitleBarOverlay({ ...titlebarColors(next), height: 40 });
     return true;
   });
 
@@ -841,6 +857,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     app.setAppUserModelId("top.synapforge.studio");
+    if (MICA_ENABLED) nativeTheme.themeSource = "dark";
     if (!app.isPackaged) console.log("[shell] config", JSON.stringify(SHELL_CONFIG));
     registerProtocol();
     applyJumpList(loadRecentClusters());

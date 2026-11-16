@@ -10,6 +10,9 @@ if (window.synapforgeStudio) document.documentElement.classList.add("desktop-she
 /* WCO 模式（系统标题栏隐藏、网页画标题栏）由壳通过 ?shell=wco 告知 */
 if (new URLSearchParams(location.search).get("shell") === "wco") {
   document.documentElement.classList.add("wco");
+}
+if (new URLSearchParams(location.search).get("mica") === "1") {
+  document.documentElement.classList.add("mica");
 }</script>
 <style>
 /* synapforge studio — 对齐 magpie 的克制深色工作台 */
@@ -98,6 +101,13 @@ html.desktop-shell.wco #sfTitlebar .sft-status[data-status="failed"] { color:var
 html.desktop-shell.wco .app { height:calc(100vh - var(--titlebar-h)); }
 html.desktop-shell.wco .side-top { display:none; }
 html.desktop-shell.wco .sidebar { padding-top:6px; }
+
+/* ===== 桌面壳：Mica 半透明（仅 Win11 + WCO；侧栏和标题栏透出壁纸） ===== */
+html.desktop-shell.mica, html.desktop-shell.mica body { background: transparent; }
+html.desktop-shell.mica .app { background: transparent; }
+html.desktop-shell.mica main, html.desktop-shell.mica .inspector { background: var(--bg); }
+html.desktop-shell.mica .sidebar,
+html.desktop-shell.mica #sfTitlebar { background: var(--surface-glass); }
 
 .app { display:grid; grid-template-columns:var(--side-w) minmax(0,1fr) var(--inspector-w); height:100vh; }
 @media (max-width:1220px) { .app { grid-template-columns:var(--side-w) minmax(0,1fr); } .inspector { display:none; } }
