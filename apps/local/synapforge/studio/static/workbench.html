@@ -1856,6 +1856,26 @@ function renderSidebar() {
     if (event.target.closest("[data-sess-open]") || event.target.closest("[data-sess-new]")) return;
     handleAgentCardClick(el.dataset.agent);
   });
+  list.querySelectorAll("[data-agent]").forEach(el => {
+    el.oncontextmenu = async (event) => {
+      const agentId = el.dataset.agent;
+      const agent = (S.agents || []).find(item => item.id === agentId) || {};
+      const action = await chooseContextAction(event, [
+        { id: "open", label: "打开工作台" },
+        { id: "reveal", label: "打开工作区", enabled: Boolean(agent.workspace) },
+        { id: "copy-id", label: "复制 Agent id" },
+        { id: "new-session", label: "新会话" },
+        { id: "runs", label: "查看运行记录" },
+      ]);
+      if (!action) return;
+      if (action === "open") return selectAgent(agentId);
+      if (action === "reveal") return revealPath(agent.workspace);
+      if (action === "copy-id") return copyToClipboard(agentId);
+      if (action === "new-session") return newSessionFor(agentId);
+      if (action === "runs") return switchView("runs");
+      return null;
+    };
+  });
   list.querySelectorAll("[data-sess-open]").forEach(el => el.onclick = event => {
     event.stopPropagation();
     openSessionFromSidebar(el.dataset.sessAgent, el.dataset.sessOpen);
@@ -2531,7 +2551,9 @@ function renderRunsView(box) {
     <div class="table-card"><table class="table"><thead><tr>
       <th>Agent</th><th>任务</th><th>状态</th><th>渠道</th><th>模型</th><th class="num">Tokens</th><th class="num">花费</th><th>开始</th><th></th>
     </tr></thead><tbody>
-    ${runs.map(run => `<tr data-run="${esc(run.id)}">
+    ${runs.map(run => `<tr data-run="${esc(run.id)}"
+      data-run-status="${esc(String(run.status || ""))}"
+      data-run-task="${esc(String(run.task_text || "").slice(0, 120))}">
       <td class="strong">${esc(run.agent_name || run.agent_id)}</td>
       <td>${esc(String(run.task_text || "").slice(0, 72))}</td>
       <td><span class="status ${esc(String(run.status||"").toUpperCase())}">${esc(run.status)}</span></td>
@@ -2551,6 +2573,33 @@ function renderRunsView(box) {
   box.querySelectorAll("tr[data-run]").forEach(el => el.onclick = () => {
     S.runDetail = {id: el.dataset.run};
     switchView("run");
+  });
+  box.querySelectorAll("tr[data-run]").forEach(el => {
+    el.oncontextmenu = async (event) => {
+      const id = el.dataset.run;
+      const status = String(el.dataset.runStatus || "").toUpperCase();
+      const running = status === "RUNNING" || status === "QUEUED";
+      const action = await chooseContextAction(event, [
+        { id: "open", label: "打开运行详情" },
+        { id: "copy-id", label: "复制 run id" },
+        { type: "separator" },
+        { id: "stop", label: "停止", enabled: running },
+        { id: "retry", label: "重跑" },
+      ]);
+      if (!action) return;
+      if (action === "open") { S.runDetail = { id }; switchView("run"); return; }
+      if (action === "copy-id") { void copyToClipboard(id); return; }
+      try {
+        if (action === "stop") {
+          await api(`/api/studio/runs/${encodeURIComponent(id)}/stop`, { method: "POST", body: "{}" });
+          toast("已停止");
+        } else if (action === "retry") {
+          await api(`/api/studio/runs/${encodeURIComponent(id)}/retry`, { method: "POST", body: "{}" });
+          toast("已重新排队");
+        }
+        await loadViewData("runs");
+      } catch (e) { toast(e.message); }
+    };
   });
 }
 
@@ -2596,7 +2645,12 @@ function renderAllArtifactsView(box) {
     <div class="table-card"><table class="table"><thead><tr>
       <th>Agent</th><th>文件</th><th>状态</th><th class="num">版本</th><th class="num">大小</th><th>创建</th><th></th>
     </tr></thead><tbody>
-    ${rows.map(({latest, count}) => `<tr>
+    ${rows.map(({latest, count}) => `<tr
+      data-artifact-row="${esc(latest.id)}"
+      data-artifact-name="${esc(latest.name)}"
+      data-artifact-path="${esc(latest.source_path || "")}"
+      data-artifact-status="${esc(String(latest.status || ""))}"
+      data-artifact-agent="${esc(latest.agent_id || "")}">
       <td class="strong">${esc(latest.agent_name || latest.agent_id || "")}</td>
       <td>${esc(latest.name)}</td>
       <td><span class="pill ${esc(String(latest.status||"").toUpperCase())}">${esc(latest.status || "")}</span></td>
@@ -2609,6 +2663,38 @@ function renderAllArtifactsView(box) {
   // 交付页不跳对话：直接在弹窗里看完整正文（对话里才用右侧抽屉）
   box.querySelectorAll("[data-view-artifact]").forEach(el => el.onclick = () => {
     void openArtifactModal(el.dataset.viewArtifact, "", el.dataset.agentId || "");
+  });
+  box.querySelectorAll("[data-artifact-row]").forEach(row => {
+    row.oncontextmenu = async (event) => {
+      const id = row.dataset.artifactRow;
+      const name = row.dataset.artifactName;
+      const path = row.dataset.artifactPath;
+      const pending = String(row.dataset.artifactStatus).toUpperCase() === "PENDING_REVIEW";
+      const action = await chooseContextAction(event, [
+        { id: "preview", label: "预览" },
+        { type: "separator" },
+        { id: "reveal", label: "打开所在文件夹", enabled: Boolean(path) },
+        { id: "open", label: "在默认应用打开", enabled: Boolean(path) },
+        { id: "copy-path", label: "复制路径", enabled: Boolean(path) },
+        { id: "copy-name", label: "复制文件名" },
+        { type: "separator" },
+        { id: "approve", label: "批准交付", enabled: pending },
+      ]);
+      if (!action) return;
+      if (action === "preview") { void openArtifactModal(id, name, row.dataset.artifactAgent || ""); return; }
+      if (action === "reveal") { void revealPath(path); return; }
+      if (action === "open") { void openLocalPath(path); return; }
+      if (action === "copy-path") { void copyToClipboard(path); return; }
+      if (action === "copy-name") { void copyToClipboard(name); return; }
+      if (action === "approve") {
+        try {
+          await api(`/api/studio/artifacts/${encodeURIComponent(id)}/review`,
+            { method: "POST", body: JSON.stringify({ verdict: "APPROVED", summary: "交付页右键批准" }) });
+          toast("已批准交付");
+          await loadViewData("artifacts");
+        } catch (e) { toast(e.message); }
+      }
+    };
   });
 }
 
@@ -2857,6 +2943,41 @@ function libraryRows(items, kind, agents) {
       </div>
     </div>`;
   }).join("");
+}
+
+/* 桌面壳：原生右键菜单。只传 id/label，动作由页面自己执行。 */
+function canContextMenu() {
+  return Boolean(window.synapforgeStudio
+    && typeof window.synapforgeStudio.contextMenu === "function");
+}
+
+async function chooseContextAction(event, items) {
+  if (!canContextMenu()) return null;
+  event.preventDefault();
+  event.stopPropagation();
+  return window.synapforgeStudio.contextMenu({ items });
+}
+
+async function copyToClipboard(text) {
+  if (!text) { toast("没有可复制的内容"); return; }
+  try {
+    if (window.synapforgeStudio && window.synapforgeStudio.copyText) {
+      await window.synapforgeStudio.copyText(text);
+    } else {
+      await navigator.clipboard.writeText(text);
+    }
+    toast("已复制");
+  } catch (e) { toast("复制失败：" + (e.message || e)); }
+}
+
+async function openLocalPath(path) {
+  if (!path) return;
+  if (window.synapforgeStudio && window.synapforgeStudio.openPath) {
+    const result = await window.synapforgeStudio.openPath(path);
+    if (result && result.ok === false) toast(result.error || "打开失败");
+    return;
+  }
+  revealPath(path);
 }
 
 /* 桌面壳：原生文件夹选择。浏览器里没有桥，按钮不出现。 */
@@ -4835,7 +4956,9 @@ function renderClusterTasksView(box) {
         </div>`).join("")}</div>` : `<div class="empty-mini">这个任务还没有登记成果物</div>`}
       </div>
     </td></tr>`;
-    return `<tr class="task-row ${open ? "open" : ""}" data-task-toggle="${esc(task.id)}">
+    return `<tr class="task-row ${open ? "open" : ""}" data-task-toggle="${esc(task.id)}"
+      data-task-id="${esc(task.id)}" data-task-title="${esc(task.title || "")}"
+      data-task-status="${esc(status)}" data-task-workspace="${esc(task.workspace || "")}">
       <td class="strong">${esc(task.title || "")}
         <div class="muted" style="font-size:10.5px;margin-top:2px">${esc(String(task.description || "").slice(0, 90))}</div></td>
       <td><span class="pill ${esc(status)}">${esc(TASK_STATUS_LABELS[status] || task.status || "")}</span></td>
@@ -4930,6 +5053,38 @@ function renderClusterTasksView(box) {
       toast("已退回");
       await loadViewData("clustertasks");
     } catch (e) { toast(e.message); }
+  });
+  box.querySelectorAll("[data-task-id]").forEach(row => {
+    row.oncontextmenu = async (event) => {
+      const id = row.dataset.taskId;
+      const workspace = row.dataset.taskWorkspace;
+      const waiting = String(row.dataset.taskStatus).toUpperCase() === "WAITING_REVIEW";
+      const action = await chooseContextAction(event, [
+        { id: "edit", label: "编辑任务细节" },
+        { id: "reveal", label: "打开工作区", enabled: Boolean(workspace) },
+        { id: "copy-id", label: "复制任务 id" },
+        { type: "separator" },
+        { id: "approve", label: "批准", enabled: waiting },
+        { id: "revise", label: "退回", enabled: waiting },
+      ]);
+      if (!action) return;
+      if (action === "edit") {
+        S.taskEditing = id;
+        S.taskOpen = { ...(S.taskOpen || {}), [id]: true };
+        renderClusterTasksView(box);
+        return;
+      }
+      if (action === "reveal") { void revealPath(workspace); return; }
+      if (action === "copy-id") { void copyToClipboard(id); return; }
+      const verdict = action === "approve" ? "APPROVED" : action === "revise" ? "NEEDS_REVISION" : "";
+      if (!verdict) return;
+      try {
+        await api(`/api/studio/tasks/${encodeURIComponent(id)}/review`,
+          { method: "POST", body: JSON.stringify({ verdict, summary: "集群任务页右键" }) });
+        toast(verdict === "APPROVED" ? "已批准" : "已退回");
+        await loadViewData("clustertasks");
+      } catch (e) { toast(e.message); }
+    };
   });
 }
 
@@ -6294,6 +6449,20 @@ document.addEventListener("click", event => {
   event.preventDefault();
   void pickDirectoryInto(button.dataset.pickDir, button.dataset.pickTitle);
 });
+
+// 桌面壳：对话正文右键 → 复制 / 全选（没有选中时「复制」禁用）。
+const sessionForMenu = document.getElementById("sessionInner");
+if (sessionForMenu && canContextMenu()) {
+  sessionForMenu.addEventListener("contextmenu", async (event) => {
+    const selected = String(window.getSelection() || "").trim();
+    const action = await chooseContextAction(event, [
+      { id: "copy", label: "复制", enabled: Boolean(selected) },
+      { id: "select-all", label: "全选" },
+    ]);
+    if (action === "copy") void copyToClipboard(selected);
+    else if (action === "select-all") document.execCommand("selectAll");
+  });
+}
 
 // 桌面壳的跳转入口：通知点击和深链都走这里，不重新加载页面。
 // 返回 true 表示认出了目标，壳据此决定要不要退回 URL 加载。

@@ -4,8 +4,8 @@
 // 业务一切都在本地内核里；壳只负责"让一个本地网页活得像桌面应用"。
 
 const {
-  app, BrowserWindow, Menu, Notification, Tray, dialog, globalShortcut, ipcMain,
-  nativeImage, shell,
+  app, BrowserWindow, Menu, Notification, Tray, clipboard, dialog, globalShortcut,
+  ipcMain, nativeImage, shell,
 } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -570,6 +570,44 @@ function registerIpc() {
     if (result.canceled || !result.filePaths.length) return "";
     return result.filePaths[0];
   });
+  // 右键菜单：渲染进程只传 {id,label,enabled,type}，返回被点的 id 或 null。
+  ipcMain.handle("menu:popup", (event, spec = {}) => new Promise((resolve) => {
+    const items = (Array.isArray(spec.items) ? spec.items : [])
+      .slice(0, 24)
+      .filter((item) => item && (item.type === "separator" || item.id));
+    if (!items.length) {
+      resolve(null);
+      return;
+    }
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const menu = Menu.buildFromTemplate(items.map((item) => (item.type === "separator"
+      ? { type: "separator" }
+      : {
+        label: String(item.label || item.id),
+        enabled: item.enabled !== false,
+        click: () => finish(String(item.id)),
+      })));
+    const owner = BrowserWindow.fromWebContents(event.sender) || win || undefined;
+    menu.popup({ window: owner, callback: () => finish(null) });
+  }));
+
+  ipcMain.handle("shell:openPath", async (_event, target) => {
+    const value = String(target || "").trim();
+    if (!value) return { ok: false, error: "empty_path" };
+    const error = await shell.openPath(value);
+    return error ? { ok: false, error } : { ok: true };
+  });
+
+  ipcMain.handle("clipboard:write", (_event, text) => {
+    clipboard.writeText(String(text ?? ""));
+    return true;
+  });
+
   ipcMain.handle("app:openDataDir", () => openDataDir());
   ipcMain.handle("app:diagnostics", () => openDiagnostics());
   ipcMain.handle("app:quit", () => app.quit());
