@@ -18,12 +18,29 @@ npm install
 
 # 3) 启动
 npm start
+
+# 4) 出安装包（NSIS，每用户安装，免管理员）
+powershell -NoProfile -ExecutionPolicy Bypass -File ..\..\scripts\build-studio-desktop.ps1
+# 产物：dist\synapforge-studio-setup-<version>-x64.exe（约 136MB）
+#       dist\win-unpacked\（免安装版，验收用）
 ```
 
 没有打包内核时，壳会退回源码模式：用 `SF_PYTHON`（或 `%LOCALAPPDATA%\Programs\Python\Python312\python.exe`）
 跑 `scripts/synapforge_studio.py`，方便改内核代码即时生效。
 
-开发模式会自动开 `127.0.0.1:9333` 的 CDP 端口，便于查页面地址、抓截图；打包后不生效。
+开发模式会自动开 `127.0.0.1:9333` 的 CDP 端口，便于查页面地址、抓截图；
+打包后默认不开，排查现场时用 `SF_DEBUG_PORT=9333` 临时打开。
+
+## 发布与更新
+
+1. `scripts\build-studio-desktop.ps1` 产出安装包与 `win-unpacked`
+2. 把安装包和 `latest.json` 放到 `https://synapforge.top/downloads/studio/`
+   （格式见 `latest.example.json`；地址可用 `STUDIO_UPDATE_FEED` 覆盖）
+3. 客户端「帮助 → 检查更新…」读 `latest.json`，版本更高时打开下载页
+
+安装包未签名（无 Authenticode 证书），首次安装会有 SmartScreen 提示，属预期。
+卸载器不会删除 `HKCU\Software\Classes\synapforge`（协议注册），需要时手动清：
+`reg delete HKCU\Software\Classes\synapforge /f`。
 
 ## 目录
 

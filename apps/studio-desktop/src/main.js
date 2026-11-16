@@ -10,10 +10,12 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const { StudioCore } = require("./core");
+const { promptUpdate } = require("./updater");
 
 // 开发期开一个本地调试端口：用 CDP 查页面地址、抓截图、看控制台错误。
 // 打包后不生效（调试端口对用户没有价值，还会多开一个监听）。
-if (!app.isPackaged) {
+// 打包后默认不开；排查现场时用 SF_DEBUG_PORT=9333 临时打开。
+if (!app.isPackaged || process.env.SF_DEBUG_PORT) {
   app.commandLine.appendSwitch("remote-debugging-port", process.env.SF_DEBUG_PORT || "9333");
 }
 
@@ -116,6 +118,7 @@ function buildTrayMenu() {
       click: (item) => setLoginAtStartup(item.checked),
     },
     { type: "separator" },
+    { label: "检查更新…", click: () => void promptUpdate(win) },
     { label: "退出", click: () => app.quit() },
   ]);
 }
@@ -196,6 +199,8 @@ function buildAppMenu() {
           },
         },
         { label: "查看内核日志", click: () => openLog() },
+        { type: "separator" },
+        { label: "检查更新…", click: () => void promptUpdate(win) },
       ],
     },
   ]);

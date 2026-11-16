@@ -1,6 +1,6 @@
 # studio 原生桌面端计划（STUDIO-DESKTOP）
 
-> 2026-11-16 · 状态：**P0–P2 已验收（P3 起未开始）**
+> 2026-11-16 · 状态：**P0–P3 已验收（P4 可选，未开始）**
 > 范围：把 `apps/local` 的 studio（本地 Agent 工具）做成双击即用的桌面应用。
 > 不是云端工作台客户端（那是 `apps/desktop` 0.2.1，另一条产品线）。
 
@@ -123,17 +123,16 @@ synapforge studio.exe          Electron 壳（新 app：apps/studio-desktop）
 | 模块 | 内容 |
 | --- | --- |
 | `src/core.js` | 内核生命周期：解析路径（dev = `python scripts/synapforge_studio.py`；packaged = `resources/core/...`）、spawn、握手轮询、健康检查、日志尾部、异常重启 3 次 |
-| `src/window.js` | 主窗 1280×860（最小 960×640）、尺寸/位置记忆、`backgroundMaterial:"mica"`、外链走系统浏览器、`will-navigate` 拦截 |
-| `src/tray.js` | 显示/隐藏、重启内核、打开数据目录、检查更新、退出；托盘图标反映内核状态 |
-| `src/menu.js` | 文件/编辑/视图/窗口/帮助；缩放、全屏、DevTools（仅 dev）、`Ctrl+1..3` 直达集群工作/任务/Agent |
-| `src/index.js` | 单实例锁 + 第二实例聚焦；启动编排；退出清理 |
+| `src/main.js` | 主窗 1280×860（最小 960×640）、尺寸/位置记忆、托盘、菜单、单实例、IPC、退出清理、通知/深链/拖拽编排 |
+| `src/preload.js` | 只暴露壳能力（重启、状态、自启、打开数据目录、日志、pathForFile） |
+| `renderer/error.html` | 内核起不来时的错误页（重试 / 看日志 / 打开数据目录） |
 
-验收：
+验收（全部实测通过）：
 
-- [ ] 冷启动 <3s 出窗口；内核红/绿灯与真实状态一致
-- [ ] 第二次双击聚焦已有窗口，不起第二个内核
-- [ ] 关窗后托盘仍在，点托盘恢复；退出后无 python 残留、端口释放
-- [ ] `kill core.exe` 后壳自动重启 3 次，仍失败进错误页（可看日志、可手动重启）
+- [x] 冷启动 1s 级出窗口；托盘颜色与真实状态一致
+- [x] 第二次双击聚焦已有窗口，不起第二个内核
+- [x] 关窗后托盘仍在，点托盘恢复；退出后无 python 残留、端口释放
+- [x] `kill core.exe` 后壳自动重启 3 次，仍失败进错误页（可看日志、可手动重启）
 
 ## 4 P2 · 桌面能力（2–3 天）
 
@@ -151,12 +150,14 @@ synapforge studio.exe          Electron 壳（新 app：apps/studio-desktop）
 
 ## 5 P3 · 打包与更新（2–3 天）
 
-- NSIS **每用户安装**（免管理员）、portable zip、图标/版本/关于页
-- 更新：`latest.json` + 安装包，沿用 `synapforge.top/downloads` 机制；不做差量
-- `scripts/build-studio-desktop.ps1` 一键：内核 → 安装前端依赖 → electron-builder
-- CI 可选（windows-latest）
+- [x] NSIS **每用户安装**（免管理员）、`win-unpacked`、图标/版本/关于页
+- [x] 更新：`latest.json` + 打开下载页；`STUDIO_UPDATE_FEED` 可覆盖（不做差量）
+- [x] `scripts/build-studio-desktop.ps1` 一键：内核 → 依赖 → electron-builder
+- [ ] CI（windows-latest，可选，未做）
 
-验收：装完即用；覆盖升级同时换壳与内核；卸载清理安装目录，保留用户数据目录。
+验收已完成：静默安装 → 启动（内核从安装目录的 `resources/core` 拉起、协议注册到安装后的 exe、
+UI 200）→ 卸载（安装目录清空，`~/.synapforge` 用户数据保留）。
+覆盖升级未实测（需要先发布 0.2.0 的安装包）；协议注册键卸载器不清，已在 README 写明手工清理。
 
 ## 6 P4 · 原生观感（约 2 天，可选）
 
@@ -225,9 +226,22 @@ synapforge studio.exe          Electron 壳（新 app：apps/studio-desktop）
 - 实测：插入 `"…/drop me.txt"`；深链 `view/clustertasks`、`run/<uuid>` 均落到对应页；
   `setAutostart(true)` 写入 Run 注册表、关掉后删除
 
+**P3 已交付（2026-11-16）**
+
+- electron-builder NSIS 每用户安装 + `win-unpacked`；`extraResources` 把内核放到 `resources/core`
+- 一键脚本 `scripts/build-studio-desktop.ps1`（electron / builder 二进制走 npmmirror，绕开 GitHub 阻断）
+- 更新检查拆成可测的 `src/feed.js` + `src/version.js` + `src/updater.js`；
+  `node scripts/check_studio_shell.js` 9 项全过（版本比较、feed 解析、缺字段、404）
+- 安装包 136MB；实测静默安装 → 启动（安装目录内核、协议指向安装后的 exe、UI 200）→
+  卸载（安装目录清空，`~/.synapforge` 保留）
+- 未发布到 synapforge.top（需要云端发布流程）；`latest.json` 格式见 `latest.example.json`
+
 **未做（按计划留给后续）**
 
-- P3：electron-builder NSIS、更新、一键构建脚本、CI
 - P4：Mica/自绘标题栏、全局快捷键与快速面板、诊断页
+- CI（windows-latest）可选
+- 已知：`workbench.html` 没有 CSP（Electron 开发期会告警，打包后不显示）；窗口首次启动
+  前会在后台等内核，用户看到的是系统标题栏而不是空白页（窗口 show 在 `ready-to-show`）；
+  卸载器不清 `HKCU\Software\Classes\synapforge`（README 给了手工清理命令）
 - 已知：`workbench.html` 没有 CSP（Electron 开发期会告警，打包后不显示）；窗口首次启动
   前会在后台等内核，用户看到的是系统标题栏而不是空白页（窗口 show 在 `ready-to-show`）

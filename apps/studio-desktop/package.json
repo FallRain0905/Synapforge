@@ -3,19 +3,51 @@
   "version": "0.1.0",
   "private": true,
   "description": "synapforge studio 桌面壳（Electron + 本地 Python 内核）",
+  "author": "FallRain0905",
   "main": "src/main.js",
   "type": "commonjs",
   "license": "ISC",
   "scripts": {
     "start": "electron .",
-    "start:debug": "electron . --enable-logging"
+    "start:debug": "electron . --enable-logging",
+    "build:win": "electron-builder --win nsis --x64"
   },
   "devDependencies": {
-    "electron": "^44.4.0"
+    "electron": "^44.4.0",
+    "electron-builder": "^26.18.0"
   },
   "build": {
     "appId": "top.synapforge.studio",
     "productName": "synapforge studio",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**",
+      "renderer/**",
+      "assets/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../../dist-studio-core/synapforge-core",
+        "to": "core"
+      }
+    ],
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "synapforge-studio-setup-${version}-x64.${ext}",
+      "icon": "assets/app-icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "synapforge studio"
+    },
     "protocols": [
       {
         "name": "synapforge studio",
