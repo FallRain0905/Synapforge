@@ -282,8 +282,14 @@ class AgentRunWorker:
                         relative_path=relative, agent_id=run["agent_id"],
                         task_id=run["task_id"])
                     artifact_ids.append(str(artifact["id"]))
+                    # 带上 artifact_id：对话里要给这条成果物一个"预览"按钮，
+                    # 只靠文件名反查会在多版本同名时选错。
                     self._step(store, "artifact", f"登记成果物 · {relative}",
-                               f"{artifact.get('size_bytes', 0)} B")
+                               f"{artifact.get('size_bytes', 0)} B",
+                               {"artifact_id": str(artifact["id"]),
+                                "name": str(artifact.get("name") or relative),
+                                "relative_path": relative,
+                                "size_bytes": int(artifact.get("size_bytes") or 0)})
                 except Exception as error:  # noqa: BLE001
                     self._step(store, "error", f"登记失败 · {relative}",
                                f"{type(error).__name__}: {error}")

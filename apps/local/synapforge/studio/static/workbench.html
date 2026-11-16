@@ -753,6 +753,45 @@ textarea.ctl { height:auto; padding:7px 8px; }
   background:var(--card-2); color:var(--muted); font-size:11px; line-height:1.6; }
 .import-note code { font-family:var(--code); color:var(--fg-2); }
 
+/* 成果物预览抽屉（右侧滑出，类似 ZCode 的 side panel）
+   对话里点「预览」直接看正文，不用切到别的页面找。 */
+.drawer-mask { position:fixed; inset:0; z-index:calc(var(--z-modal) - 1);
+  background:rgba(0,0,0,.45); backdrop-filter:blur(1.5px);
+  animation:fadeIn .14s ease; }
+@keyframes fadeIn { from { opacity:0 } to { opacity:1 } }
+.drawer { position:fixed; top:0; right:0; bottom:0; z-index:var(--z-modal);
+  width:min(620px,92vw); display:flex; flex-direction:column;
+  background:var(--card); border-left:1px solid var(--line);
+  box-shadow:-24px 0 48px rgba(0,0,0,.4);
+  animation:slideIn .18s cubic-bezier(.2,.8,.3,1); }
+@keyframes slideIn { from { transform:translateX(16px); opacity:.4 } to { transform:none; opacity:1 } }
+.drawer-head { flex:none; display:flex; align-items:flex-start; gap:12px;
+  padding:13px 16px; border-bottom:1px solid var(--line-2); }
+.drawer-title { flex:1; min-width:0; }
+.drawer-title b { display:block; font-size:13px; font-weight:600;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.drawer-meta { display:block; margin-top:3px; font-size:10.5px; color:var(--muted);
+  font-family:var(--code); }
+.drawer-actions { flex:none; display:flex; align-items:center; gap:6px; }
+.drawer-body { flex:1; min-height:0; overflow:auto; padding:16px 18px 28px; }
+/* 正文复用 .msg-body.md 的排版，但不缩进 */
+.drawer-body .msg-body.md { padding-left:0; font-size:12.5px; }
+.drawer-body pre.md-raw { margin:0; white-space:pre-wrap; overflow-wrap:anywhere;
+  font:11.5px/1.65 var(--code); color:var(--fg-2); }
+.drawer-body .drawer-empty { color:var(--muted); font-size:12px; }
+
+/* 对话里的成果物卡片：文件名 + 预览按钮 */
+.artifact-card { display:flex; align-items:center; gap:9px; margin:8px 0 8px 28px;
+  padding:8px 10px; background:var(--card-2); border:1px solid var(--line-2);
+  border-radius:9px; }
+.artifact-card .ic { flex:none; width:22px; height:22px; border-radius:6px;
+  background:var(--green-soft); color:var(--green); display:grid; place-items:center;
+  font-size:11px; font-weight:600; }
+.artifact-card .grow { flex:1; min-width:0; }
+.artifact-card .name { font-size:12px; color:var(--fg); overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap; }
+.artifact-card .sub { font-size:10.5px; color:var(--muted); font-family:var(--code); margin-top:1px; }
+
 /* 新建集群：两条路的二选一 */
 .choice-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:12px; }
 @media (max-width:720px) { .choice-grid { grid-template-columns:1fr; } }
@@ -1097,6 +1136,22 @@ textarea.ctl { height:auto; padding:7px 8px; }
     </div>
   </div>
 </div>
+<div class="drawer-mask hidden" id="artifactIdMask"></div>
+<aside class="drawer hidden" id="artifactDrawer" aria-label="成果物预览">
+  <div class="drawer-head">
+    <div class="drawer-title">
+      <b id="drawerName">预览</b>
+      <span class="drawer-meta" id="drawerMeta"></span>
+    </div>
+    <div class="drawer-actions">
+      <button class="btn small hidden" id="drawerReveal">打开文件夹</button>
+      <button class="btn small hidden" id="drawerApprove">批准交付</button>
+      <button class="icon-btn" id="drawerClose" title="关闭（Esc）">✕</button>
+    </div>
+  </div>
+  <div class="drawer-body" id="drawerBody"></div>
+</aside>
+
 <div class="modal hidden" id="newClusterModal">
   <div class="modal-card" style="width:min(620px,100%)">
     <h2>新建集群</h2>
@@ -1289,6 +1344,96 @@ const sfStick = {
     this.lastTop = el.scrollTop;
   },
 };
+
+// ---- 成果物预览抽屉 --------------------------------------------------------
+// 对话里点「预览」→ 右侧滑出正文。Markdown 走 renderMarkdown（同一套转义规则），
+// 其它文本按纯文本渲染，二进制如实说不能预览。
+const S_DRAWER = { artifactId: "", name: "" };
+
+function closeArtifactDrawer() {
+  document.getElementById("artifactDrawer").classList.add("hidden");
+  document.getElementById("artifactIdMask").classList.add("hidden");
+  S_DRAWER.artifactId = "";
+}
+
+async function openArtifactDrawer(artifactId, fallbackName) {
+  if (!artifactId) { toast("这条记录没有成果物 id"); return; }
+  S_DRAWER.artifactId = artifactId;
+  S_DRAWER.name = fallbackName || "";
+  const drawer = document.getElementById("artifactDrawer");
+  const mask = document.getElementById("artifactIdMask");
+  drawer.classList.remove("hidden");
+  mask.classList.remove("hidden");
+  document.getElementById("drawerName").textContent = fallbackName || "加载中…";
+  document.getElementById("drawerMeta").textContent = "";
+  document.getElementById("drawerBody").innerHTML = `<div class="drawer-empty">正在读取…</div>`;
+  document.getElementById("drawerApprove").classList.add("hidden");
+  document.getElementById("drawerReveal").classList.add("hidden");
+  try {
+    const data = await api(`/api/studio/artifacts/${encodeURIComponent(artifactId)}`);
+    document.getElementById("drawerName").textContent = data.name || fallbackName || "成果物";
+    const bits = [`${data.size_bytes || 0} B`];
+    if (data.version) bits.push(`v${data.version}`);
+    if (data.status) bits.push(String(data.status));
+    if (data.content_hash) bits.push(String(data.content_hash).slice(0, 12));
+    document.getElementById("drawerMeta").textContent = bits.join(" · ");
+
+    const body = document.getElementById("drawerBody");
+    const mime = String(data.mime_type || "");
+    const text = data.text;
+    // 同名多版本时可以在这里切换，不用回交付栏再点一次
+    const group = (S.artifactGroups || []).find(g => g.versions.some(v => v.id === artifactId));
+    if (group && group.versions.length > 1) {
+      const wrap = document.getElementById("drawerMeta");
+      const select = document.createElement("select");
+      select.className = "version-select";
+      select.style.marginLeft = "8px";
+      group.versions.forEach((version, index) => {
+        const option = document.createElement("option");
+        option.value = version.id;
+        option.textContent = `v${index + 1} · ${version.size_bytes || 0} B`;
+        if (version.id === artifactId) option.selected = true;
+        select.appendChild(option);
+      });
+      select.onchange = () => openArtifactDrawer(select.value, data.name);
+      wrap.appendChild(select);
+    }
+    const looksMarkdown = /markdown/.test(mime) || /\.(md|markdown|mdx)$/i.test(String(data.name || ""));
+    if (typeof text !== "string" || text === "") {
+      body.innerHTML = `<div class="drawer-empty">这是二进制文件，无法在这里预览。</div>`;
+    } else if (looksMarkdown) {
+      // 复用对话正文的 Markdown 样式，只去掉左缩进
+      body.innerHTML = `<div class="msg-body md">${renderMarkdown(text)}</div>`;
+    } else {
+      const pre = document.createElement("pre");
+      pre.className = "md-raw";
+      pre.textContent = text;
+      body.textContent = "";
+      body.appendChild(pre);
+    }
+    if (data.truncated) {
+      body.insertAdjacentHTML("beforeend",
+        `<div class="drawer-empty" style="margin-top:10px">内容较长，这里只显示前 12000 字。</div>`);
+    }
+
+    if (String(data.status || "").toUpperCase() === "PENDING_REVIEW") {
+      const approve = document.getElementById("drawerApprove");
+      approve.classList.remove("hidden");
+      approve.onclick = async () => {
+        await approveArtifact(artifactId);
+        await openArtifactDrawer(artifactId, data.name);
+      };
+    }
+    if (canReveal() && data.source_path) {
+      const revealBtn = document.getElementById("drawerReveal");
+      revealBtn.classList.remove("hidden");
+      revealBtn.onclick = () => revealPath(data.source_path);
+    }
+  } catch (e) {
+    document.getElementById("drawerBody").innerHTML =
+      `<div class="drawer-empty">读取失败：${esc(e.message)}</div>`;
+  }
+}
 
 function toast(msg) {
   const el = document.getElementById("toast");
@@ -5119,12 +5264,8 @@ async function reviewClusterTask(taskId, verdict) {
 }
 
 async function previewClusterArtifact(artifactId) {
-  try {
-    const data = await api(`/api/studio/artifacts/${encodeURIComponent(artifactId)}`);
-    const ok = await confirmDialog(data.name || "成果物预览",
-      String(data.text || "[二进制文件，无法预览]").slice(0, 1200), "关闭");
-    void ok;
-  } catch (e) { toast(e.message); }
+  // 统一走抽屉：以前是 confirmDialog 里塞 1200 字，长文档根本看不完
+  await openArtifactDrawer(artifactId);
 }
 
 function renderSettingsView(box) {
@@ -5314,6 +5455,33 @@ function renderTimeline(scroll) {
 }
 
 /* 把 step 序列渲染成对话：user 气泡 + assistant 正文 + 折叠的思考/工具/系统 */
+function artifactCardHTML({ id, name, size }) {
+  const label = String(name || "交付");
+  const meta = size == null ? "" : (typeof size === "number" ? `${size} B` : String(size));
+  return `<div class="artifact-card">
+    <div class="ic">F</div>
+    <div class="grow"><div class="name" title="${esc(label)}">${esc(label)}</div>
+      <div class="sub">${esc(meta || "已登记成果物")}</div></div>
+    ${id
+      ? `<button class="btn small" data-artifact-preview="${esc(id)}" data-artifact-name="${esc(label)}">预览</button>`
+      : `<span class="tag">无预览</span>`}
+  </div>`;
+}
+
+// 集群角色是通过 MCP 工具发布成果物的，步骤里没有 artifact_id，
+// 只能拿 relative_path 去已有的成果物列表里对名字。对不上就返回 null，
+// 调用方保留原来的折叠展示，不伪造一个按钮。
+function resolveArtifactByName(name) {
+  const wanted = String(name || "").trim().split(/[\\/]/).pop();
+  if (!wanted) return null;
+  const pools = [S.artifacts || [], (S.cluster && S.cluster.artifacts) || []];
+  for (const pool of pools) {
+    const hit = pool.find(item => String(item.name || "") === wanted);
+    if (hit && hit.id) return hit;
+  }
+  return null;
+}
+
 function renderConversation(steps, run) {
   const seenResults = new Set();
   const visible = [];
@@ -5360,6 +5528,21 @@ function renderConversation(steps, run) {
     }
     if (kind === "tool") {
       const tool = (step.payload || {}).tool || String(step.title || "").replace(/^Tool · /, "");
+      // 集群角色不产生 artifact 步骤：它是在会话里调 MCP 工具发布成果物的。
+      // 这种调用对用户的价值就是"又出了一份文档"，直接渲染成预览卡。
+      if (/synapforge_artifact/i.test(tool)) {
+        let args = {};
+        try { args = JSON.parse(String(step.detail || "")) || {}; } catch (e) { args = {}; }
+        if (String(args.action || "publish") === "publish" && args.relative_path) {
+          const hit = resolveArtifactByName(String(args.relative_path));
+          if (hit) {
+            flushFolds();
+            html += artifactCardHTML({ id: hit.id, name: hit.name,
+                                       size: hit.size_bytes });
+            continue;
+          }
+        }
+      }
       pendingFold += foldBlock({
         kind: "tool", id: step.id,
         label: `<b>${esc(tool)}</b> <code>${esc(firstLine(step.detail || ""))}</code>`,
@@ -5389,9 +5572,14 @@ function renderConversation(steps, run) {
       continue;
     }
     if (kind === "artifact") {
-      pendingFold += foldBlock({
-        kind: "artifact", id: step.id, label: esc(step.title || "交付"),
-        body: step.detail || "", open: false,
+      flushFolds();
+      // 成果物单独成卡：文件名 + 大小 + 「预览」。以前是折叠块，
+      // 内容只是"707 B"这种无用信息，用户还得去右侧交付栏找。
+      const payload = step.payload || {};
+      html += artifactCardHTML({
+        id: String(payload.artifact_id || ""),
+        name: String(payload.name || step.title || "交付").replace(/^登记成果物 · /, ""),
+        size: payload.size_bytes != null ? payload.size_bytes : String(step.detail || ""),
       });
       continue;
     }
@@ -5436,6 +5624,11 @@ function bindFolds(box) {
       S.folds[el.dataset.fold] = el.open;
     });
     if (S.folds[el.dataset.fold]) el.open = true;
+  });
+  // 成果物预览按钮：和折叠块一起绑，所有对话渲染点都会走到这里
+  box.querySelectorAll("[data-artifact-preview]").forEach(el => {
+    el.onclick = () => openArtifactDrawer(el.dataset.artifactPreview,
+                                         el.dataset.artifactName);
   });
 }
 
@@ -5533,41 +5726,10 @@ function renderArtifacts() {
 }
 
 async function previewArtifact(artifactId) {
+  // 交付栏和对话里用同一个抽屉，避免两套预览（右栏那个小框太窄，长文档看不了）
   S.selectedArtifact = artifactId;
   renderArtifacts();
-  try {
-    const data = await api(`/api/studio/artifacts/${encodeURIComponent(artifactId)}`);
-    const box = document.getElementById("previewBox");
-    document.getElementById("previewName").textContent = data.name || "preview";
-    document.getElementById("previewText").textContent =
-      data.text != null ? data.text : "[二进制文件，无法预览]";
-    box.classList.remove("hidden");
-    const head = document.querySelector("#previewBox .head");
-    head.querySelectorAll(".version-select").forEach(el => el.remove());
-    const group = (S.artifactGroups || []).find(g => g.versions.some(v => v.id === artifactId));
-    if (group && group.versions.length > 1) {
-      const select = document.createElement("select");
-      select.className = "version-select";
-      group.versions.forEach((version, index) => {
-        const option = document.createElement("option");
-        option.value = version.id;
-        option.textContent = `v${index + 1} · ${version.size_bytes || 0} B`;
-        if (version.id === artifactId) option.selected = true;
-        select.appendChild(option);
-      });
-      select.onchange = () => previewArtifact(select.value);
-      const name = document.getElementById("previewName");
-      head.insertBefore(select, name.nextSibling);
-    }
-    const existing = document.getElementById("approveArtifact");
-    if (existing) existing.remove();
-    if (String(data.status || "").toUpperCase() === "PENDING_REVIEW") {
-      const btn = document.createElement("button");
-      btn.id = "approveArtifact"; btn.className = "btn small"; btn.textContent = "批准交付";
-      btn.onclick = () => approveArtifact(artifactId);
-      document.querySelector("#previewBox .head").appendChild(btn);
-    }
-  } catch (e) { toast(e.message); }
+  await openArtifactDrawer(artifactId);
 }
 
 async function approveArtifact(artifactId) {
@@ -5833,6 +5995,18 @@ document.getElementById("previewClose").onclick = () => {
   document.getElementById("previewBox").classList.add("hidden");
   S.selectedArtifact = null; renderArtifacts();
 };
+
+// 成果物抽屉：遮罩、关闭按钮、Esc 都能关（Esc 只关最内层——抽屉开着时
+// 不把下面的弹窗一起关掉）
+document.getElementById("drawerClose").onclick = closeArtifactDrawer;
+document.getElementById("artifactIdMask").onclick = closeArtifactDrawer;
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  const drawer = document.getElementById("artifactDrawer");
+  if (!drawer || drawer.classList.contains("hidden")) return;
+  closeArtifactDrawer();
+  event.stopPropagation();
+}, true);
 
 // 粘性跟随挂到主滚动容器上：一次挂载，之后所有渲染都走 sfStick.follow()
 sfStick.attach(document.getElementById("session"));
