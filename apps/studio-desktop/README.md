@@ -1,0 +1,54 @@
+# synapforge studio 桌面壳
+
+Electron 壳 + 本地 Python 内核。壳只负责窗口、托盘、菜单、单实例和内核生命周期；
+UI 与全部业务仍由内核在 `127.0.0.1:<随机端口>` 上提供（同源，SSE/绝对路径都不用改）。
+
+完整计划见 [`docs/STUDIO_DESKTOP_PLAN.md`](../../docs/STUDIO_DESKTOP_PLAN.md)。
+
+## 开发
+
+```powershell
+# 1) 打内核（ONEDIR，约 45MB；含 synapforge-core.exe 与 synapforge-mcp.exe）
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-studio-core.ps1
+
+# 2) 安装壳依赖（首次）
+cd apps\studio-desktop
+$env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
+npm install
+
+# 3) 启动
+npm start
+```
+
+没有打包内核时，壳会退回源码模式：用 `SF_PYTHON`（或 `%LOCALAPPDATA%\Programs\Python\Python312\python.exe`）
+跑 `scripts/synapforge_studio.py`，方便改内核代码即时生效。
+
+开发模式会自动开 `127.0.0.1:9333` 的 CDP 端口，便于查页面地址、抓截图；打包后不生效。
+
+## 目录
+
+| 文件 | 职责 |
+| --- | --- |
+| `src/main.js` | 单实例、窗口、托盘、菜单、IPC、退出清理 |
+| `src/core.js` | 解析/拉起内核、等 `studio.json`、健康检查、崩溃重启 |
+| `src/preload.js` | 只暴露壳能力（重启、状态、打开数据目录、日志），不暴露 Node |
+| `renderer/error.html` | 内核起不来时的错误页（可重试、看日志） |
+
+## 内核契约（壳只依赖这四个）
+
+1. 启动参数：`--no-browser --port 0 --state <db> --log-file <log> --parent-pid <pid>`
+2. 握手文件：`<state_dir>/studio.json`，`contract = "studio-v1"`，带 `port/token/pid`
+3. `GET /api/studio/health`（需 `X-Studio-Token`）
+4. `POST /api/studio/shutdown`（需 token；优雅退出，内核自己收尾）
+
+内核还有两层兜底：`studio.lock` 单实例锁（第二个内核 exit 3），以及 `--parent-pid`
+看门狗（壳退出后内核跟随，避免孤儿进程占端口）。
+
+## 已验收（2026-11-16）
+
+- 双击/启动后 1s 内出窗口；无控制台（PE subsystem = GUI）
+- 关闭窗口 → 托盘常驻；`Ctrl+Q` → 内核优雅退出、`studio.json` 删除
+- 第二次启动 → 聚焦已有窗口，不起第二个内核
+- `kill` 内核 → 自动重启并让窗口跟到新端口/新 token
+- `kill` 壳 → 内核跟随退出（Windows 下 Electron 的 job 对象会直接带走子进程）
+- 内核 45.3MB；`synapforge-mcp.exe` 17 个 MCP 工具、UTF-8 stdio 正常

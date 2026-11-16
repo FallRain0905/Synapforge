@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import http.client
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -14,7 +17,13 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from synapforge.studio.server import STATIC_DIR, build_server
+from synapforge.studio.server import (
+    STATIC_DIR,
+    _acquire_instance_lock,
+    _open_log,
+    _pid_alive,
+    build_server,
+)
 
 
 class StudioServerTests(unittest.TestCase):
@@ -469,6 +478,182 @@ class ReverseProxyTests(unittest.TestCase):
     def test_host_binding_defaults_to_loopback(self) -> None:
         self._serve()
         self.assertEqual(self.httpd.server_address[0], "127.0.0.1")
+
+
+class DesktopCoreTests(unittest.TestCase):
+    """桌面壳依赖的契约：健康检查、优雅退出、Host 防护、单实例、日志。"""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="sf-studio-desktop-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def _serve(self, **kwargs) -> str:
+        self.httpd, self.manager, self.token, self.port = build_server(
+            port=0, state_path=self.root / "state.db", token="desk-token",
+            skills_home=self.root / "home", **kwargs)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self._stop)
+        return f"http://127.0.0.1:{self.port}"
+
+    def _stop(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.manager.shutdown()
+        getattr(self.httpd, "agent_manager").shutdown()
+
+    def _get(self, path: str, *, host: str | None = None) -> tuple[int, dict]:
+        if host:
+            conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+            self.addCleanup(conn.close)
+            conn.request("GET", path, headers={"Host": host, "X-Studio-Token": "desk-token"})
+            response = conn.getresponse()
+            return response.status, json.loads(response.read().decode("utf-8"))
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}{path}",
+            headers={"X-Studio-Token": "desk-token"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+
+    def test_health_reports_contract(self) -> None:
+        self._serve()
+        status, payload = self._get("/api/studio/health")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["contract"], "studio-v1")
+        self.assertEqual(payload["pid"], os.getpid())
+        self.assertEqual(payload["port"], self.port)
+        self.assertIn("version", payload)
+        self.assertGreaterEqual(payload["uptime_s"], 0)
+
+    def test_host_header_rejected(self) -> None:
+        self._serve()
+        status, payload = self._get("/api/studio/health", host="evil.example")
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["code"], "host_rejected")
+
+    def test_public_url_host_allowed(self) -> None:
+        self._serve(public_url="https://studio.example.com")
+        status, payload = self._get("/api/studio/health", host="studio.example.com")
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+
+    def test_shutdown_stops_server(self) -> None:
+        base = self._serve()
+        request = urllib.request.Request(
+            base + "/api/studio/shutdown", data=b"{}", method="POST",
+            headers={"Content-Type": "application/json", "X-Studio-Token": "desk-token"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            self.assertTrue(json.loads(response.read().decode("utf-8"))["ok"])
+        self.thread.join(5)
+        self.assertFalse(self.thread.is_alive())
+
+    def test_instance_lock_is_exclusive(self) -> None:
+        directory = self.root / "state"
+        first = _acquire_instance_lock(directory)
+        self.assertIsNotNone(first)
+        self.assertIsNone(_acquire_instance_lock(directory))
+        first.close()  # type: ignore[union-attr]
+        third = _acquire_instance_lock(directory)
+        self.assertIsNotNone(third)
+        third.close()  # type: ignore[union-attr]
+
+    def test_open_log_rotates_once(self) -> None:
+        log = self.root / "logs" / "studio.log"
+        log.parent.mkdir(parents=True)
+        log.write_bytes(b"x" * (5 * 1024 * 1024 + 1))
+        stream = _open_log(log)
+        try:
+            print("hello", file=stream, flush=True)
+        finally:
+            stream.close()
+        self.assertTrue((self.root / "logs" / "studio.log.1").exists())
+        self.assertIn("hello", log.read_text(encoding="utf-8"))
+
+    def test_cli_serves_health_and_shuts_down(self) -> None:
+        """真子进程跑 `/studio --log-file`：验证 noconsole 下也能起、能停。"""
+        state = self.root / "state" / "state.db"
+        log = self.root / "logs" / "core.log"
+        local_root = Path(__file__).resolve().parents[1]
+        code = (
+            "import sys\n"
+            "from synapforge.cli import main\n"
+            "raise SystemExit(main(['studio', '--state', sys.argv[1], '--no-browser',\n"
+            "                       '--log-file', sys.argv[2], '--port', '0']))\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-X", "utf8", "-c", code, str(state), str(log)],
+            cwd=str(local_root))
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+
+        info_path = state.parent / "studio.json"
+        deadline = time.time() + 20
+        while time.time() < deadline and not info_path.exists():
+            if proc.poll() is not None:
+                detail = log.read_text(encoding="utf-8") if log.exists() else ""
+                self.fail(f"内核提前退出（{proc.returncode}）：{detail[-800:]}")
+            time.sleep(0.1)
+        self.assertTrue(info_path.exists(), "studio.json 未生成")
+
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+        self.assertEqual(info["contract"], "studio-v1")
+        self.assertEqual(info["pid"], proc.pid)
+        self.assertIn("started_at", info)
+        self.assertEqual(info["local_url"],
+                         f"http://127.0.0.1:{info['port']}/?token={info['token']}")
+
+        health = urllib.request.Request(
+            f"http://127.0.0.1:{info['port']}/api/studio/health",
+            headers={"X-Studio-Token": info["token"]})
+        with urllib.request.urlopen(health, timeout=10) as response:
+            self.assertTrue(json.loads(response.read().decode("utf-8"))["ok"])
+
+        stop = urllib.request.Request(
+            f"http://127.0.0.1:{info['port']}/api/studio/shutdown",
+            data=b"{}", method="POST",
+            headers={"Content-Type": "application/json",
+                     "X-Studio-Token": info["token"]})
+        with urllib.request.urlopen(stop, timeout=10) as response:
+            self.assertTrue(json.loads(response.read().decode("utf-8"))["ok"])
+
+        self.assertEqual(proc.wait(timeout=20), 0)
+        self.assertFalse(info_path.exists())
+        self.assertIn("synapforge studio", log.read_text(encoding="utf-8"))
+
+    def test_pid_alive(self) -> None:
+        self.assertTrue(_pid_alive(os.getpid()))
+        self.assertFalse(_pid_alive(999999))
+
+    def test_parent_watchdog_stops_core(self) -> None:
+        """壳被杀时内核要跟着退，不能留下占着端口的孤儿。"""
+        state = self.root / "state" / "state.db"
+        log = self.root / "logs" / "parent.log"
+        parent = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(lambda: parent.poll() is None and parent.kill())
+        code = (
+            "import sys\n"
+            "from synapforge.cli import main\n"
+            "raise SystemExit(main(['studio', '--state', sys.argv[1], '--no-browser',\n"
+            "                       '--log-file', sys.argv[2], '--parent-pid', sys.argv[3]]))\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-X", "utf8", "-c", code, str(state), str(log), str(parent.pid)],
+            cwd=str(Path(__file__).resolve().parents[1]))
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+
+        info_path = state.parent / "studio.json"
+        deadline = time.time() + 20
+        while time.time() < deadline and not info_path.exists():
+            if proc.poll() is not None:
+                self.fail("内核在握手前就退出了")
+            time.sleep(0.1)
+        self.assertTrue(info_path.exists())
+
+        parent.kill()
+        parent.wait(timeout=10)
+        self.assertEqual(proc.wait(timeout=20), 0)
+        self.assertFalse(info_path.exists())
 
 
 if __name__ == "__main__":

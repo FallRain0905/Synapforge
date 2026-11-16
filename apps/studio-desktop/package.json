@@ -1,0 +1,16 @@
+{
+  "name": "synapforge-studio-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "synapforge studio 桌面壳（Electron + 本地 Python 内核）",
+  "main": "src/main.js",
+  "type": "commonjs",
+  "license": "ISC",
+  "scripts": {
+    "start": "electron .",
+    "start:debug": "electron . --enable-logging"
+  },
+  "devDependencies": {
+    "electron": "^44.4.0"
+  }
+}

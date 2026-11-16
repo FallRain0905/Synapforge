@@ -26,6 +26,24 @@ from . import providers as studio_providers
 MCP_SCRIPT = _REPO_ROOT / "scripts" / "synapforge_mcp.py"
 
 
+def mcp_launch(*, agent_id: str, project_id: str,
+               state_path: str | None) -> tuple[str, list[str]]:
+    """MCP stdio 服务的启动命令。
+
+    源码形态用 `python scripts/synapforge_mcp.py`；冻结后脚本不在磁盘上，
+    改用同目录的 `synapforge-mcp.exe`（控制台子系统，GUI exe 没有 stdout）。
+    """
+    base = ["--agent", agent_id, "--project", project_id]
+    if state_path:
+        base += ["--state", str(state_path)]
+    if getattr(sys, "frozen", False):
+        mcp_exe = Path(sys.executable).with_name(
+            "synapforge-mcp.exe" if os.name == "nt" else "synapforge-mcp")
+        if mcp_exe.exists():
+            return str(mcp_exe), base
+    return sys.executable, [str(MCP_SCRIPT), *base]
+
+
 class BackendError(RuntimeError):
     def __init__(self, code: str, detail: str = "") -> None:
         self.code = code
@@ -106,11 +124,10 @@ def write_mcp_config(path: Path, *, agent_id: str, project_id: str,
                      extra_servers: dict[str, Any] | None = None) -> Path:
     """写本次调用的 MCP 配置：`synapforge`（任务板）必需，可再合并角色自己的服务器。"""
 
-    args = [str(MCP_SCRIPT), "--agent", agent_id, "--project", project_id]
-    if state_path:
-        args += ["--state", str(state_path)]
+    command, args = mcp_launch(agent_id=agent_id, project_id=project_id,
+                               state_path=state_path)
     servers: dict[str, Any] = {"synapforge": {
-        "command": sys.executable,
+        "command": command,
         "args": args,
     }}
     for name, config in (extra_servers or {}).items():

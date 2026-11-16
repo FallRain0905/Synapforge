@@ -274,6 +274,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="反代子路径，如 /studio")
     p.add_argument("--public-url", default=os.environ.get("SYNAPFORGE_STUDIO_PUBLIC_URL", ""),
                    help="对外访问地址，仅用于打印与写 studio.json")
+    p.add_argument("--log-file", default=os.environ.get("SYNAPFORGE_STUDIO_LOG", ""),
+                   help="日志文件；桌面壳用它接住 --noconsole 下没有的 stdout")
+    p.add_argument("--parent-pid", type=int, default=0,
+                   help="桌面壳进程号；它退出时内核跟随关闭（避免孤儿进程）")
 
     return parser
 
@@ -307,7 +311,8 @@ def main(argv: list[str] | None = None) -> int:
         origins += [item.strip() for item in env_origins.split(",") if item.strip()]
         serve(port=args.port, open_browser=not args.no_browser, state_path=state,
               host=args.host, allowed_origins=origins,
-              base_path=args.base_path, public_url=args.public_url)
+              base_path=args.base_path, public_url=args.public_url,
+              log_file=args.log_file or None, parent_pid=args.parent_pid)
         return 0
 
     store = open_store(state or db_path())

@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>synapforge studio · 内核没有启动</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px; min-height: 100vh;
+    background: #0b0f14; color: #e6edf3;
+    font: 14px/1.65 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+  h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: .2px; }
+  .lead { margin: 0; color: #9aa7b4; }
+  .card { background: #111820; border: 1px solid #1f2a36; border-radius: 10px; padding: 14px 16px; }
+  .msg { color: #ffb4b4; font-family: Consolas, "Cascadia Mono", monospace; font-size: 12.5px; white-space: pre-wrap; }
+  details { background: #0e151d; border: 1px solid #1f2a36; border-radius: 10px; padding: 10px 14px; }
+  summary { cursor: pointer; color: #9aa7b4; }
+  pre {
+    margin: 10px 0 0; max-height: 46vh; overflow: auto;
+    font: 12px/1.55 Consolas, "Cascadia Mono", monospace; color: #c9d4df;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  button {
+    border: 1px solid #2a3a4a; background: #16202b; color: #e6edf3;
+    border-radius: 8px; padding: 8px 14px; font: inherit; cursor: pointer;
+  }
+  button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  button:hover { filter: brightness(1.12); }
+  .hint { color: #6f7d8b; font-size: 12.5px; }
+</style>
+</head>
+<body>
+  <h1>内核没有启动</h1>
+  <p class="lead">壳已经起来了，但本地 Python 内核没连上。下面是它给出的原因，重试前可以先看日志。</p>
+
+  <div class="card"><div class="msg" id="message">（没有错误信息）</div></div>
+
+  <details open>
+    <summary>内核日志（尾部）</summary>
+    <pre id="log">（日志为空）</pre>
+  </details>
+
+  <div class="row">
+    <button class="primary" id="retry">重试启动</button>
+    <button id="open-data">打开数据目录</button>
+    <button id="quit">退出</button>
+  </div>
+  <p class="hint">常见原因：没有打包内核（跑一次 <code>scripts\build-studio-core.ps1</code>）、端口被占、Python 环境缺依赖。</p>
+
+<script>
+  const params = new URLSearchParams(location.search);
+  const message = params.get("message") || "（没有错误信息）";
+  const log = params.get("log") || "";
+  document.getElementById("message").textContent = message;
+  document.getElementById("log").textContent = log || "（日志为空）";
+
+  const bridge = window.synapforgeStudio;
+  document.getElementById("retry").addEventListener("click", () => {
+    const button = document.getElementById("retry");
+    button.disabled = true;
+    button.textContent = "正在重启…";
+    Promise.resolve(bridge && bridge.restartCore()).finally(() => {
+      button.disabled = false;
+      button.textContent = "重试启动";
+    });
+  });
+  document.getElementById("open-data").addEventListener("click", () => {
+    if (bridge) bridge.openDataDir();
+  });
+  document.getElementById("quit").addEventListener("click", () => {
+    if (bridge) bridge.quit();
+  });
+</script>
+</body>
+</html>

@@ -11,6 +11,7 @@ import json
 import os
 import queue
 import secrets
+import sys
 import threading
 import time
 import webbrowser
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .. import __version__
 from .. import commands as base
 from ..db import open_store
 from ..paths import state_dir
@@ -48,6 +50,126 @@ def _json_bytes(payload: Any) -> bytes:
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
+def _state_path_for(state_path: str | Path | None) -> Path:
+    """握手/锁/日志落在 state 目录：给了 state.db 就是它的父目录。"""
+    return Path(state_path).expanduser().resolve().parent if state_path else state_dir()
+
+
+def _open_log(path: str | Path) -> Any:
+    """打开日志（追加、UTF-8、行缓冲），超过 5MB 先轮转一次。
+
+    必须在第一条 print 之前调用：PyInstaller `--noconsole` 下 sys.stdout 是 None，
+    直接 print 会抛 AttributeError（Windows 上表现为进程秒退、什么也看不到）。
+    """
+    target = Path(path).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if target.exists() and target.stat().st_size > 5 * 1024 * 1024:
+            rotated = target.with_name(target.name + ".1")
+            if rotated.exists():
+                rotated.unlink()
+            target.replace(rotated)
+    except OSError:
+        pass
+    return open(target, "a", encoding="utf-8", errors="replace", buffering=1)
+
+
+def _redirect_stdio(stream: Any) -> None:
+    sys.stdout = stream
+    sys.stderr = stream
+
+
+def _netloc_key(value: str) -> str:
+    """把 URL 或 Host 归一成可比较的 host[:port]，默认端口不写。"""
+    parsed = urlparse(value if "://" in value else f"//{value}")
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return ""
+    if ":" in host:  # IPv6 在 URL 里带方括号，Host 头也带
+        host = f"[{host}]"
+    port = parsed.port
+    if port and not ((parsed.scheme == "http" and port == 80)
+                     or (parsed.scheme == "https" and port == 443)):
+        return f"{host}:{port}"
+    return host
+
+
+def _pid_alive(pid: int) -> bool:
+    """跨平台探活。
+
+    注意：Windows 上 `os.kill(pid, 0)` 会走 TerminateProcess（信号 0 等于直接杀进程），
+    绝对不能用；这里用 OpenProcess + GetExitCodeProcess。
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        # 不声明 restype 时 ctypes 默认按 32 位 int 收句柄，64 位下会被截断。
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE,
+                                               ctypes.POINTER(wintypes.DWORD)]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel32.OpenProcess(0x1000, False, int(pid))  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _watch_parent(httpd: ThreadingHTTPServer, parent_pid: int) -> None:
+    """桌面壳死了，内核跟着退：否则会留下一个占着端口的孤儿进程。"""
+    while True:
+        time.sleep(2.0)
+        if not _pid_alive(parent_pid):
+            print("父进程已退出，内核跟随关闭", flush=True)
+            threading.Thread(target=httpd.shutdown, daemon=True).start()
+            return
+
+
+def _acquire_instance_lock(directory: Path) -> Any | None:
+    """同一状态目录只允许一个内核；拿不到锁返回 None。
+
+    两个内核同时写一个 SQLite 库不会立刻炸，但两个 supervisor 会重复领同一批任务，
+    属于"看起来能用、实际做两遍"的隐性故障，必须在入口挡住。
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "studio.lock"
+    handle = open(path, "a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"1")
+            handle.flush()
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "synapforge-studio/0.1"
 
@@ -62,6 +184,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        # URL 里带 token；别让它经 Referer 漏到外部资源。
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -96,6 +220,28 @@ class _Handler(BaseHTTPRequestHandler):
         # 默认仍只认回环（本地形态不该因为多一个开关就放松）。
         allowed |= set(getattr(self.server, "allowed_origins", ()) or ())
         return origin in allowed
+
+    def _host_ok(self) -> bool:
+        """防 DNS rebinding：本地形态只认回环 Host。
+
+        反代部署时 nginx 传的是公网域名，按 --public-url / --allowed-origin 放行；
+        两者都没配却收到公网 Host，说明部署配置漏了，宁可拒绝。
+        """
+        host = (self.headers.get("Host") or "").strip().lower()
+        if not host:
+            return False
+        port = getattr(self.server, "server_port", 0)
+        allowed = {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+        public = str(getattr(self.server, "public_url", "") or "").strip()
+        if public:
+            key = _netloc_key(public)
+            if key:
+                allowed.add(key)
+        for origin in getattr(self.server, "allowed_origins", ()) or ():
+            key = _netloc_key(origin)
+            if key:
+                allowed.add(key)
+        return host in allowed
 
     def _read_json(self) -> dict[str, Any]:
         try:
@@ -144,6 +290,9 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._fail("unauthorized", status=401)
             return
+        if not self._host_ok():
+            self._fail("host_rejected", status=403)
+            return
         parts = [p for p in path.strip("/").split("/") if p]
         if len(parts) == 5 and parts[2] == "runs" and parts[4] == "stream":
             self._stream_run(parts[3])
@@ -159,6 +308,14 @@ class _Handler(BaseHTTPRequestHandler):
         parts = [p for p in path.strip("/").split("/") if p]
         # /api/studio/...
         tail = parts[2:]
+        if tail == ["health"]:
+            started = float(getattr(self.server, "started_at", time.time()))
+            self._json({"ok": True, "contract": "studio-v1",
+                        "version": getattr(self.server, "version", __version__),
+                        "pid": os.getpid(),
+                        "port": getattr(self.server, "server_port", 0),
+                        "uptime_s": round(max(0.0, time.time() - started), 1)})
+            return
         if tail == ["state"]:
             cluster_id = (query.get("cluster_id") or [None])[0]
             store = self._store()
@@ -660,6 +817,9 @@ class _Handler(BaseHTTPRequestHandler):
         if not self._origin_ok():
             self._fail("origin_rejected", status=403)
             return
+        if not self._host_ok():
+            self._fail("host_rejected", status=403)
+            return
         try:
             body = self._read_json()
             self._route_mutate(method, path, body)
@@ -673,6 +833,13 @@ class _Handler(BaseHTTPRequestHandler):
         tail = parts[2:]
         manager: SupervisorManager = getattr(self.server, "manager")
         agent_manager: AgentRuntimeManager = getattr(self.server, "agent_manager")
+
+        if method == "POST" and tail == ["shutdown"]:
+            # 桌面壳点「退出」走这里：先回包，再让 serve_forever 退出，
+            # 这样 supervisor/agent_manager 的 finally 还能正常收尾。
+            self._json({"ok": True})
+            threading.Timer(0.05, getattr(self.server, "shutdown")).start()
+            return
 
         if (method == "POST" and tail == ["skills", "import"]):
             store = self._store()
@@ -1276,6 +1443,7 @@ def build_server(*, port: int = 0, state_path: str | Path | None = None,
                  host: str = "127.0.0.1",
                  allowed_origins: tuple[str, ...] | list[str] | None = None,
                  base_path: str = "",
+                 public_url: str = "",
                  ) -> tuple[ThreadingHTTPServer, SupervisorManager, str, int]:
     """构造但不启动；测试与 `serve` 共用，避免两套初始化。"""
 
@@ -1298,6 +1466,9 @@ def build_server(*, port: int = 0, state_path: str | Path | None = None,
     httpd.bind_host = host  # type: ignore[attr-defined]
     httpd.allowed_origins = tuple(o.strip().rstrip("/") for o in (allowed_origins or ()) if o.strip())  # type: ignore[attr-defined]
     httpd.base_path = _normalize_base_path(base_path)  # type: ignore[attr-defined]
+    httpd.public_url = str(public_url or "").strip()  # type: ignore[attr-defined]
+    httpd.started_at = time.time()  # type: ignore[attr-defined]
+    httpd.version = __version__  # type: ignore[attr-defined]
     return httpd, manager, actual_token, actual
 
 
@@ -1311,8 +1482,19 @@ def serve(*, port: int = 0, open_browser: bool = True,
           host: str = "127.0.0.1",
           allowed_origins: tuple[str, ...] | list[str] | None = None,
           base_path: str = "",
-          public_url: str = "") -> None:
-    info_path = (Path(state_path).expanduser().resolve().parent if state_path else state_dir()) / "studio.json"
+          public_url: str = "",
+          log_file: str | Path | None = None,
+          parent_pid: int = 0) -> None:
+    directory = _state_path_for(state_path)
+    # 打包成 --noconsole 时 sys.stdout 是 None；先把日志接上，后面所有 print 才安全。
+    if log_file or sys.stdout is None or sys.stderr is None:
+        _redirect_stdio(_open_log(log_file or (directory / "logs" / "studio.log")))
+    lock = _acquire_instance_lock(directory)
+    if lock is None:
+        print("synapforge studio 已在运行：同一状态目录只允许一个实例。", flush=True)
+        print(f"  状态目录：{directory}", flush=True)
+        raise SystemExit(3)
+    info_path = directory / "studio.json"
     existing_token = ""
     try:
         existing = json.loads(info_path.read_text(encoding="utf-8"))
@@ -1322,18 +1504,22 @@ def serve(*, port: int = 0, open_browser: bool = True,
         existing_token = ""
     httpd, manager, token, actual = build_server(
         port=port, state_path=state_path, token=existing_token or None,
-        host=host, allowed_origins=allowed_origins, base_path=base_path)
+        host=host, allowed_origins=allowed_origins, base_path=base_path,
+        public_url=public_url)
 
     local_url = f"http://127.0.0.1:{actual}/?token={token}"
     url = (public_url.rstrip("/") + f"/?token={token}") if public_url else local_url
     info = {"contract": "studio-v1", "port": actual, "url": url, "local_url": local_url,
             "token": token, "host": host, "base_path": _normalize_base_path(base_path),
-            "pid": os.getpid(),
+            "pid": os.getpid(), "started_at": int(time.time()),
             "state_path": str(state_path) if state_path else str(state_dir() / "state.db")}
     try:
         info_path.parent.mkdir(parents=True, exist_ok=True)
-        info_path.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.chmod(info_path, 0o600)
+        # 壳会轮询这个文件：先写临时文件再原子替换，避免读到半截 JSON。
+        tmp_path = info_path.with_name(info_path.name + ".tmp")
+        tmp_path.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, info_path)
     except OSError:
         pass
     print("synapforge studio（本地控制台）", flush=True)
@@ -1341,7 +1527,12 @@ def serve(*, port: int = 0, open_browser: bool = True,
     if host not in ("127.0.0.1", "localhost", "::1"):
         print(f"  监听：{host}:{actual}（非回环，务必只经反代暴露）", flush=True)
     print(f"  状态库：{state_path or state_dir() / 'state.db'}", flush=True)
-    print("  关闭：Ctrl-C", flush=True)
+    print(f"  日志：{log_file or directory / 'logs' / 'studio.log'}", flush=True)
+    print("  关闭：Ctrl-C / POST /api/studio/shutdown", flush=True)
+    if int(parent_pid or 0) > 0:
+        threading.Thread(target=_watch_parent, args=(httpd, int(parent_pid)),
+                         daemon=True).start()
+        print(f"  父进程：{parent_pid}（它退出时内核跟随）", flush=True)
     if open_browser:
         threading.Timer(0.4, lambda: webbrowser.open(url)).start()
     try:
@@ -1357,3 +1548,4 @@ def serve(*, port: int = 0, open_browser: bool = True,
                 info_path.unlink()
         except (OSError, ValueError):
             pass
+        lock.close()

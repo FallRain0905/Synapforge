@@ -10,6 +10,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# 桌面壳拿它做「关于」与 /health；与平台版本解耦，单独递增。
+__version__ = "0.1.0"
+
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _API_ROOT = _REPO_ROOT / "apps" / "api"
 # apps/agent 里有三个**纯净可复用**的模块：workspace_scan（快照/差分）、

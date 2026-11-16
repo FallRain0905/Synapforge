@@ -39,6 +39,8 @@ dist/
 dist-deploy/
 dist-sidecar/
 dist-sidecar-build/
+dist-studio-core/
+dist-studio-core-build/
 apps/desktop/dist/
 apps/desktop/release/
 apps/desktop/node_modules/
