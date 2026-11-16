@@ -5725,7 +5725,43 @@ function renderEmpty() {
   document.getElementById("previewBox").classList.add("hidden");
 }
 
+// 桌面壳：把当前运行/集群状态同步到任务栏（进度、叠加图标、缩略图按钮）。
+let lastTaskbarPayload = "";
+function syncTaskbar() {
+  if (!window.synapforgeStudio || !window.synapforgeStudio.taskbarState) return;
+  const payload = {
+    runId: (S.run && S.run.id) || "",
+    runStatus: String((S.run && S.run.status) || ""),
+    clusterId: S.taskClusterId || (S.cluster && S.cluster.id) || "",
+    clusterStatus: "",
+  };
+  const cluster = (S.clusters || []).find(c => c.id === payload.clusterId)
+    || (S.taskClusters || []).find(c => c.id === payload.clusterId)
+    || (S.cluster && S.cluster.id === payload.clusterId ? S.cluster : null);
+  if (cluster) payload.clusterStatus = String(cluster.status || "");
+  const text = JSON.stringify(payload);
+  if (text === lastTaskbarPayload) return;
+  lastTaskbarPayload = text;
+  void window.synapforgeStudio.taskbarState(payload);
+}
+
+let lastRecentClusters = "";
+function syncRecentClusters() {
+  if (!window.synapforgeStudio || !window.synapforgeStudio.setRecentClusters) return;
+  const source = (S.taskClusters && S.taskClusters.length) ? S.taskClusters : (S.clusters || []);
+  const rows = source.slice(0, 5)
+    .map(item => ({ id: item.id, name: item.name || String(item.id).slice(0, 8) }))
+    .filter(item => item.id);
+  if (!rows.length) return;
+  const text = JSON.stringify(rows);
+  if (text === lastRecentClusters) return;
+  lastRecentClusters = text;
+  void window.synapforgeStudio.setRecentClusters(rows);
+}
+
 function renderHeader() {
+  syncTaskbar();
+  syncRecentClusters();
   const crumbRoot = document.getElementById("crumbRoot");
   if (S.view === "run") {
     const run = S.runDetail || {};

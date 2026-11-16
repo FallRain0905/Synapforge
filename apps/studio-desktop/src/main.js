@@ -274,6 +274,120 @@ function openLog() {
   }
 }
 
+// ---- 任务栏：进度、叠加图标、缩略图按钮、Jump List ----
+let taskbarState = { runId: "", runStatus: "", clusterId: "", clusterStatus: "" };
+let lastTaskbarPayload = "";
+const RECENT_CLUSTERS = path.join(app.getPath("userData"), "recent-clusters.json");
+
+function thumbIcon(name) {
+  return nativeImage.createFromPath(path.join(ASSETS, name));
+}
+
+async function coreAction(apiPath) {
+  const info = core && core.info;
+  if (!info) return false;
+  try {
+    const response = await fetch(`http://127.0.0.1:${info.port}${apiPath}`, {
+      method: "POST",
+      headers: { "X-Studio-Token": info.token, "Content-Type": "application/json" },
+      body: "{}",
+      signal: AbortSignal.timeout(4000),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+function applyTaskbarState() {
+  if (!win || win.isDestroyed()) return;
+  if (!SHELL_CONFIG.taskbar) {
+    win.setProgressBar(-1);
+    win.setOverlayIcon(null, "");
+    win.setThumbarButtons([]);
+    return;
+  }
+  const running = taskbarState.runStatus === "RUNNING" || taskbarState.runStatus === "QUEUED";
+  win.setProgressBar(running ? 2 : -1); // 2 = 不确定态（Windows 的循环进度）
+  if (taskbarState.runStatus === "FAILED") {
+    win.setOverlayIcon(thumbIcon("overlay-red.png"), "有任务失败");
+  } else if (taskbarState.runStatus === "DONE") {
+    win.setOverlayIcon(thumbIcon("overlay-green.png"), "有任务完成");
+  } else {
+    win.setOverlayIcon(null, "");
+  }
+
+  const buttons = [];
+  const clusterActive = taskbarState.clusterId
+    && (taskbarState.clusterStatus === "RUNNING" || taskbarState.clusterStatus === "PAUSED");
+  if (clusterActive) {
+    const paused = taskbarState.clusterStatus === "PAUSED";
+    buttons.push({
+      icon: thumbIcon(paused ? "thumb-play.png" : "thumb-pause.png"),
+      tooltip: paused ? "恢复集群" : "暂停集群",
+      click: () => void coreAction(
+        `/api/studio/clusters/${encodeURIComponent(taskbarState.clusterId)}/${paused ? "resume" : "pause"}`),
+    });
+  }
+  if (running && taskbarState.runId) {
+    buttons.push({
+      icon: thumbIcon("thumb-stop.png"),
+      tooltip: "停止当前运行",
+      click: () => void coreAction(`/api/studio/runs/${encodeURIComponent(taskbarState.runId)}/stop`),
+    });
+  }
+  buttons.push({
+    icon: thumbIcon("thumb-open.png"),
+    tooltip: "打开 synapforge studio",
+    click: () => showWindow(),
+  });
+  win.setThumbarButtons(buttons);
+}
+
+function applyJumpList(clusters) {
+  // Jump List 依赖带 AppUserModelID 的开始菜单快捷方式，开发期（electron.exe）不生效。
+  if (!app.isPackaged || process.platform !== "win32") return;
+  try {
+    if (!clusters.length) {
+      app.setJumpList([]);
+      return;
+    }
+    app.setJumpList([{
+      name: "最近集群",
+      items: clusters.map((item) => ({
+        type: "task",
+        title: String(item.name || "集群"),
+        program: process.execPath,
+        args: [`synapforge://cluster/${item.id}`],
+      })),
+    }]);
+  } catch (error) {
+    console.log("[jump] failed", String(error));
+  }
+}
+
+function setRecentClusters(clusters) {
+  const rows = (Array.isArray(clusters) ? clusters : [])
+    .slice(0, 5)
+    .map((item) => ({ id: String(item.id || ""), name: String(item.name || "") }))
+    .filter((item) => item.id);
+  try {
+    fs.writeFileSync(RECENT_CLUSTERS, JSON.stringify(rows), "utf8");
+  } catch {
+    /* 记不住最近集群不影响使用 */
+  }
+  applyJumpList(rows);
+}
+
+function loadRecentClusters() {
+  try {
+    const rows = JSON.parse(fs.readFileSync(RECENT_CLUSTERS, "utf8"));
+    return Array.isArray(rows) ? rows : [];
+  } catch {
+    return [];
+  }
+}
+
 function openDiagnostics() {
   if (diagWin && !diagWin.isDestroyed()) {
     diagWin.show();
@@ -639,6 +753,26 @@ function registerIpc() {
     return true;
   });
 
+  ipcMain.handle("taskbar:state", (_event, state = {}) => {
+    const next = {
+      runId: String(state.runId || ""),
+      runStatus: String(state.runStatus || ""),
+      clusterId: String(state.clusterId || ""),
+      clusterStatus: String(state.clusterStatus || ""),
+    };
+    const text = JSON.stringify(next);
+    if (text === lastTaskbarPayload) return false;
+    lastTaskbarPayload = text;
+    taskbarState = next;
+    applyTaskbarState();
+    return true;
+  });
+
+  ipcMain.handle("taskbar:recentClusters", (_event, clusters) => {
+    setRecentClusters(clusters);
+    return true;
+  });
+
   // WCO 下菜单栏不显示：标题栏里的「⋯」重新打开应用菜单。
   ipcMain.handle("menu:appPopup", () => {
     if (!appMenu || !win || win.isDestroyed()) return false;
@@ -690,6 +824,7 @@ if (!app.requestSingleInstanceLock()) {
     app.setAppUserModelId("top.synapforge.studio");
     if (!app.isPackaged) console.log("[shell] config", JSON.stringify(SHELL_CONFIG));
     registerProtocol();
+    applyJumpList(loadRecentClusters());
     pendingTarget = deepLinkFromArgv(process.argv) || pendingTarget;
     core = new StudioCore({
       repoRoot: REPO_ROOT,

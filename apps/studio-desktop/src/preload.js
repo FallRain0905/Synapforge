@@ -18,6 +18,8 @@ contextBridge.exposeInMainWorld("synapforgeStudio", {
   setTitlebarTheme: (theme) => ipcRenderer.invoke("shell:titlebarTheme", theme),
   windowInfo: () => ipcRenderer.invoke("shell:windowInfo"),
   appMenu: () => ipcRenderer.invoke("menu:appPopup"),
+  taskbarState: (state) => ipcRenderer.invoke("taskbar:state", state),
+  setRecentClusters: (clusters) => ipcRenderer.invoke("taskbar:recentClusters", clusters),
   openDataDir: () => ipcRenderer.invoke("app:openDataDir"),
   openDiagnostics: () => ipcRenderer.invoke("app:diagnostics"),
   quit: () => ipcRenderer.invoke("app:quit"),
