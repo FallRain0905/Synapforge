@@ -22,6 +22,8 @@
   --font:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif;
   --code:"Cascadia Mono",Consolas,"Microsoft YaHei UI","Microsoft YaHei",monospace;
   --side-w:212px; --inspector-w:340px; --radius:10px;
+  /* 层级表：统一在这里定义，不要在各处硬写数字，否则弹窗套浮层会互相压 */
+  --z-menu:900; --z-modal:1000; --z-pop:1050; --z-toast:2000;
   color-scheme:dark;
 }
 :root[data-theme="light"] {
@@ -204,6 +206,36 @@ main { min-width:0; display:flex; flex-direction:column; min-height:0; backgroun
   white-space:pre-wrap; overflow-wrap:anywhere; padding-left:28px; }
 .msg-body.pending::after { content:"▍"; color:var(--accent); animation:blink 1s steps(2) infinite; }
 @keyframes blink { 50% { opacity:0; } }
+
+/* Markdown 正文：块级元素自己排版，所以关掉 pre-wrap（否则空行会翻倍） */
+.msg-body.md { white-space:normal; }
+.msg-body.md > :first-child { margin-top:0; }
+.msg-body.md > :last-child { margin-bottom:0; }
+.msg-body.md p { margin:0 0 9px; }
+.msg-body.md h1,.msg-body.md h2,.msg-body.md h3,
+.msg-body.md h4,.msg-body.md h5,.msg-body.md h6 {
+  margin:14px 0 7px; font-weight:600; line-height:1.45; letter-spacing:-.005em; }
+.msg-body.md h2 { font-size:15px; }
+.msg-body.md h3 { font-size:14px; }
+.msg-body.md h4,.msg-body.md h5,.msg-body.md h6 { font-size:13px; color:var(--fg-2); }
+.msg-body.md ul,.msg-body.md ol { margin:0 0 9px; padding-left:20px; }
+.msg-body.md li { margin:2px 0; }
+.msg-body.md li > p { margin:0; }
+.msg-body.md code { font-family:var(--code); font-size:11.5px;
+  background:var(--pill); border-radius:4px; padding:1px 4px; }
+.msg-body.md pre.md-code { margin:0 0 9px; padding:9px 11px; background:var(--card-2);
+  border:1px solid var(--line-2); border-radius:8px; overflow:auto; }
+.msg-body.md pre.md-code code { background:none; padding:0; font-size:11.5px;
+  line-height:1.6; white-space:pre; }
+.msg-body.md blockquote { margin:0 0 9px; padding:2px 0 2px 10px;
+  border-left:2px solid var(--line); color:var(--fg-2); }
+.msg-body.md hr { margin:12px 0; border:0; border-top:1px solid var(--line); }
+.msg-body.md a { color:var(--accent); text-decoration:underline; text-underline-offset:2px; }
+.msg-body.md .md-table-wrap { margin:0 0 9px; overflow:auto; }
+.msg-body.md table.md-table { border-collapse:collapse; font-size:11.5px; }
+.msg-body.md table.md-table th,.msg-body.md table.md-table td {
+  border:1px solid var(--line); padding:5px 9px; text-align:left; }
+.msg-body.md table.md-table th { background:var(--card-2); font-weight:600; color:var(--fg-2); }
 
 /* 可折叠细节行 */
 .fold { margin:8px 0 8px 28px; border-left:2px solid var(--line-2); }
@@ -495,12 +527,13 @@ main { min-width:0; display:flex; flex-direction:column; min-height:0; backgroun
   white-space:nowrap; font-size:11.5px; }
 .model-trigger .chev { flex:none; color:var(--faint); font-size:9px; transition:transform .16s; }
 .model-trigger.open .chev { transform:rotate(180deg); }
-.model-pop { position:absolute; z-index:25; margin-top:5px; width:100%;
+.model-pop { position:fixed; z-index:var(--z-pop); width:320px;
   background:var(--card); border:1px solid var(--line); border-radius:10px;
   box-shadow:var(--shadow); overflow:hidden;
   animation:popIn .14s cubic-bezier(.2,.8,.3,1); transform-origin:top center; }
 @keyframes popIn { from { opacity:0; transform:translateY(-4px) scale(.985); }
   to { opacity:1; transform:none; } }
+.model-pop.flip { transform-origin:bottom center; }
 .model-pop-head { padding:7px 8px; border-bottom:1px solid var(--line-2); }
 .model-pop-body { max-height:260px; overflow:auto; padding:4px; }
 .model-group-label { padding:6px 8px 3px; font-size:9.5px; letter-spacing:.04em;
@@ -650,7 +683,7 @@ textarea.ctl { height:auto; padding:7px 8px; }
 .nav-row.sub svg { width:14px; height:14px; }
 
 /* modal */
-.modal { position:fixed; inset:0; z-index:30; display:flex; align-items:flex-start;
+.modal { position:fixed; inset:0; z-index:var(--z-modal); display:flex; align-items:flex-start;
   justify-content:center; padding:7vh 16px; background:rgba(0,0,0,.55); }
 .modal.hidden { display:none; }
 .modal-card { width:min(600px,100%); max-height:86vh; overflow:auto; background:var(--card);
@@ -666,11 +699,14 @@ textarea.ctl { height:auto; padding:7px 8px; }
 .form-grid input:focus,.form-grid textarea:focus { outline:none; border-color:var(--accent); }
 .modal-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:18px; }
 .error { color:var(--red); font-size:11.5px; white-space:pre-wrap; margin-bottom:10px; }
-.toast { position:fixed; right:18px; bottom:18px; z-index:40; background:var(--card);
-  border:1px solid var(--line); color:var(--fg); padding:9px 12px; border-radius:8px;
-  font-size:12px; box-shadow:var(--shadow); opacity:0; transform:translateY(6px);
-  transition:.16s; pointer-events:none; }
-.toast.show { opacity:1; transform:none; }
+/* Toast 顶部居中：原来在右下角会被 inspector / composer 挡住，也不够显眼。
+   压在顶栏（52px）下面，pointer-events:none 让提示不挡下方操作。 */
+.toast { position:fixed; left:50%; top:calc(62px + env(safe-area-inset-top));
+  z-index:var(--z-toast); background:var(--card);
+  border:1px solid var(--line); color:var(--fg); padding:9px 14px; border-radius:9px;
+  font-size:12px; box-shadow:var(--shadow); opacity:0; transform:translate(-50%,-8px);
+  transition:.16s; pointer-events:none; max-width:min(calc(100vw - 28px),480px); }
+.toast.show { opacity:1; transform:translate(-50%,0); }
 
 /* 集群任务：可展开的任务行 */
 .task-row { cursor:pointer; }
@@ -1133,10 +1169,255 @@ function esc(v) {
   return String(v == null ? "" : v).replace(/[&<>"']/g,
     c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
+// ---- 浮层锚定 --------------------------------------------------------------
+// 浮层原来是 `position:absolute` 挂在表单流里：父容器的 overflow 会裁它、
+// 靠近窗口底部不会翻面、面板滚走时它自己不动。这里改成 fixed + 实测矩形 +
+// 上下翻面 + 视口收口（思路来自 deepseek-ai/chat-demo 的 anchored.ts，MIT）。
+const SF_ANCHOR_PAD = 8;
+
+function sfResolveSide(spaceAbove, spaceBelow, preferred, needed) {
+  const fitsAbove = spaceAbove >= needed;
+  const fitsBelow = spaceBelow >= needed;
+  if (fitsAbove && !fitsBelow) return "top";
+  if (fitsBelow && !fitsAbove) return "bottom";
+  if (fitsAbove) return preferred;
+  return spaceAbove > spaceBelow ? "top" : "bottom";
+}
+
+// 返回一个 reflow 函数；调用方负责在关闭时 destory
+function sfAnchor(trigger, panel, opts) {
+  const options = opts || {};
+  const offset = options.offset == null ? 6 : options.offset;
+  const align = options.align || "start";
+  const maxHeight = options.maxHeight || 0;
+  const minWidth = options.minWidth || 0;
+
+  const place = () => {
+    if (!trigger.isConnected || !panel.isConnected) return;
+    const rect = trigger.getBoundingClientRect();
+    const above = rect.top - offset - SF_ANCHOR_PAD;
+    const below = innerHeight - rect.bottom - offset - SF_ANCHOR_PAD;
+    const wanted = maxHeight || panel.offsetHeight;
+    const side = sfResolveSide(above, below, options.side || "bottom", wanted);
+    const available = Math.max(0, side === "top" ? above : below);
+    let height = 0;
+    if (maxHeight) {
+      height = Math.max(160, Math.min(maxHeight, available, panel.scrollHeight + 2));
+      panel.style.maxHeight = height + "px";
+      panel.style.overflowY = "auto";
+    }
+    const measured = height || panel.offsetHeight;
+    const top = side === "top"
+      ? Math.max(SF_ANCHOR_PAD, rect.top - offset - measured)
+      : rect.bottom + offset;
+    panel.style.top = Math.round(top) + "px";
+
+    const width = Math.max(minWidth, panel.offsetWidth);
+    if (minWidth && panel.offsetWidth < minWidth) panel.style.width = minWidth + "px";
+    let left = align === "center" ? rect.left + rect.width / 2 - width / 2
+             : align === "end" ? rect.right - width
+             : rect.left;
+    left = Math.max(SF_ANCHOR_PAD, Math.min(left, innerWidth - width - SF_ANCHOR_PAD));
+    panel.style.left = Math.round(left) + "px";
+    panel.classList.toggle("flip", side === "top");
+    panel.dataset.side = side;
+  };
+
+  const schedule = () => { place(); };
+  const observer = new ResizeObserver(schedule);
+  observer.observe(panel);
+  observer.observe(trigger);
+  addEventListener("scroll", schedule, { capture: true, passive: true });
+  addEventListener("resize", schedule, { passive: true });
+
+  return {
+    place,
+    destroy() {
+      observer.disconnect();
+      removeEventListener("scroll", schedule, { capture: true });
+      removeEventListener("resize", schedule);
+    },
+  };
+}
+
+// ---- 粘性跟随滚动 ----------------------------------------------------------
+// 原来有 4 处各自算"距底 < 阈值就自动滚到底"，阈值还各不相同（220/240/160/220）。
+// 两个真实问题：① 一次增量超过阈值（长工具输出）就永久掉队，用户往上翻不回来；
+// ② 用户主动往上翻看历史时，新内容仍把视口拽下去。
+// 这里改成 latch：只有"用户把 scrollTop 往回拉"才脱离跟随，回到底部附近自动恢复。
+const SF_STICKY_PX = 40;
+const sfStick = {
+  el: null,
+  following: true,
+  lastTop: 0,
+  attach(el) {
+    if (!el || this.el === el) return;
+    this.el = el;
+    this.lastTop = el.scrollTop;
+    el.addEventListener("scroll", () => {
+      const top = el.scrollTop;
+      const distance = el.scrollHeight - top - el.clientHeight;
+      if (distance <= SF_STICKY_PX) this.following = true;
+      // 只有往**上**滚（top 变小）才脱离；程序性滚到底会让 top 变大
+      else if (top < this.lastTop - 2) this.following = false;
+      this.lastTop = top;
+    }, { passive: true });
+  },
+  // 内容变化后调用：跟随中就贴底，否则什么都不做
+  follow(force) {
+    const el = this.el || document.getElementById("session");
+    if (!el) return;
+    if (force) this.following = true;
+    if (!this.following) return;
+    el.scrollTop = el.scrollHeight;
+    this.lastTop = el.scrollTop;
+  },
+};
+
 function toast(msg) {
   const el = document.getElementById("toast");
   el.textContent = msg; el.classList.add("show");
   clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove("show"), 2200);
+}
+
+// ---- Markdown -------------------------------------------------------------
+// Agent 的回答天然是 Markdown（`**加粗**`、`- 列表`、代码块），以前只做 esc()
+// 加 white-space:pre-wrap，用户看到的是原样的星号和反引号。
+//
+// 安全前提：**先整体转义，再在纯文本上套标签**。绝不对未转义内容拼 HTML——
+// Agent 输出属于外部输入，直接 innerHTML 等于把提示注入变成 XSS。
+// 只支持 Agent 实际会用到的子集：标题 / 粗体 / 斜体 / 删除线 / 行内码 /
+// 围栏代码块 / 有序无序列表 / 引用 / 表格 / 链接。不追求 CommonMark 完整实现。
+function mdInline(text) {
+  let out = text;
+  // 行内码先占位，避免里面的 * _ [ 被当作语法
+  const codes = [];
+  out = out.replace(/`([^`\n]+)`/g, (_, body) => {
+    codes.push(body);
+    return `\u0000C${codes.length - 1}\u0000`;
+  });
+  // 链接：只放行 http/https/mailto/站内相对路径，javascript: 之类一律降级成文本
+  out = out.replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (match, label, href) => {
+    const url = href.trim();
+    if (!/^(https?:\/\/|mailto:|\/|#)/i.test(url)) return match;
+    return `<a href="${url}" target="_blank" rel="noreferrer noopener">${label}</a>`;
+  });
+  out = out.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  out = out.replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
+  out = out.replace(/\u0000C(\d+)\u0000/g, (_, index) => `<code>${codes[Number(index)]}</code>`);
+  return out;
+}
+
+function mdSplitRow(line) {
+  return line.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map(cell => cell.trim());
+}
+
+function renderMarkdown(source) {
+  const raw = String(source == null ? "" : source).replace(/\r\n?/g, "\n");
+  if (!raw.trim()) return "";
+  const lines = esc(raw).split("\n");
+  const out = [];
+  let index = 0;
+
+  const isFence = (line) => /^\s*```/.test(line);
+  const findFenceEnd = (from) => {
+    for (let i = from + 1; i < lines.length; i += 1) {
+      if (/^\s*```\s*$/.test(lines[i])) return i;
+    }
+    return -1;  // 流式时可能还没闭合
+  };
+  const startsBlock = (line) => {
+    const text = line.trim();
+    return !text || isFence(line)
+      || /^(#{1,6})\s+/.test(text)
+      || /^&gt;\s?/.test(text)
+      || /^[-*+]\s+/.test(text)
+      || /^\d+[.)]\s+/.test(text)
+      || /^(-{3,}|\*{3,}|_{3,})$/.test(text)
+      || (text.includes("|") && /^\|?[\s:|-]+\|[\s:|-]*$/.test(text));
+  };
+
+  while (index < lines.length) {
+    const line = lines[index];
+    const text = line.trim();
+
+    if (!text) { index += 1; continue; }
+
+    if (isFence(line)) {
+      const lang = text.slice(3).trim();
+      const end = findFenceEnd(index);
+      const body = lines.slice(index + 1, end === -1 ? lines.length : end).join("\n");
+      out.push(`<pre class="md-code"${lang ? ` data-lang="${lang}"` : ""}><code>${body}</code></pre>`);
+      index = end === -1 ? lines.length : end + 1;
+      continue;
+    }
+
+    const heading = /^(#{1,6})\s+(.*)$/.exec(text);
+    if (heading) {
+      // 聊天正文里 h1 太大，整体降一级
+      const level = Math.min(6, heading[1].length + 1);
+      out.push(`<h${level}>${mdInline(heading[2])}</h${level}>`);
+      index += 1;
+      continue;
+    }
+
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(text)) { out.push("<hr>"); index += 1; continue; }
+
+    if (/^&gt;\s?/.test(text)) {
+      const quoted = [];
+      while (index < lines.length && /^&gt;\s?/.test(lines[index].trim())) {
+        quoted.push(lines[index].trim().replace(/^&gt;\s?/, ""));
+        index += 1;
+      }
+      out.push(`<blockquote>${mdInline(quoted.join("\n")).replace(/\n/g, "<br>")}</blockquote>`);
+      continue;
+    }
+
+    // 表格：当前行含 | 且下一行是分隔行
+    if (text.includes("|") && index + 1 < lines.length
+        && /^\|?[\s:|-]+\|[\s:|-]*$/.test(lines[index + 1].trim())
+        && lines[index + 1].includes("-")) {
+      const header = mdSplitRow(text);
+      index += 2;
+      const body = [];
+      while (index < lines.length && lines[index].trim().includes("|")) {
+        body.push(mdSplitRow(lines[index].trim()));
+        index += 1;
+      }
+      out.push(`<div class="md-table-wrap"><table class="md-table"><thead><tr>${
+        header.map(cell => `<th>${mdInline(cell)}</th>`).join("")}</tr></thead><tbody>${
+        body.map(row => `<tr>${row.map(cell => `<td>${mdInline(cell)}</td>`).join("")}</tr>`).join("")
+      }</tbody></table></div>`);
+      continue;
+    }
+
+    const bullet = /^[-*+]\s+(.*)$/.exec(text);
+    const numbered = /^\d+[.)]\s+(.*)$/.exec(text);
+    if (bullet || numbered) {
+      const ordered = Boolean(numbered);
+      const items = [];
+      while (index < lines.length) {
+        const current = lines[index].trim();
+        const match = ordered ? /^\d+[.)]\s+(.*)$/.exec(current) : /^[-*+]\s+(.*)$/.exec(current);
+        if (!match) break;
+        items.push(mdInline(match[1]));
+        index += 1;
+      }
+      const tag = ordered ? "ol" : "ul";
+      out.push(`<${tag}>${items.map(item => `<li>${item}</li>`).join("")}</${tag}>`);
+      continue;
+    }
+
+    const paragraph = [text];
+    index += 1;
+    while (index < lines.length && !startsBlock(lines[index])) {
+      paragraph.push(lines[index].trim());
+      index += 1;
+    }
+    out.push(`<p>${mdInline(paragraph.join("\n")).replace(/\n/g, "<br>")}</p>`);
+  }
+  return out.join("");
 }
 async function api(path, opts = {}) {
   const headers = Object.assign({"X-Studio-Token": S.token}, opts.headers || {});
@@ -1385,7 +1666,19 @@ function renderModelPicker() {
   document.getElementById("modelTriggerText").textContent = current || "选择模型";
   trigger.classList.toggle("open", S.modelPickerOpen);
   pop.classList.toggle("hidden", !S.modelPickerOpen);
-  if (!S.modelPickerOpen) return;
+  if (!S.modelPickerOpen) {
+    if (S.modelPopAnchor) { S.modelPopAnchor.destroy(); S.modelPopAnchor = null; }
+    return;
+  }
+  if (!S.modelPopAnchor) {
+    // 先藏起来量尺寸，摆好再显示：同一个 task 内完成，不会闪
+    pop.style.visibility = "hidden";
+    S.modelPopAnchor = sfAnchor(trigger, pop, { maxHeight: 320, minWidth: 300 });
+    S.modelPopAnchor.place();
+    pop.style.visibility = "";
+  } else {
+    S.modelPopAnchor.place();
+  }
   const needle = S.modelFilter.trim().toLowerCase();
   const rows = modelCandidates(S.agent ? S.agent.provider_id : "").filter(item =>
     !needle || item.id.toLowerCase().includes(needle) || item.channel.toLowerCase().includes(needle));
@@ -1460,7 +1753,10 @@ async function selectAgent(agentId) {
     const session = document.getElementById("session");
     if (session) {
       const active = S.run && (S.run.status === "RUNNING" || S.run.status === "QUEUED");
+      // 打开会话：跑着的贴底继续跟，已结束的从顶部读
+      sfStick.following = Boolean(active);
       session.scrollTop = active ? session.scrollHeight : 0;
+      sfStick.lastTop = session.scrollTop;
     }
     if (S.run && (S.run.status === "RUNNING" || S.run.status === "QUEUED")) openStream(S.run.id);
     // 会话列表里高亮当前会话
@@ -3575,9 +3871,6 @@ function patchPlanStep(step) {
 function renderPlanChat() {
   const box = document.getElementById("planChatBody");
   if (!box) return;
-  const scroll = document.getElementById("session");
-  const nearBottom = scroll
-    ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 220 : true;
   if (!S.planSteps.length) {
     box.innerHTML = `<div class="empty"><h2>先聊清楚要做什么</h2>
       <p>描述你的目标；主 Agent 会追问细节。聊清楚后点「生成任务卡」。</p></div>`;
@@ -3589,7 +3882,7 @@ function renderPlanChat() {
       el.id = "plan-" + el.id;
     });
   }
-  if (nearBottom && scroll) scroll.scrollTop = scroll.scrollHeight;
+  sfStick.follow();
 }
 
 function renderPlanCard() {
@@ -3867,12 +4160,9 @@ function patchPanel(roleId) {
   if (S.expandedRole === roleId) {
     const detail = document.getElementById(`panel-detail-${roleId}`);
     if (!detail) { renderRunPanels(); return; }
-    const scroll = document.getElementById("session");
-    const nearBottom = scroll
-      ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 240 : true;
     detail.innerHTML = renderConversation(steps, {status: "RUNNING"});
     bindFolds(detail);
-    if (nearBottom && scroll) scroll.scrollTop = scroll.scrollHeight;
+    sfStick.follow();
     return;
   }
   // 折叠态也要更新步数：只改最近一行会让"0 步"一直挂着（线上看着像没跑）
@@ -4999,16 +5289,10 @@ function renderTimeline(scroll) {
          <p>${esc(S.agent.name)} 已就绪。在下方安排一个任务，执行过程会实时出现在这里。</p></div>`;
     return;
   }
-  const nearBottom = (() => {
-    const s = document.getElementById("session");
-    return s.scrollHeight - s.scrollTop - s.clientHeight < 160;
-  })();
   box.innerHTML = renderConversation(S.steps, S.run);
   bindFolds(box);
-  if (scroll || nearBottom) {
-    const s = document.getElementById("session");
-    s.scrollTop = s.scrollHeight;
-  }
+  // 显式要求滚到底（切换 Agent / 新任务）时强制贴底，否则沿用粘性状态
+  sfStick.follow(Boolean(scroll));
 }
 
 /* 把 step 序列渲染成对话：user 气泡 + assistant 正文 + 折叠的思考/工具/系统 */
@@ -5043,7 +5327,7 @@ function renderConversation(steps, run) {
       html += `<div class="turn" data-msg="${esc(step.id)}">
         <div class="msg-head"><div class="avatar">A</div><div class="who">Assistant</div>
           <div class="meta">${esc(fmtTime(step.created_at))}</div></div>
-        <div class="msg-body ${partial ? "pending" : ""}" id="${id}">${esc(step.detail || "")}</div>
+        <div class="msg-body md ${partial ? "pending" : ""}" id="${id}">${renderMarkdown(step.detail || "")}</div>
       </div>`;
       lastAssistantText = String(step.detail || "").trim();
       continue;
@@ -5081,7 +5365,7 @@ function renderConversation(steps, run) {
       if (text && text !== lastAssistantText) {
         html += `<div class="turn"><div class="msg-head"><div class="avatar">A</div>
           <div class="who">Assistant</div><div class="meta">${esc(fmtTime(step.created_at))}</div></div>
-          <div class="msg-body">${esc(text)}</div></div>`;
+          <div class="msg-body md">${renderMarkdown(text)}</div></div>`;
         lastAssistantText = text;
       }
       continue;
@@ -5140,13 +5424,12 @@ function bindFolds(box) {
 function updateStreamStep(step) {
   const box = document.getElementById("sessionInner");
   if (!box || !step || !step.id) return;
-  const scroll = document.getElementById("session");
-  const nearBottom = scroll
-    ? scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 220 : false;
   let touched = false;
   const body = document.getElementById(`msg-${step.id}`);
   if (body) {
-    body.textContent = step.detail || "";
+    // 流式增量也要过 Markdown：否则中途 `**加粗**` 会露出来。
+    // 服务端按 150ms 节流，实测每帧渲染 6k 字以内的文本没有可感开销。
+    body.innerHTML = renderMarkdown(step.detail || "");
     body.classList.toggle("pending", Boolean((step.payload || {}).partial));
     touched = true;
   }
@@ -5165,7 +5448,7 @@ function updateStreamStep(step) {
     renderTimeline(false);
     return;
   }
-  if (nearBottom && scroll) scroll.scrollTop = scroll.scrollHeight;
+  sfStick.follow();
 }
 
 function renderInspector() {
@@ -5533,6 +5816,8 @@ document.getElementById("previewClose").onclick = () => {
   S.selectedArtifact = null; renderArtifacts();
 };
 
+// 粘性跟随挂到主滚动容器上：一次挂载，之后所有渲染都走 sfStick.follow()
+sfStick.attach(document.getElementById("session"));
 loadAgents().then(() => { if (S.view === "clusterchat") loadViewData("clusterchat"); });
 setInterval(() => { if (S.agent && (!S.stream || S.stream.readyState === 2)) { /* idle refresh */ } }, 5000);
 </script>

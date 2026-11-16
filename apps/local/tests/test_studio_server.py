@@ -378,6 +378,23 @@ class StudioServerTests(unittest.TestCase):
                 subprocess.run([node, "--check", str(script)], check=True,
                                capture_output=True, text=True)
 
+    def test_markdown_renderer(self) -> None:
+        """Markdown 渲染器：语法子集 + XSS 两条线都要过。
+
+        用独立脚本而不是在这里内联，是为了本地能单独跑（`node
+        scripts/deploy/check_markdown.js`），调试时比看 unittest 输出快。
+        """
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        script = (STATIC_DIR.parents[4] / "scripts" / "deploy" / "check_markdown.js")
+        if not script.exists():
+            self.skipTest(f"缺少 {script}")
+        result = subprocess.run([node, str(script)], capture_output=True, text=True,
+                                encoding="utf-8", errors="replace")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 class ReverseProxyTests(unittest.TestCase):
     """反代部署形态：Origin 白名单 + 子路径前缀。
