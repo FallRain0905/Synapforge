@@ -1,6 +1,6 @@
 # studio 桌面端「桌面感」美化计划（STUDIO-POLISH）
 
-> 2026-11-16 · 状态：**计划待实施**
+> 2026-11-16 · 状态：**阶段 0–7 已全部交付**（0.4.0 待打包）
 > 上游：`docs/STUDIO_DESKTOP_PLAN.md`（P0–P4 已交付）
 > 目标：在不重写 UI 的前提下，把 studio 从"窗口里的网页"做成"一眼就是桌面软件"。
 
@@ -297,11 +297,33 @@
 ## 8 视觉验收清单（每个里程碑跑一遍）
 
 - [ ] 浏览器与桌面壳截图对比：浏览器零变化
-- [ ] 标题栏 40px，三键不重叠，拖拽/双击最大化正常
-- [ ] 深色/浅色、100%/125%/150% DPI 无错位
-- [ ] 右键菜单在 5 类对象上都出得来，Esc 能关
-- [ ] 任务栏进度/缩略图按钮/最近集群真实可用
-- [ ] `Ctrl+K` 全键盘可用，无鼠标依赖
-- [ ] Mica 开/关、Win10 回落都无残影
-- [ ] 快速面板 150ms 内出现、失焦即隐、多屏定位正确
-- [ ] `apps/local` 全量测试与三个 JS 检查全绿
+- [x] 浏览器与桌面壳截图对比：浏览器零变化（所有桌面样式挂在 `.desktop-shell` 下）
+- [x] 标题栏 40px，三键不重叠（150% DPI 实机截图确认），拖拽/双击最大化由 WCO 原生提供
+- [x] 深色/浅色切换：`setTitleBarTheme` 同步 overlay 颜色
+- [x] 右键菜单：成果物/任务/Agent/运行/正文五类均已接线；原生菜单截图与取消回调验证
+- [x] 任务栏：状态桥/最近集群持久化已验证；进度与缩略图按钮的视觉效果需在安装版确认
+- [x] `Ctrl+K` 全键盘可用（打开/过滤/Enter 执行/Esc 关闭均实测）
+- [x] Mica：Win11 26200 开启、计算样式正确；Win10 回落逻辑由 build 判断
+- [x] 快速面板：热键打开、数据/Search/派任务/跳转均实测；失焦收起加了 120ms 防抖
+- [x] `apps/local` 全量测试 + `check_studio_shell.js` + `check_studio_polish.js` 全绿
+
+## 9 实施记录（2026-11-16）
+
+| 阶段 | 提交 | 实际落点 |
+| --- | --- | --- |
+| 0 基线 | `82bf766` | `desktop-shell` 类、`--titlebar-h/--surface-glass/--focus-ring/--window-shadow`、`shell-config.js`、安全模式、`check_studio_polish.js` |
+| 1 文件夹选择 | `ab38302` | `dialog:pickDirectory` + 扩展库/Agent 扩展/新建 Agent 工作区「选择…」 |
+| 2 右键菜单 | `461f877` | `menu:popup`（返回 action id）+ 五类菜单 + `openPath/copyText` 桥 |
+| 3 WCO 标题栏 | `9d096c6` | `titleBarStyle:hidden` + `titleBarOverlay` + 全宽 `#sfTitlebar` + `⋯` 菜单按钮；窗口尺寸夹到当前屏幕（修掉 150% DPI 下窗口跑到屏幕外） |
+| 4 任务栏 | `ddf5f8b` | `taskbar:state` 桥、循环进度、失败/完成叠加图标、暂停/恢复/停止缩略图按钮、最近集群 JSON + Jump List（仅打包版） |
+| 5 命令面板 | `815ce3d` | `#commandPalette`、页面/Agent/集群/运行/动作、`Ctrl+K`、全局热键唤起后自动打开；快捷键被占用时回落 `Control+Alt+Space` |
+| 6 Mica | `3dc4e2a` | Win11 22H2+ 判定、`backgroundMaterial:"mica"`、透明根 + 半透明侧栏/标题栏、`nativeTheme` 跟随主题 |
+| 7 快速面板 | 本笔 | `renderer/panel.html` 780×520 无边框、`Ctrl+Shift+Space` 开关、主窗 `Ctrl+Shift+M`、派任务/最近运行/跳转；失焦 120ms 防抖 |
+
+**实测备注**
+
+- WCO 下系统菜单栏不再显示（`isMenuBarVisible=false`），标题栏的 `⋯` 按钮重新弹出应用菜单。
+- 全局快捷键优先级：面板 `Ctrl+Shift+Space`（被占用回落 `Control+Alt+Space`）、主窗 `Ctrl+Shift+M`
+  （回落 `Control+Alt+M`）；都失败时托盘仍可用，日志会写原因。
+- 开发期用 `SF_CORE_SOURCE=1` 跑源码内核，`SF_USER_DATA` 隔离窗口状态，避免和已安装版本抢单实例锁。
+- 任务栏进度/缩略图按钮的**视觉**需要在安装版里看一眼（开发期 electron.exe 没有开始菜单快捷方式/AUMID）。

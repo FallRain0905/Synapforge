@@ -57,11 +57,13 @@ function shellUrl(info) {
 const ASSETS = path.join(__dirname, "..", "assets");
 const ERROR_PAGE = path.join(__dirname, "..", "renderer", "error.html");
 const DIAG_PAGE = path.join(__dirname, "..", "renderer", "diagnostics.html");
+const PANEL_PAGE = path.join(__dirname, "..", "renderer", "panel.html");
 
 let core = null;
 let win = null;
 let tray = null;
 let diagWin = null;
+let panelWin = null;
 let appMenu = null;
 let quitting = false;
 let lastStatus = "idle";
@@ -431,9 +433,114 @@ function openDiagnostics() {
   void diagWin.loadFile(DIAG_PAGE);
 }
 
+async function coreGet(apiPath) {
+  const info = core && core.info;
+  if (!info) return null;
+  try {
+    const response = await fetch(`http://127.0.0.1:${info.port}${apiPath}`, {
+      headers: { "X-Studio-Token": info.token },
+      signal: AbortSignal.timeout(4000),
+    });
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+function positionPanel() {
+  if (!panelWin || panelWin.isDestroyed()) return;
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const area = display.workArea;
+  const [width] = panelWin.getSize();
+  panelWin.setPosition(
+    Math.round(area.x + (area.width - width) / 2),
+    Math.round(area.y + 80),
+  );
+}
+
+function openPanel() {
+  if (panelWin && !panelWin.isDestroyed()) {
+    positionPanel();
+    panelWin.show();
+    panelWin.focus();
+    return;
+  }
+  panelWin = new BrowserWindow({
+    width: 780,
+    height: 520,
+    show: false,
+    frame: false,
+    resizable: false,
+    movable: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    transparent: true,
+    hasShadow: true,
+    backgroundColor: "#00000000",
+    title: "synapforge studio · 快速面板",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+    },
+  });
+  panelWin.setAlwaysOnTop(true, "floating");
+  panelWin.on("blur", () => {
+    // 刚 show 出来时可能先收到一次瞬时 blur，120ms 后确认真的失焦再收起。
+    setTimeout(() => {
+      if (panelWin && !panelWin.isDestroyed() && !panelWin.isFocused()) panelWin.hide();
+    }, 120);
+  });
+  panelWin.on("closed", () => {
+    panelWin = null;
+  });
+  panelWin.once("ready-to-show", () => {
+    positionPanel();
+    panelWin.show();
+    panelWin.focus();
+  });
+  void panelWin.loadFile(PANEL_PAGE);
+}
+
+function togglePanel() {
+  if (panelWin && !panelWin.isDestroyed() && panelWin.isVisible()) {
+    panelWin.hide();
+    return;
+  }
+  openPanel();
+}
+
 const GLOBAL_SHORTCUT = process.env.SF_GLOBAL_SHORTCUT || "CommandOrControl+Shift+Space";
+const PANEL_SHORTCUT = process.env.SF_PANEL_SHORTCUT || "CommandOrControl+Shift+Space";
+const MAIN_SHORTCUT = process.env.SF_MAIN_SHORTCUT || "CommandOrControl+Shift+M";
+
+/** 主快捷键可能被别的应用（包括另一个 synapforge）占着：依次试回落键。 */
+function registerWithFallback(primary, fallbacks, handler) {
+  for (const accelerator of [primary, ...fallbacks]) {
+    try {
+      if (globalShortcut.register(accelerator, handler)) {
+        if (accelerator !== primary) {
+          console.log(`[shortcut] ${primary} 被占用，改用 ${accelerator}`);
+        }
+        return accelerator;
+      }
+    } catch (error) {
+      console.log(`[shortcut] ${accelerator} 注册失败`, String(error));
+    }
+  }
+  console.log(`[shortcut] ${primary} 与回落键都注册失败`);
+  return "";
+}
 
 function registerGlobalShortcut() {
+  if (SHELL_CONFIG.quickPanel) {
+    registerWithFallback(PANEL_SHORTCUT, ["Control+Alt+Space"], togglePanel);
+    registerWithFallback(MAIN_SHORTCUT, ["Control+Alt+M"], showWindow);
+    return;
+  }
   const openPalette = () => {
     showWindow();
     if (!win || win.isDestroyed()) return;
@@ -442,20 +549,7 @@ function registerGlobalShortcut() {
       /* 页面还没加载好时忽略 */
     });
   };
-  // 主快捷键可能被别的应用（包括另一个 synapforge）占着：退到一个不常用的组合。
-  for (const accelerator of [GLOBAL_SHORTCUT, "Control+Alt+Space"]) {
-    try {
-      if (globalShortcut.register(accelerator, openPalette)) {
-        if (accelerator !== GLOBAL_SHORTCUT) {
-          console.log(`[shortcut] ${GLOBAL_SHORTCUT} 被占用，改用 ${accelerator}`);
-        }
-        return;
-      }
-    } catch (error) {
-      console.log(`[shortcut] ${accelerator} 注册失败`, String(error));
-    }
-  }
-  console.log("[shortcut] 全局快捷键都注册失败（托盘/标题栏仍可用）");
+  registerWithFallback(GLOBAL_SHORTCUT, ["Control+Alt+Space"], openPalette);
 }
 
 function isHttp(url) {
@@ -835,6 +929,51 @@ function registerIpc() {
   ipcMain.handle("app:openDataDir", () => openDataDir());
   ipcMain.handle("app:diagnostics", () => openDiagnostics());
   ipcMain.handle("app:checkUpdate", () => promptUpdate(win));
+
+  ipcMain.handle("panel:hide", () => {
+    if (panelWin && !panelWin.isDestroyed()) panelWin.hide();
+    return true;
+  });
+
+  ipcMain.handle("panel:bootstrap", async () => {
+    const [agents, state, runs] = await Promise.all([
+      coreGet("/api/studio/agents"),
+      coreGet("/api/studio/state"),
+      coreGet("/api/studio/runs"),
+    ]);
+    return {
+      ok: Boolean(agents && agents.ok),
+      agents: (agents && agents.agents) || [],
+      clusters: (state && state.clusters) || [],
+      runs: ((runs && runs.runs) || []).slice(0, 6),
+    };
+  });
+
+  ipcMain.handle("panel:task", async (_event, payload = {}) => {
+    const info = core && core.info;
+    const agentId = String(payload.agentId || "");
+    const text = String(payload.text || "").trim();
+    if (!info || !agentId || !text) return { ok: false, error: "参数不完整" };
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${info.port}/api/studio/agents/${encodeURIComponent(agentId)}/tasks`, {
+          method: "POST",
+          headers: { "X-Studio-Token": info.token, "Content-Type": "application/json" },
+          body: JSON.stringify({ task: text }),
+          signal: AbortSignal.timeout(6000),
+        });
+      const body = await response.json().catch(() => ({}));
+      return { ok: response.ok, run: body.run || null, error: body.code || "" };
+    } catch (error) {
+      return { ok: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle("panel:open", (_event, target) => {
+    if (panelWin && !panelWin.isDestroyed()) panelWin.hide();
+    void openTarget(target);
+    return true;
+  });
   ipcMain.handle("app:quit", () => app.quit());
   ipcMain.handle("log:tail", () => core.tailLog());
 }

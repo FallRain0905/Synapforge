@@ -80,10 +80,28 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ..\..\scripts\build-studio-d
 - **拖拽**：文件拖进窗口 → 绝对路径插入当前对话（含空格的路径自动加引号），
   走 Electron 32+ 的 `webUtils.getPathForFile`（`File.path` 已被移除）
 
-### P4 部分（已验收）
+### 桌面感阶段 0–7（已验收）
 
-- **全局快捷键**：`Ctrl+Shift+Space` 唤起/收起主窗（已聚焦再按时收起）
-- **诊断页**：托盘或「帮助 → 诊断信息…」；展示壳/内核版本、端口、PID、数据目录、日志尾部，
-  可重启内核；每 2s 自动刷新
-- 未做：Win11 Mica/自绘标题栏（需要整页透明化，风险大于收益）、独立快速面板（当前快捷键
-  直接唤起主窗）
+- **WCO 标题栏**：系统标题栏隐藏，网页画品牌 / 面包屑 / 运行状态 / `⋯` 菜单；
+  最小化、最大化、关闭仍是原生按钮（Snap Layouts 保留）
+- **Mica**：Win11 22H2+ 侧栏和标题栏半透明；Win10 自动回落纯色
+- **右键菜单**：成果物 / 任务 / Agent / 运行 / 对话正文
+- **原生文件夹选择器**：扩展库、Agent 扩展、新建 Agent 工作区
+- **任务栏**：运行中循环进度、失败/完成叠加图标、缩略图按钮（暂停/恢复/停止/打开）
+- **`Ctrl+K` 命令面板**：页面 / Agent / 集群 / 最近运行 / 动作，全键盘操作
+- **快速面板**：`Ctrl+Shift+Space` 屏幕顶部居中弹出（派任务、最近运行）；主窗 `Ctrl+Shift+M`
+- **回退**：`userData/shell.json` 四个开关，或 `SF_SHELL_SAFE=1`
+- **诊断页**：托盘或「帮助 → 诊断信息…」；壳/内核版本、端口、PID、日志尾部、重启内核
+
+快捷键被其他应用占用时会自动回落到 `Ctrl+Alt+Space` / `Ctrl+Alt+M`，日志里有记录。
+
+开发调试：
+
+```powershell
+# 改 UI 时用源码内核（静态文件即时生效，不用重打内核）
+$env:SF_CORE_SOURCE = "1"
+# 隔离窗口状态/单实例锁，避免和已安装版本打架
+$env:SF_USER_DATA = "$env:TEMP\sf-shell-dev"
+$env:SYNAPFORGE_STATE_DIR = "$env:TEMP\sf-shell-dev\state"
+npm start
+```

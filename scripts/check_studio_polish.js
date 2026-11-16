@@ -36,6 +36,10 @@ check("窗口阴影令牌", HTML.includes("--window-shadow"));
 check("命令面板挂载点", HTML.includes('id="commandPalette"') && HTML.includes('id="cmdkInput"'));
 check("命令面板入口", HTML.includes("window.sfCommandPalette"));
 check("WCO 标题栏挂载点", HTML.includes('id="sfTitlebar"'));
+check("任务栏状态同步", HTML.includes("function syncTaskbar") && HTML.includes("taskbarState(payload)"));
+const panel = fs.readFileSync(
+  path.join(ROOT, "apps", "studio-desktop", "renderer", "panel.html"), "utf8");
+check("快速面板页面", panel.includes('id="panelAgent"') && panel.includes("panelTask"));
 
 // ---- shell.json 开关 ----
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sf-shell-"));

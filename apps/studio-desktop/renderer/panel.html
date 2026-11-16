@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>synapforge studio · 快速面板</title>
+<style>
+  :root {
+    --bg: #1b1c20; --card: #232428; --line: #34363c; --fg: #ececf1; --fg-2: #b8b9c2;
+    --muted: #8b8c96; --accent: #a5b4fc; --accent-soft: #2b2c47; --green: #6fd99b; --red: #f28b82;
+    --font: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: transparent; color: var(--fg);
+    font: 13px/1.5 var(--font); overflow: hidden; }
+  .panel { height: 100vh; display: flex; flex-direction: column; background: var(--bg);
+    border: 1px solid var(--line); border-radius: 14px; overflow: hidden;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, .55); }
+  .panel-head { flex: none; height: 38px; display: flex; align-items: center; gap: 8px;
+    padding: 0 12px; border-bottom: 1px solid var(--line); -webkit-app-region: drag; }
+  .logo { width: 18px; height: 18px; border-radius: 5px; display: grid; place-items: center;
+    background: var(--accent-soft); color: var(--accent); font-size: 10px; font-weight: 700; }
+  .head-title { font-size: 11.5px; color: var(--muted); }
+  .head-close { margin-left: auto; width: 24px; height: 22px; border: 0; border-radius: 6px;
+    background: transparent; color: var(--muted); cursor: pointer; -webkit-app-region: no-drag; }
+  .head-close:hover { background: var(--card); color: var(--fg); }
+  .search { flex: none; padding: 10px 12px 6px; }
+  .search input, .task-row input, .task-row select {
+    width: 100%; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
+    background: var(--card); color: var(--fg); font: inherit; outline: none;
+  }
+  .search input:focus, .task-row input:focus { border-color: var(--accent); }
+  .task-row { flex: none; display: flex; gap: 8px; padding: 6px 12px 10px; }
+  .task-row select { width: 150px; flex: none; }
+  .task-row input { flex: 1; }
+  .list { flex: 1; min-height: 0; overflow: auto; padding: 2px 8px 8px; }
+  .sec { padding: 6px 6px 4px; color: var(--muted); font-size: 10.5px; }
+  .row, .res { display: flex; align-items: center; gap: 8px; padding: 7px 9px;
+    border-radius: 8px; cursor: pointer; }
+  .row:hover, .res:hover, .res.on { background: var(--accent-soft); }
+  .row .t, .res .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; font-size: 12.5px; }
+  .row .h, .res .h { color: var(--muted); font-size: 10.5px; }
+  .row .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex: none; }
+  .empty { color: var(--muted); font-size: 11.5px; padding: 10px; }
+  .panel-foot { flex: none; display: flex; gap: 12px; padding: 7px 12px;
+    border-top: 1px solid var(--line); color: var(--muted); font-size: 10.5px; }
+  .flash { color: var(--green); }
+  .flash.bad { color: var(--red); }
+</style>
+</head>
+<body>
+<div class="panel">
+  <div class="panel-head">
+    <span class="logo">S</span>
+    <span class="head-title">synapforge studio · 快速面板</span>
+    <button class="head-close" id="panelClose" title="关闭（Esc）">✕</button>
+  </div>
+
+  <div class="search">
+    <input id="panelSearch" placeholder="搜 Agent / 集群 / 页面，Enter 打开…" autocomplete="off">
+  </div>
+
+  <div class="task-row">
+    <select id="panelAgent" title="派给哪个 Agent"></select>
+    <input id="panelTask" placeholder="给当前 Agent 派一条任务，Enter 发送…" autocomplete="off">
+  </div>
+
+  <div class="list" id="panelList"></div>
+
+  <div class="panel-foot">
+    <span>↑↓ 选择</span><span>Enter 打开/发送</span><span>Esc 收起</span>
+    <span class="flash" id="panelFlash" style="margin-left:auto"></span>
+  </div>
+</div>
+
+<script>
+  const bridge = window.synapforgeStudio;
+  const $ = (id) => document.getElementById(id);
+  let data = { agents: [], clusters: [], runs: [] };
+  let items = [];
+  let index = 0;
+  let flashTimer = null;
+
+  function esc(value) {
+    return String(value == null ? "" : value).replace(/[&<>"']/g, (ch) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[ch]);
+  }
+
+  function recentItems() {
+    const rows = [];
+    for (const cluster of (data.clusters || []).slice(0, 3)) {
+      rows.push({ label: cluster.name || "集群", hint: "集群", target: { cluster: cluster.id } });
+    }
+    for (const run of (data.runs || []).slice(0, 5)) {
+      rows.push({
+        label: String(run.task_text || run.id || "").slice(0, 60),
+        hint: `运行 · ${run.status || ""}`,
+        target: { run: run.id },
+      });
+    }
+    return rows;
+  }
+
+  function searchItems(query) {
+    const needle = String(query || "").trim().toLowerCase();
+    const views = [
+      ["clusterchat", "集群工作"], ["clustertasks", "集群任务"], ["clusteragents", "集群 Agent"],
+      ["workbench", "Agent 工作台"], ["runs", "运行记录"], ["artifacts", "交付"],
+      ["library", "扩展库"], ["settings", "设置"],
+    ];
+    const rows = views.map(([view, label]) => ({ label, hint: "页面", target: { view } }));
+    for (const agent of data.agents || []) {
+      rows.push({ label: agent.name, hint: "Agent · 选中后派任务", agent: agent.id });
+    }
+    for (const cluster of data.clusters || []) {
+      rows.push({ label: cluster.name || "集群", hint: "集群", target: { cluster: cluster.id } });
+    }
+    return rows
+      .filter((item) => !needle || `${item.label} ${item.hint}`.toLowerCase().includes(needle))
+      .slice(0, 9);
+  }
+
+  function render(query) {
+    const fromSearch = Boolean(String(query || "").trim());
+    items = fromSearch ? searchItems(query) : recentItems();
+    index = 0;
+    const list = $("panelList");
+    const head = fromSearch ? "" : `<div class="sec">最近运行 / 集群</div>`;
+    list.innerHTML = head + (items.length
+      ? items.map((item, i) => `<div class="res ${i === 0 ? "on" : ""}" data-item="${i}">
+          <span class="t">${esc(item.label)}</span>
+          <span class="h">${esc(item.hint)}</span>
+        </div>`).join("")
+      : `<div class="empty">没有匹配项</div>`);
+    list.querySelectorAll("[data-item]").forEach((el) => {
+      el.onclick = () => choose(Number(el.dataset.item));
+      el.onmouseenter = () => select(Number(el.dataset.item));
+    });
+  }
+
+  function select(next) {
+    if (!items.length) return;
+    index = Math.max(0, Math.min(next, items.length - 1));
+    $("panelList").querySelectorAll("[data-item]").forEach((el) => {
+      el.classList.toggle("on", Number(el.dataset.item) === index);
+    });
+  }
+
+  function choose(i) {
+    const item = items[i];
+    if (!item) return;
+    if (item.agent) {
+      $("panelAgent").value = item.agent;
+      $("panelTask").focus();
+      flash("已选中该 Agent，输入任务后 Enter");
+      return;
+    }
+    if (item.target) void bridge.panelOpen(item.target);
+  }
+
+  function flash(text, bad) {
+    const el = $("panelFlash");
+    el.textContent = text || "";
+    el.classList.toggle("bad", Boolean(bad));
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => { el.textContent = ""; }, 2600);
+  }
+
+  async function boot() {
+    try {
+      data = (await bridge.panelBootstrap()) || data;
+    } catch (error) {
+      flash("读取失败：" + (error.message || error), true);
+    }
+    const selectEl = $("panelAgent");
+    selectEl.innerHTML = (data.agents || []).length
+      ? data.agents.map((agent) => `<option value="${esc(agent.id)}">${esc(agent.name)}</option>`).join("")
+      : `<option value="">（没有 Agent）</option>`;
+    render("");
+    $("panelSearch").focus();
+  }
+
+  $("panelSearch").addEventListener("input", (event) => render(event.target.value));
+  $("panelSearch").addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") { event.preventDefault(); select(index + 1); }
+    else if (event.key === "ArrowUp") { event.preventDefault(); select(index - 1); }
+    else if (event.key === "Enter") { event.preventDefault(); choose(index); }
+  });
+
+  $("panelTask").addEventListener("keydown", async (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    const agentId = $("panelAgent").value;
+    const text = $("panelTask").value.trim();
+    if (!agentId) { flash("先选一个 Agent", true); return; }
+    if (!text) return;
+    $("panelTask").disabled = true;
+    try {
+      const result = await bridge.panelTask({ agentId, text });
+      if (result && result.ok) {
+        $("panelTask").value = "";
+        flash("已下发");
+        setTimeout(() => { void bridge.panelHide(); }, 500);
+      } else {
+        flash(`下发失败：${(result && result.error) || "未知错误"}`, true);
+      }
+    } finally {
+      $("panelTask").disabled = false;
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      void bridge.panelHide();
+    }
+  });
+  $("panelClose").onclick = () => void bridge.panelHide();
+
+  void boot();
+</script>
+</body>
+</html>
