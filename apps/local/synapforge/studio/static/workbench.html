@@ -630,10 +630,26 @@ main { min-width:0; display:flex; flex-direction:column; min-height:0; backgroun
 .ubar i.red { background:var(--red); }
 
 /* 集群工作：三阶段 */
-.plan-chat { display:flex; flex-direction:column; gap:10px; }
+.plan-chat { display:flex; flex-direction:column; gap:10px; flex:1; min-height:0; }
 .plan-chat-body { min-height:300px; }
 .plan-composer { background:var(--card); border:1px solid var(--line); border-radius:12px;
-  padding:9px 10px 8px 13px; }
+  padding:9px 10px 8px 13px; flex:none; }
+
+/* 集群工作·对话阶段要撑满可视高度，输入框贴底：内容一短，整列就结束在
+   .plan-chat-body 的 300px 处，大屏下方留一大片空白。
+   用 `flex:1 0 auto`（能长高、不收缩）而不是 `flex:1` + `min-height:0`：
+   后者会把超长对话压出容器、盖住输入框。这样内容短时撑满、长时自然增长，
+   由 .session 统一滚动，sfStick 的跟随逻辑继续有效。 */
+.session:has(#clusterChatBody.fill) { display:flex; flex-direction:column; }
+.session:has(#clusterChatBody.fill) > .session-inner {
+  /* min-height 而不是 flex:1：让内容可以超过一屏（flex:1 会把高度锁死）。
+     width:100% 不能省——flex 交叉轴上 `margin:0 auto` 会取消 stretch，
+     内容就按 fit-content 收缩居中（1900 屏上只占 1046px）。 */
+  min-height:100%; width:100%; display:flex; flex-direction:column; }
+.view-wrap.fill { flex:1 0 auto; }
+#clusterChatBody.fill { flex:1 0 auto; display:flex; flex-direction:column; }
+#clusterChatBody.fill > .plan-chat { flex:1 0 auto; }
+#clusterChatBody.fill .plan-chat-body { flex:1 0 auto; }
 .plan-composer textarea { width:100%; min-height:52px; max-height:160px; resize:vertical;
   border:0; outline:none; background:transparent; font-size:13px; line-height:1.5;
   color:var(--fg); }
@@ -4246,13 +4262,15 @@ function renderClusterChatView(box) {
     </div>`;
   }
 
-  box.innerHTML = `<div class="view-wrap">
+  // 对话阶段要撑满高度（输入框贴底）；任务卡/执行阶段内容自然高度，不抢空间
+  const fillClass = phase === "chat" ? " fill" : "";
+  box.innerHTML = `<div class="view-wrap${fillClass}">
     <div class="view-head"><div>
       <h2>${esc(plan.title || "集群工作")}</h2>
       <p>${esc(plan.objective || "和主 Agent 聊清任务 → 确认任务卡 → 多执行体并排执行")}</p>
     </div><div class="view-actions">${actions}</div></div>
     ${phaseTabs}
-    <div id="clusterChatBody">${body}</div>
+    <div id="clusterChatBody" class="${fillClass.trim()}">${body}</div>
   </div>`;
 
   bindClusterChat(box, phase);
